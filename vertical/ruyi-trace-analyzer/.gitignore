@@ -1,0 +1,11 @@
+# Release artefacts (uploaded to GitHub Releases, not the repo)
+RuyiTrace.zip
+*.zip
+
+# Logs
+log/
+*.ndjson
+
+# OS
+Thumbs.db
+.DS_Store

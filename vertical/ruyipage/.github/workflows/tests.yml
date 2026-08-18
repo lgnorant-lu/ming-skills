@@ -1,0 +1,74 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  baseline:
+    name: ${{ matrix.os }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package and test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-test.txt
+
+      - name: Run fast tests
+        run: python -m pytest -m fast -q
+
+      - name: Install managed Firefox 155
+        shell: powershell
+        run: |
+          $installRoot = Join-Path $env:RUNNER_TEMP "ruyipage-browsers"
+          $installJson = python -m ruyipage install --install-dir "$installRoot" --json
+          if ($LASTEXITCODE -ne 0) {
+            throw "Managed Firefox install failed with exit code $LASTEXITCODE"
+          }
+
+          $runtime = $installJson | ConvertFrom-Json
+          if ($runtime.version -ne "155.0a1") {
+            throw "Expected Firefox 155.0a1, got $($runtime.version)"
+          }
+          if ($runtime.release -ne "v1.2.58") {
+            throw "Expected runtime release v1.2.58, got $($runtime.release)"
+          }
+          if ($runtime.asset -ne "firefox-155.0a1.en-US.win64-20260803.zip") {
+            throw "Unexpected Firefox asset: $($runtime.asset)"
+          }
+          if (-not (Test-Path -LiteralPath $runtime.executable_path -PathType Leaf)) {
+            throw "Managed Firefox executable not found: $($runtime.executable_path)"
+          }
+
+          "RUYIPAGE_TEST_FIREFOX_PATH=$($runtime.executable_path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run smoke tests
+        run: python -m pytest tests/smoke -m browser -q
+
+      - name: Run feature tests
+        run: python -m pytest tests/features -m browser -q
+
+      - name: Run async browser smoke tests
+        run: python -m pytest tests/async_smoke/test_async_smoke.py -m browser -q
+
+      - name: Run integration tests
+        run: python -m pytest tests/integration -m browser -q
+
+      - name: Run release gate
+        run: python -m pytest tests/release -m browser -q
