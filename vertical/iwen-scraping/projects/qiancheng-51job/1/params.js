@@ -1,0 +1,28 @@
+// 自动生成的参数对象
+export const searchParams = {
+  "api_key": "51job",
+  "timestamp": "1751534736",
+  "keyword": "爬虫",
+  "searchType": "2",
+  "function": "",
+  "industry": "",
+  "jobArea": "000000",
+  "jobArea2": "",
+  "landmark": "",
+  "metro": "",
+  "salary": "",
+  "workYear": "",
+  "degree": "",
+  "companyType": "",
+  "companySize": "",
+  "jobType": "",
+  "issueDate": "",
+  "sortType": "0",
+  "pageNum": "4",
+  "requestId": "",
+  "pageSize": "20",
+  "source": "1",
+  "accountId": "",
+  "pageCode": "sou|sou|soulb",
+  "scene": "7"
+};
