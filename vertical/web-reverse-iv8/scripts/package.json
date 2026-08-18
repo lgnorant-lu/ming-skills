@@ -1,0 +1,11 @@
+{
+  "scripts": {
+    "check": "node scripts/deobfuscate.js --self-check"
+  },
+  "devDependencies": {
+    "@babel/generator": "^7.29.1",
+    "@babel/parser": "^7.29.2",
+    "@babel/traverse": "^7.29.0",
+    "@babel/types": "^7.29.0"
+  }
+}

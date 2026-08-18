@@ -1,0 +1,135 @@
+# schema-rules.yaml — schema_validator.py 规则可读化描述
+# v9.5 新增:把 schema_validator.py 内部规则抽成 YAML 描述,Agent 调试时直接读此文件,不用反编译源码。
+#
+# 用途:
+#   - Agent 调试 BLOCK 时,Read 此文件快速定位规则
+#   - schema_validator.py 是真相源(执行用),本文件是描述(阅读用)
+#   - 修改规则时,先改 schema_validator.py,再同步本文件
+#
+# 维护原则:每条 schema_validator.py 的校验函数,在此文件有对应描述块
+
+# ============================================================
+# stage1 校验规则
+# ============================================================
+stage1:
+  description: "阶段一 manifest 校验(参数溯源 + 环境指纹)"
+  top_level_keys:
+    required: [schema_version, target, evidence, param_trace, wasm, fingerprint]
+  target:
+    - rule: "target.parameter 必须非空且非占位符"
+      rule_source: "schema_validator.py:_check_target L205"
+    - rule: "target.url 必须非空"
+      rule_source: "schema_validator.py:_check_target L205"
+  fingerprint:
+    - rule: "fingerprint.trace_source 必须是 'trace' / 'none' 之一(v9.32)"
+      rule_source: "schema_validator.py:_check_fingerprint"
+    - rule: "fingerprint.file_fingerprints[].file 必须非空(v9.32)"
+      rule_source: "schema_validator.py:_check_fingerprint"
+    - rule: "trace_source='none' 时 file_fingerprints 必须为空数组"
+      rule_source: "schema_validator.py:_check_fingerprint"
+
+# ============================================================
+# stage2 校验规则
+# ============================================================
+stage2:
+  description: "阶段二 manifest 校验(加密点位 + 变换台账 + 载体清晰度初判)"
+  top_level_keys:
+    required: [schema_version, decision, encryption_points, transform_ledger, carrier_clarity_initial, boundaries]
+  decision:
+    - rule: "decision.shell.kind 必须是 SHELL_KINDS 之一(none/ob/eval-function/mixed/unknown)"
+      rule_source: "schema_validator.py:_check_decision L304"
+  encryption_points:
+    - rule: "encryption_points[].line 必须是非负整数(v9.31)"
+      rule_source: "schema_validator.py:_check_encryption_points"
+    - rule: "encryption_points[].col 必须是非负整数"
+      rule_source: "schema_validator.py:_check_encryption_points"
+  transform_ledger:
+    - rule: "transform_ledger[].step/invariants/evidence/carrier_observation/clarity 4 字段非空"
+      rule_source: "schema_validator.py:_check_transform_ledger"
+  carrier_clarity_initial:
+    - rule: "必须是 CLARITY_KINDS 之一(clear/partial/unclear)"
+      rule_source: "schema_validator.py:_check_decision L304"
+
+# ============================================================
+# stage3 校验规则
+# ============================================================
+stage3:
+  description: "阶段三 manifest 校验(载体形态判定 + 分支选择)"
+  top_level_keys:
+    required: [schema_version, decision, carrier_clarity_final, branch, branch_reason, webpack_features, iife_closure]
+  decision:
+    - rule: "decision.carrier.kind 必须是 CARRIER_KINDS 之一(native-js/webpack/worker/wasm/jsvmp/mixed/unknown)"
+      rule_source: "schema_validator.py:_check_decision L304"
+  branch:
+    - rule: "branch 必须是 BRANCH_KINDS 之一(A/B/C/D/runtime)"
+      rule_source: "schema_validator.py:_check_decision L304"
+    - rule: "carrier=unknown 时 branch 必须='runtime'(否则 BLOCK)"
+      rule_source: "schema_validator.py:_check_decision"
+  webpack_features:
+    - rule: "carrier=webpack 时 webpack_features 必须是对象(非 null)"
+      rule_source: "schema_validator.py:_check_webpack_features"
+    - rule: "W1/W2/W3 每项含 hit(bool) + evidence(str)"
+      rule_source: "schema_validator.py:_check_webpack_features"
+
+# ============================================================
+# stage5 校验规则(阶段四交付前)
+# ============================================================
+stage5:
+  description: "阶段四交付前 manifest 校验(风险控制 + 验证 + 交付物 + 不确定性)"
+  top_level_keys:
+    required: [schema_version, decision, risk_controls, validation, deliverables, uncertainties]
+  decision:
+    - rule: "decision.implementation.kind 必须是 IMPLEMENTATION_KINDS 之一(static-rewrite/iv8/blocked)"
+      rule_source: "schema_validator.py:_check_decision L304"
+  risk_controls:
+    - rule: "execution.network 必须是 NETWORK_MODES 之一(not-executed/disabled/allowlisted)"
+      rule_source: "schema_validator.py:_check_risk_controls L476"
+    - rule: "iv8.same_failure_limit 必须=3(强制止损)"
+      rule_source: "schema_validator.py:_check_risk_controls L527"
+    - rule: "implementation=iv8 时 execution.ran_untrusted_code 必须=true(untrusted 控制件)"
+      rule_source: "schema_validator.py:_check_risk_controls"
+    - rule: "iv8.attempts>=8 时 status 必须=blocked(强制止损)"
+      rule_source: "schema_validator.py:_check_risk_controls"
+  validation:
+    - rule: "status 必须是 VALIDATION_STATUSES 之一(verified/provisional/blocked)"
+      rule_source: "schema_validator.py:_check_validation L543"
+    - rule: "method 必须是 VALIDATION_METHODS 之一(exact/invariants-semantic/not-run)"
+      rule_source: "schema_validator.py:_check_validation L543"
+    - rule: "interface_type 必须是 INTERFACE_TYPES 之一(stateless-login/session-bound-captcha/async-callback)"
+      rule_source: "schema_validator.py:_check_validation L543"
+    - rule: "verified 状态需要 >=2 个 capture 样本"
+      rule_source: "schema_validator.py:_check_validation L585"
+    - rule: "verified 状态时所有 capture 的 exact_match 必须=true(假 PASS 防护)"
+      rule_source: "schema_validator.py:_check_validation L590"
+    - rule: "verified 但 sample.result 含失败关键词 → BLOCK(交叉一致性)"
+      rule_source: "schema_validator.py:_check_validation L634"
+      v95_note: "v9.5 重构:失败关键词检测支持白名单(errorCode)+上下文感知(=0/success)"
+      whitelist: [errorcode, errcode, error_code, errno, errorlevel, errormsg]
+      success_context_patterns: ["=0", ":\"0\"", ":'0'", "success", "成功", "ok"]
+      success_context_window: 20
+    - rule: "blocked 状态但有 capture exact_match=true → BLOCK(矛盾)"
+      rule_source: "schema_validator.py:_check_validation L670"
+  deliverables:
+    - rule: "verified/provisional 必须 solution_path(任务相对路径)"
+      rule_source: "schema_validator.py:_check_deliverables L678"
+    - rule: "solution_path 禁止路径穿越(../)"
+      rule_source: "schema_validator.py:_check_deliverables L701"
+    - rule: "solution 文件必须存在"
+      rule_source: "schema_validator.py:_check_deliverables L704"
+    - rule: "verified/provisional 必须 reproduction_command"
+      rule_source: "schema_validator.py:_check_deliverables L706"
+  uncertainties:
+    - rule: "provisional/blocked 状态时 uncertainties 必须非空"
+      rule_source: "schema_validator.py:_check_uncertainties L673"
+
+# ============================================================
+# 跨阶段通用规则
+# ============================================================
+common:
+  placeholder_check:
+    description: "占位符检测(所有字段值)"
+    patterns: ["<...>", "TODO", "待填写", "待补充", "待定位", "____"]
+    rule_source: "schema_validator.py:PLACEHOLDER_RE L91"
+  encoding:
+    description: "JSON 文件编码 utf-8"
+    fallback: "schema_validator.py 用 json.load,默认 utf-8"

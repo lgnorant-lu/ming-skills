@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "target": {
+    "parameter": "",
+    "request": "",
+    "authorization": "not-confirmed"
+  },
+  "evidence": {
+    "inputs": [{"source": ""}],
+    "initiator_stacks": [{"parameter": "", "source": "", "location": ""}]
+  },
+  "param_trace": {
+    "params": [{"name": "", "location": "", "kind": "", "upstream": "", "terminates": false}],
+    "passthrough_chain": "",
+    "ring_dependencies": []
+  },
+  "wasm": {
+    "present": false,
+    "url": null
+  },
+  "fingerprint": {
+    "trace_source": "",
+    "file_fingerprints": [
+      {
+        "file": "",
+        "fields": [],
+        "evidence": ""
+      }
+    ]
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "decision": {
+    "carrier": {
+      "kind": "unknown",
+      "evidence": []
+    },
+    "whole_file_execution": {
+      "used": false,
+      "reason": null
+    }
+  },
+  "carrier_clarity_final": "unclear",
+  "branch": "runtime",
+  "branch_reason": "",
+  "webpack_features": null,
+  "iife_closure": {
+    "applies": false,
+    "structure_type": null,
+    "grep_evidence": null,
+    "extractability": null
+  }
+}

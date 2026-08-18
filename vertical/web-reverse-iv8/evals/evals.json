@@ -1,0 +1,341 @@
+{
+  "skill_name": "web-reverse-iv8",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "我有一段目标站点的 JS,里面调用了 navigator.userAgent 和 crypto.getRandomValues 做签名,我在 Node 里跑报错说 navigator/crypto undefined。用 iv8 怎么补环境跑通并把签名函数提取到 Python?",
+      "expected_output": "核心要点:1) iv8 已内置 navigator/crypto,开箱即用,无需手动补;2) 用 with iv8.JSContext(mode='debug', js_api='__ZY__') as ctx,加载目标 JS 一律用 page.load(单独 JS 文件包一层最小 HTML),ctx.eval 仅作辅助;3) 提取结果用 ctx.eval('getSign(param)')。强调 iv8 已补好大部分,只需处理边界。js_api 用 __ZY__ 防检测。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "目标 JS 里发了个 fetch 请求拿数据再加密,我在 iv8 里跑 fetch 一直 pending。怎么让网络通?需要带 cookie 和代理。",
+      "expected_output": "必须明确指出社区版不发真实 HTTP。给出四步工作流:JS 发 fetch → Python 用 httpx(默认)发真实请求带 cookie/代理 → ctx.add_resource(url, body, status, headers) 注入响应 → ctx.eval('window.__ZY__.eventLoop.drain()') 推进。提一句目标站点检测 TLS 指纹时用 curl_cffi(impersonate='chrome'),并注意 header 顺序指纹。不能误导用户以为 fetch 自己会联网。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "目标 JS 怀疑在检测环境,跑了几个 navigator 字段和 canvas.toDataURL。我不知道它具体探测了什么,怎么定位?",
+      "expected_output": "用 debug 模式的 API 监控 + 日志分离。给出 mode='debug' 配置 + stderr 重定向到文件的示例,说明 debug 模式会自动记录 API 读/写/调用链与反射路径到 stderr,日志文件用 grep 过滤关键 API(navigator.webdriver/plugins、canvas.toDataURL 等)定位探测链路。也可用 netLog.entries 查看网络行为。js_api 用 __ZY__。禁止使用 with_devtools(已禁用)。",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "目标 JS 用无限 debugger 循环反调试,还检测 console.log 的行为差异。我想调试它但又不能被它发现,怎么搞?",
+      "expected_output": "三点全对:1) iv8 已禁用 debugger; 不会触发断点,无需处理;主动断点用 vdebugger;;2) 用 vconsole.log/warn 替代 console.log(vconsole 不走 DevTools 上报,对目标 JS 完全不可见);3) 给出 mode='debug' 完整配置(不带 with_devtools,已禁用)。js_api 用 __ZY__。",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "我在 iv8 里补了几个 JS 函数(桩),但目标 JS 用 Function.prototype.toString 检测函数是否原生,我补的函数被识别出来了。怎么办?",
+      "expected_output": "强调规则:只要补丁覆盖浏览器 API,就必须用 window.__ZY__.wrapNative(fn, name) 伪装,否则 toString() 暴露源码被反调试检测。给出示例:ctx.eval('window.myPatch = window.__ZY__.wrapNative(function(x){return x*2}, \"myPatch\")'),myPatch.toString() 返回 'function myPatch() { [native code] }'。",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "目标 JS 里用了 setTimeout 和 Promise.then 做异步加密,我跑完 ctx.eval 后发现结果没出来,异步回调好像没执行。",
+      "expected_output": "明确指出:iv8 的事件循环需要手动推进。用 window.__ZY__.eventLoop.drain() 排空所有已到期任务,或 advance(ms) 分帧推进。给出示例:setTimeout/Promise.then 后调用 ctx.eval('window.__ZY__.eventLoop.drain()') 让回调执行。提到默认 time_mode=logical 时虚拟时间瞬间完成。",
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "我要并发给 8 个不同站点补环境跑签名,每个站点用不同 UA,需要加锁吗?会不会有状态污染?",
+      "expected_output": "明确回答:不需要加锁,无状态污染。每个 JSContext 独占 V8 Isolate,执行期释放 GIL。给出 threading.Thread 示例:每个线程内 with iv8.JSContext(js_api='__ZY__', environment={'navigator':{'userAgent':ua}}) as ctx。强调 Context 创建开销约 3ms 无需复用,每次用新 Context 获得干净状态。提一句实测 8 线程约 4.7x 加速。",
+      "files": []
+    },
+    {
+      "id": 8,
+      "prompt": "我加载了目标 JS,但是加密参数生成不出来,或者生成的值不对。该怎么排查?",
+      "expected_output": "明确首先排查补的环境是否遗漏。给出排查清单:1) 重看 debug 日志是否有报错被忽略(Cannot set properties of null、XXX is not defined);2) 检查 iv8 未覆盖的冷门 API(MessageChannel/BroadcastChannel/Worker 等);3) 检查前置参数(cookie/localStorage/接口返回值);4) 检查事件循环是否推进;5) 检查指纹对齐(若指纹参与签名);6) 用日志分离(stderr 重定向到文件)+ grep 过滤加密函数相关 API 调用,逐步定位差异。强调用 debug 模式。禁止使用 with_devtools/watch_apis(已禁用)。",
+      "files": []
+    },
+    {
+      "id": 9,
+      "prompt": "我在 iv8 里跑目标 JS 报错 'Cannot set properties of null',定位到是 MessageChannel 的 port1/port2 为 null,给 port1.onmessage 赋值就报错。怎么办?",
+      "expected_output": "明确这是 iv8 未覆盖的 API 缺口,需要用 ctx.eval 注入桩函数补全。给出 MessageChannel 桩函数示例:构造函数里创建 port 对象(onmessage null + postMessage 空函数),this.port1=this.port2=port。强调补丁覆盖浏览器 API 必须用 window.__ZY__.wrapNative 伪装,否则 toString 检测暴露。js_api 用 __ZY__。",
+      "files": []
+    },
+    {
+      "id": 10,
+      "prompt": "目标站点检测 TLS 指纹,我用 requests/httpx 发请求被识别了。在 iv8 补环境场景下怎么处理?",
+      "expected_output": "用 curl_cffi 替代 httpx,impersonate 参数模拟 Chrome 的 TLS/JA3 指纹。给出示例:from curl_cffi import requests as cffi_requests; resp = cffi_requests.get(url, impersonate='chrome', cookies=...)。然后 ctx.add_resource 注入响应。同时提醒注意 header 顺序指纹,保持与真实浏览器一致。js_api 用 __ZY__。",
+      "files": []
+    },
+    {
+      "id": 11,
+      "prompt": "我担心目标 JS 会检测 __iv8__ 这个变量名,怎么规避?",
+      "expected_output": "创建 JSContext 时用 js_api='__ZY__' 参数,JS 侧工具对象挂载为 window.__ZY__ 而非 window.__iv8__。所有代码中 window.__iv8__ 改为 window.__ZY__。强调这是补环境场景的标准做法,防止变量名被检测。",
+      "files": []
+    },
+    {
+      "id": 12,
+      "prompt": "我有一段目标 JS 文件 target.js,我直接 ctx.eval(open('target.js').read()) 加载行不行?",
+      "expected_output": "明确指出不行(或不推荐)。规则:加载目标 JS 一律用 page.load 流式加载,ctx.eval 仅作辅助手段。原因:page.load 对齐浏览器导航流程(HTML 解析 → <script> 执行 → 样式表 → DOMContentLoaded/load 派发 → 同步 document.URL/location.href),最大限度还原真实浏览器行为,降低被检测风险。正确做法:把 JS 包一层最小 HTML(<html><head><script>{js_code}</script></head><body></body></html>),用 window.__ZY__.page.load({baseURL, html}) 加载。ctx.eval 仅用于注入桩函数、前置参数、调用 getSign 提取结果、推进 eventLoop.drain 等辅助操作。",
+      "files": []
+    },
+    {
+      "id": 13,
+      "prompt": "我先 ctx.eval 加载了目标 JS,然后才 ctx.eval 注入 cookie 和补 MessageChannel 桩函数,结果还是报错,为什么?",
+      "expected_output": "明确指出注入时机错误:桩函数与前置参数(cookie/localStorage/接口返回值)必须在 page.load 之前注入,不能在目标 JS 加载之后。原因:page.load 会执行 HTML 内的 <script>(内联或外联),脚本一跑就可能立即读取这些 API;若此时桩/参数不存在,会直接报错或走到错误分支,后续再补也来不及。正确顺序:① 创建 Context → ② ctx.eval 注入桩函数+前置参数 → ③ page.load 加载目标 JS → ④ eventLoop.drain() → ⑤ ctx.eval 提取结果。强调第一次跑用 debug 模式看报什么错,拿到缺口清单后重新按顺序组织代码。",
+      "files": []
+    },
+    {
+      "id": 14,
+      "prompt": "我抓到目标站点的完整 HTML 页面,里面有 <script src=\"/main.js\"> 和 <script src=\"/encrypt.js\"> 两个外联脚本,main.js 是主逻辑、encrypt.js 是加密参数脚本。用 iv8 怎么加载并提取加密结果?",
+      "expected_output": "必须用 page.load 加载完整 HTML,外联脚本通过 resources 注入(加密参数脚本及后续依赖脚本都一并注入)。给出示例:snapshot = {baseURL, html, resources: {'https://target.com/main.js': {body, status, headers:[[content-type,application/javascript]]}, 'https://target.com/encrypt.js': {body, status, headers}}}。强调:1) 外联脚本不能用 ctx.eval 单独加载(丢失导航流程);2) 桩函数/cookie 必须在 page.load 之前注入,cookie 优先用主文档 headers 的 Set-Cookie;3) resources 内每个资源自带的 headers 是该资源的响应头,与 snapshot 顶层的主文档 headers 是两个层级,不要混淆;4) page.load 后 eventLoop.drain() 推进,再 ctx.eval 提取结果。js_api 用 __ZY__。",
+      "files": []
+    },
+    {
+      "id": 15,
+      "prompt": "我抓了 3 份目标接口的 HAR 样本,怎么分析哪些参数是 JS 生成的、哪些是接口透传的?",
+      "expected_output": "对比多份样本分类参数:固定常量(所有样本值相同且硬编码)、接口透传(值来自上游接口响应)、JS 生成(不在任何接口响应里由 JS 算出)、用户输入。透传参数递归追溯上游接口,终止条件:固定常量/JS 生成/用户输入/环依赖(标记为环,通常会话级一次性获取复用)。输出参数分析报告(参数溯源表+透传链路图+加密参数清单+环形依赖检查)。样本数≥2,推荐3-5份,要求同接口不同业务参数/不同时间/不同用户。",
+      "files": []
+    },
+    {
+      "id": 16,
+      "prompt": "透传参数 A 来自接口 /api/getA,/api/getA 的参数 B 又来自接口 /api/getB,/api/getB 的参数 C 又依赖参数 A,这怎么办?",
+      "expected_output": "识别为环依赖(A←B←C←A)。明确环依赖的处理:通常是会话级参数,一次性获取后复用,不需要无限追溯。在参数分析报告的环形依赖检查章节标注该环,说明处理方式(会话级缓存)。强调终止条件的四类:固定常量/JS生成/用户输入/环依赖,防止无限追溯。",
+      "files": []
+    },
+    {
+      "id": 17,
+      "prompt": "目标 JS 的加密函数我已经定位到了,是 webpack 模块 31,它 require 了 32(AES)和 33(RSA),纯计算没有 DOM 依赖。怎么本地跑?",
+      "expected_output": "对应决策树分支 C(v9.16 合并原 C+E,Webpack/无附加保护,载体清晰度=清晰)。能扣代码+纯计算 → 优先 Python 重写(方案 1)。工作流:1) 扣出模块31+32+33 及其依赖;2) 改写 require/exports 为可独立运行;3) 确认算法类型(可用 trace 的 interface+args 确认算法指纹,仅限 Web API 算子);4) 用 Python 库实现(cryptography/pycryptodome);5) 用 HAR 真实值验证(固定值===比对)。方案 1 试跑失败则降级方案 2(iv8 补环境,见 stage4.md §5.3.3)。不要一上来就 iv8(纯计算无浏览器依赖,方案 2 是杀鸡用牛刀)。",
+      "files": []
+    },
+    {
+      "id": 18,
+      "prompt": "目标加密函数读 navigator.userAgent 和 document.cookie 参与签名,我扣出代码后 Node 里跑报 navigator/document undefined。怎么办?",
+      "expected_output": "对应决策树分支 C/E 降级到方案 2。有浏览器依赖(window/document/navigator/fetch 等)→ 直接用 iv8 补环境(方案 2)。把扣出的代码包装成最小 HTML 用 page.load 加载(不是加载整个目标 JS),按 iv8 补环境工作流补缺口。可参考 minimal_scope.py 模板。强调:不要在 Node 里手动补 navigator/document(费时且不一致),iv8 已内置这些。降级链是方案 1(Python 重写)→ 方案 2(iv8 补环境),但有浏览器依赖时直接走方案 2。",
+      "files": []
+    },
+    {
+      "id": 19,
+      "prompt": "目标站点的核心加密是 jsvmp(JavaScript 虚拟机保护),代码是一堆字节码和解释器,完全不可读。怎么逆向?",
+      "expected_output": "对应决策树分支 B(JSVMP)。JSVMP 扣不了代码,必 iv8 补环境。判定:字节码不可读、自实现虚拟机解释执行(五条检查清单全满足:dispatch loop + 字节码数组 + 栈/寄存器 + case 抽象操作 + PC 单调递增)。处理:1) 若文件含业务+JSVMP 混合,先扣出 JSVMP 部分(可能是一个函数/对象),再 iv8 补环境;2) 若整文件是 JSVMP,直接 iv8 整文件补环境。用 iv8 debug 模式定位环境缺口(trace 前置 + iv8 debug,见 iv8-env-patching.md)。不走方案 1 降级(JSVMP 无法静态还原算法,直接方案 2)。",
+      "files": []
+    },
+    {
+      "id": 20,
+      "prompt": "目标 JS 用 eval(Function 解密)动态生成加密代码,静态搜不到加密函数名。怎么办?",
+      "expected_output": "对应阶段二去壳(eval/Function 壳)。eval/Function 动态解密 → 先在 iv8 里 hook eval/Function 拿到解密后的源码(expose 桥接,记录入参/返回值)。拿到源码后递归复查壳特征(递归深度警告≤3,防止 eval 套娃死循环)。脱壳完成后进入阶段三载体形态判定,按分支 A/B/C/D 处理:能扣就扣(纯计算→方案 1 Python 重写,有依赖→方案 2 iv8 补环境),扣不了(如解密出的还是 JSVMP)→ 分支 B iv8 整文件补环境。不要静态死扣(扣不到),也不要一上来 iv8 整文件跑(先拿到解密源码再说)。禁止使用 with_devtools/watch_apis(已禁用)。",
+      "files": []
+    },
+    {
+      "id": 21,
+      "prompt": "我在 iv8 里跑目标 JS,加密参数生成出来了但值不对。我有一份 trace 文件,怎么用?",
+      "expected_output": "用 iv8 debug 探测的 API 清单 vs trace 的环境指纹清单做差异排查(trace-analysis.md §5.2)。重点找:trace 有检测点、iv8 没访问 → 目标 JS 在 iv8 里因环境差异走了其他分支(这是值不对的常见根因)。用 scripts/trace_analyzer.py 处理大 trace 文件(stats 聚合/search 搜参数名定位/diff 对比 iv8 清单/chain 提取调用链)。不要人工通读几百 MB trace。找到差异后补缺失环境,用 HAR 真实值验证。",
+      "files": []
+    },
+    {
+      "id": 22,
+      "prompt": "我从 trace 里看到目标 JS 读了 navigator.userAgent、canvas.toDataURL、WebGL.getParameter 等 50 多个 API,我是不是要在 iv8 里把这 50 个都补上?",
+      "expected_output": "明确不要。环境补全以 iv8 reference 为准,不以 trace 为准。1) 先查 iv8 reference,iv8 已有的(navigator/canvas/WebGL 等内置)→ 不补;2) iv8 没有的 → 补桩函数;3) trace 的 value 仅作基准值参考(确认要补某 API 且需对齐真实值时才用),不是必补清单;4) trace 中没出现的 API → 真实浏览器都没用,不用补(反向推理)。错误做法:把 trace 所有 value 都补进去(大量重复 iv8 已有的环境)。",
+      "files": []
+    },
+    {
+      "id": 23,
+      "prompt": "这个加密太复杂了,我能不能用 Puppeteer/Playwright 起个无头浏览器直接调加密函数?",
+      "expected_output": "明确禁止。本 skill 不覆盖 RPC/浏览器自动化(Puppeteer/Playwright/Selenium 等)。原因:1) 重量级,依赖完整浏览器;2) 易被检测(无头特征);3) 性能差。应按 skill 工作流:扣代码(Python/Node/iv8)或 iv8 补环境。只有在扣代码和 iv8 补环境都搞不定时才考虑其他手段,但本 skill 不提供该方案指导。",
+      "files": []
+    },
+    {
+      "id": 24,
+      "prompt": "目标 JS 用 obfuscator.io 混淆了,满屏 _0x 变量和十六进制字符串数组,还有 while+switch 的控制流平坦化。加密函数逻辑完全看不懂,怎么还原?",
+      "expected_output": "OB壳处理(阶段二去壳 + 阶段三载体形态判定)。流程:1) 阶段二命中OB壳特征(_0x变量+字符串数组+旋转函数+CFF)→ 进入局部去壳(见 stage2-tracing.md);2) 主导壳层指纹判断:字符串表混淆为主→首动作先恢复字面量;3) 按需去壳范围:从加密点 file+line+col 出发,不全文件去混淆;4) 变换台账:每步记保持不变项;5) 终止标准:语义锚点支撑下一步即停;6) 阶段三载体形态判定:去壳后基于变换台账做标签确认——若原生JS→分支C(v9.16 合并原分支E);7) 分支C走方案1/2降级链(方案1/2选择在阶段四,见 stage4.md §5.2)。关键:去壳自检仅验证还原正确性(不跑完整加密函数);iv8 在阶段二仅用于字符串表拉取(见 stage2-tracing.md),不用于加密点定位。",
+      "files": []
+    },
+    {
+      "id": 25,
+      "prompt": "目标 JS 同时有 obfuscator 混淆(_0x 变量)和 Webpack(__webpack_require__),还有一段 eval 动态解密。我应该先处理哪个?",
+      "expected_output": "多特征叠加处理(阶段二去壳 + 阶段三载体形态判定)。去壳顺序:1) 阶段二识别 eval-Function壳(eval 动态解密)+ OB壳特征(_0x 变量)+ Webpack 特征(__webpack_require__);2) 去壳顺序由外向内:先脱 eval 壳(hook eval/Function 拿明文,iv8 用 expose 桥接记录入参/返回值;递归深度警告≤3不截断);3) 拿到明文后复查壳特征,发现 OB壳 → 局部去壳(仅加密模块范围);4) 阶段三载体形态判定:__webpack_require__ → 确认 Webpack → 分支 C;5) 分支C走方案1/2降级链。强调:eval 去壳后必须复查是否还有残留壳(可能 eval 里套OB);Webpack整体被壳时顺序是 OB最小还原→拆bundle→对目标模块做OB还原(禁止先全量OB还原再拆bundle)。详见 stage2-tracing.md Webpack 整体被壳的顺序约束。禁止使用 with_devtools/watch_apis(已禁用)。",
+      "files": []
+    },
+    {
+      "id": 26,
+      "prompt": "我有 HAR 文件但不知道加密参数名,只知道请求 URL 是 /api/verify,怎么定位加密点位?",
+      "expected_output": "v8 下用 HAR `_initiator.stack` 单轨溯源(har-analysis.md §5 + stage2-tracing.md §2):1) 从 HAR 找到 /api/verify 请求;2) 提取 `_initiator.stack`(callFrames + parent 链);3) 直接读原始压缩 JS 文件,按栈帧 column 字节偏移定位加密点位;4) 若栈帧定位失败,Fallback 全局搜索加密参数名;5) 逐帧溯源到加密函数入口;6) trace 不参与加密点定位(对纯 JS 加密函数有结构性盲区),仅用于环境指纹采集(trace-analysis.md)。强调:HAR `_initiator.stack` 是溯源起点,trace 不能做加密点定位。",
+      "files": []
+    },
+    {
+      "id": 27,
+      "prompt": "有 HAR 文件,想在不跑 iv8 的情况下完成加密点位定位,怎么做?",
+      "expected_output": "v8 下 HAR `_initiator.stack` 单轨溯源流程(har-analysis.md §5 + stage2-tracing.md §2):1) 参数分类:对比多份 HAR 样本,识别 JS 生成参数;2) 提取 `_initiator.stack`(完整保留 callFrames + parent 链);3) 直接读原始压缩 JS 文件;4) 按栈帧 column 字节偏移定位加密点位;5) 逐帧溯源到加密函数入口;6) Fallback:栈帧定位失败时全局搜索加密参数名定位。trace 不参与加密点定位(trace-analysis.md),仅用于环境指纹采集。强调:HAR 是溯源起点,trace 仅作环境指纹基准参考。",
+      "files": []
+    },
+    {
+      "id": 28,
+      "prompt": "我用 Python 还原了 AES-CBC 加密,key 和 IV 都是固定的,怎么验证我的实现是对的?另一个接口用 RSA 加密,每次输出不同,怎么验证?",
+      "expected_output": "两类算法验证方式不同(code-extraction.md §2.5):1) AES-CBC 固定 key+IV 是确定性算法 → 固定输入(从 HAR 取真实时间戳,Math.random mock 为固定值)→ 调用本地函数 → 输出与 HAR 真实值全量相等(===)比对;2) RSA 随机 padding 是非确定性算法 → 长度不变量(输出长度===HAR 长度,跑10次恒定)+ 结构不变量(格式/字段集完整)+ 服务器语义验证(发请求,返回 result=fail 说明加密格式合法,返回 param error 说明格式错)。强调:确定性算法必须 === 比对;非确定性算法不能用值比对,只能验证不变量。",
+      "files": []
+    },
+    {
+      "id": 29,
+      "prompt": "debug 模式下 iv8 日志太多,我的 print 完全看不到,怎么办?",
+      "expected_output": "用日志分离(iv8-env-patching.md 日志分离章节):1) 原理:print() 走 stdout,iv8 debug 日志走 stderr,默认都到控制台混在一起;2) 方法:重定向 sys.stderr 到文件(sys.stderr = open('iv8_debug.log', 'w')),iv8 日志写入文件,控制台只显示 print;3) finally 中恢复 sys.stderr 并关闭文件;4) single_context.py 模板已内置 debug_log 参数,传入路径即可启用日志分离;5) 场景建议:debug 模式推荐日志分离,prod 模式日志少通常不需要。核心:控制台只放 print,iv8 日志全部进文件。",
+      "files": []
+    },
+    {
+      "id": 30,
+      "prompt": "HAR `_initiator.stack` 定位到加密点位后,读原始压缩代码显示一个函数反复自调用几十次,函数名是单字母,文件 280KB。这是 JSVMP 还是 obfuscator 控制流平坦化?怎么判别?",
+      "expected_output": "v8 四阶段架构下,阶段二溯源+去壳后,阶段三载体形态判定(stage3.md §3.1):1) 载体形态判定矩阵检查:命中 JSVMP 必要特征(dispatch loop 结构)→ 检查充分特征;2) JSVMP 五条检查清单全满足(dispatch loop + 字节码数组 + 栈/寄存器 + case 抽象操作 + PC 指针单调递增)→ 确认 JSVMP → 分支 B(不去壳,必 iv8 补环境);3) 若五条不全满足(如缺字节码数组/栈结构)→ 不是 JSVMP → 可能是 OB 壳控制流平坦化 → 阶段二局部脱壳;4) 去壳后重新做载体形态判定。强调:JSVMP 判定基于代码结构特征(在阶段二脱壳过程中观察记录在变换台账),不是基于 trace stack;阶段三基于台账做标签确认,不重新扫描。",
+      "files": []
+    },
+    {
+      "id": 31,
+      "prompt": "目标 JS 有 _0x 变量和字符串数组,但没有旋转函数,控制流平坦化的 case 里是真实 JS 语句。这种算什么保护?",
+      "expected_output": "OB壳识别特征(无旋转函数变种)+ 阶段三载体形态判定。流程:1) 阶段二特征观察:stack 指向 _0x 混淆函数(无递归)→ 五条检查清单:dispatch loop 存在(✓ while+switch)、字节码数组(✗ 是明文字符串供解码不是编码字节码)、栈/寄存器结构(✗)、case 内抽象操作(✗ 是真实JS语句)、PC 单调递增(✗ 是状态机跳转)。缺4条 → 不是 JSVMP → 识别为 OB壳特征(无旋转函数的字符串数组+控制流平坦化,属 OB壳的识别特征之一);2) 阶段二局部脱壳:对 OB壳去壳——无旋转函数时字符串数组可能直接索引或用自定义解码,需在主导壳层指纹判断基础上自定义变换;3) 阶段三载体形态判定:去壳后若为原生JS→分支C(v9.16 合并原分支E)。强调:无旋转函数属于 OB壳识别特征(命中任一即 OB壳);字符串加密/控制流平坦化是OB壳的识别特征不是独立壳类型。",
+      "files": []
+    },
+    {
+      "id": 32,
+      "prompt": "HAR 栈帧定位的代码同时出现 __webpack_require__ 和 _0x 变量,文件里既有 webpack 模块又有 obfuscator 混淆,怎么处理?",
+      "expected_output": "Webpack + OB壳叠加处理(阶段二去壳 + 阶段三载体形态判定)。流程:1) 阶段二特征观察:stack 含 __webpack_require__ + _0x 变量 → 同时识别 Webpack特征 + OB壳特征;2) 五条检查清单判别 _0x 部分:若缺字节码数组/栈结构 → 不是JSVMP,是OB壳;3) 阶段二局部脱壳:Webpack整体被壳,按顺序约束——OB壳最小还原(只让bootstrap可解析)→ 拆bundle提取目标模块(iv8 page.load+expose桥接dump,Node 仅作纯计算备选)→ 对目标模块做OB还原;4) 阶段三载体形态判定:__webpack_require__ → 确认 Webpack → 分支C;5) 分支C走方案1/2降级链。强调:禁止先全量OB还原再拆bundle(破坏bootstrap结构)。",
+      "files": []
+    },
+    {
+      "id": 33,
+      "prompt": "我刚开始学这个 skill,不太理解什么是'壳'。JSVMP 算不算壳?WASM 呢?Webpack 打包算不算?Worker 呢?",
+      "expected_output": "壳的权威定义见 SKILL.md。壳=为了对抗分析,用混淆器(obfuscator.io系)或动态执行(eval/Function)对原生JS做的后加封装层。识别依据:结构特征(混淆器指纹/eval包装)。壳可能被还原也可能因信息丢失无法完全还原,'能否还原'是工程结果。壳类型2类:OB壳(obfuscator.io系,含标准配置与魔改变种)、eval/动态Function壳。JSVMP/WASM/Webpack/Worker都不是壳——区分维度:JSVMP去除后业务逻辑断裂(VM不可还原);WASM是独立运行时非JS语法变形;Webpack目的是工程交付(模块化打包)非对抗分析,去除是机械改写;Worker是算子物理隔离到独立线程不是语法变形。判定分两层:事前识别(基于结构特征判疑似壳,进入去壳环节)+事后验证(去除后检查业务完整性:完整→确认是壳;断裂→保护技术组成,回退纠错)。字符串加密/控制流平坦化是OB壳的识别特征不是独立壳类型。",
+      "files": []
+    },
+    {
+      "id": 34,
+      "prompt": "目标 JS 入口处用 eval 包装了整个脚本,但里面有个 JSVMP 解释器,解释器内部也用 eval 动态生成字节码。这两个 eval 都要去壳吗?",
+      "expected_output": "按'eval 何时是壳'规则判定(SKILL.md)。入口处包装整个JS的eval=是壳(去除后拿到真实业务代码,逻辑完整)→ 去壳。JSVMP解释器内部的eval(生成字节码/调度)=不是壳,是JSVMP组成部分(去除后VM逻辑断裂无法运行)→ 不去壳。判定方法:尝试去除该eval层,代码仍能完整运行且语义不变→壳;VM/业务逻辑断裂→保护技术组成,停止去壳。流程:1) 脱入口eval壳拿到明文;2) 扫描明文发现JSVMP特征(五条检查清单);3) JSVMP内部的eval不去壳,直走分支B。强调:每层去壳后都用eval规则判定,防止拆碎JSVMP;判定不确定时用五条清单复核eval解出的内容。",
+      "files": []
+    },
+    {
+      "id": 35,
+      "prompt": "目标 JS 整个文件都被 OB 混淆了,500KB,我是不是要全文件去混淆才能开始分析?",
+      "expected_output": "禁止全文件去混淆。按需局部去壳原则(stage2-tracing.md 去壳范围与深度预算小节):1) 起点=加密点位置(file+func+stack,阶段二已拿到,不需去壳即可定位);2) 扩展=去壳加密函数所在代码块→看清调用关系(调用哪些函数/模块)→对新发现的调用继续去壳→直到语义锚点足够支撑下一步;3) 范围=仅加密函数涉及的代码。理由:全文件去混淆成本高且不必要(大部分代码与加密无关)。解决调用关系死锁:不需要先判定完整调用关系,而是边去壳边读代码按需扩展(被壳包着的代码看不出调用关系,先判调用关系是死锁,从加密点往里剥即可)。Webpack整体被壳时按 Webpack 整体被壳的顺序约束处理。",
+      "files": []
+    },
+    {
+      "id": 36,
+      "prompt": "我已经去壳去到字符串都还原了,控制流也平坦化还原了,但变量名还是 _0xabc 这种乱码。还要继续去壳到变量名都恢复语义吗?",
+      "expected_output": "不需要。去壳终止标准(stage2-tracing.md 去壳终止标准小节):已恢复足够的语义锚点支撑下一步即停。变量名语义还原不是终止条件——它是轻度混淆,不影响载体形态判定和扣代码。终止条件:能识别保护类型特征(WASM/JSVMP/Webpack/Worker/原生JS)→进入阶段三载体形态判定;或能扣出加密函数代码(看懂逻辑+调用关系)→进入阶段四扣代码。不是终止条件:变量名语义还原、代码完全可读、全量beautify完成。去壳目的是露出锚点(支撑下一步),不是为了可读。变量名乱码留给后续扣代码阶段处理(可手动重命名关键变量)。",
+      "files": []
+    },
+    {
+      "id": 37,
+      "prompt": "目标 JS 我以为是 OB 混淆(有 while+switch),去壳搞了半天控制流平坦化还原不了,case 块里都是抽象操作。是不是判错了?",
+      "expected_output": "去壳失败纠错(stage2-tracing.md 去壳后验证与分层回退纠错小节)。流程:1) 工具解不开→先用'eval何时是壳'规则判定:while+switch里的case是抽象操作(单步运算/跳转),去除后逻辑断裂→可能是保护技术组成;2) 回退初判,用JSVMP五条检查清单复核(基于代码结构特征,不依赖trace):dispatch loop存在(✓)+字节码数组(需确认)+栈/寄存器结构(需确认)+case抽象操作(✓)+PC单调递增(需确认);3) 若五条全满足→复核为JSVMP(初判误判为OB壳)→分支B(不去壳,iv8补环境);4) 若复核仍非JSVMP→全量iv8带壳整文件运行。纠错优先于兜底,避免把JSVMP当'解不开的壳'。强调:while+switch既可能是OB壳控制流平坦化也可能是JSVMP dispatch loop,五条清单是关键区分;JSVMP 判定基于代码结构特征,不靠 trace。",
+      "files": []
+    },
+    {
+      "id": 38,
+      "prompt": "目标站点用 WASM 做加密,但加载 .wasm 的 JS 胶水代码被 OB 混淆了,看不懂入参怎么打包的。怎么办?",
+      "expected_output": "WASM胶水层有壳的处理(分支A + 阶段二局部脱壳)。流程:1) 阶段二特征观察:WASM特征命中(WebAssembly.instantiate)+ 壳特征命中(胶水层有OB混淆);2) 阶段二局部脱壳:按需局部去壳,只还原胶水代码中与WASM交互的部分(Key/IV、入参封装、返回值解包)——不需全量去混淆胶水;3) 阶段三载体形态判定:WASM→分支A;4) 分支A:提取.wasm二进制→解析去壳后的胶水代码(Key/IV/入参封装/返回值解包)→校验WASM imports/exports签名→Python用wasmtime/pywasm运行(不补环境);5) 若胶水逻辑复杂,可单独提取去壳后的胶水代码用iv8 page.load加载。强调:先去壳胶水再提取WASM;wasm本身不补环境;WASM+OB壳不属于多特征叠加(§3.3 处理的是 WASM+JSVMP 等双保护类型组合),属于 WASM + 壳,按去壳→WASM 顺序处理。",
+      "files": []
+    },
+    {
+      "id": 39,
+      "prompt": "我扣出了加密函数代码,里面有 `const crypto = typeof window !== 'undefined' ? window.crypto : require('crypto')` 这种写法。语法上引用了 window,是不是要走 iv8 补环境?",
+      "expected_output": "禁止用静态语法引用判运行时依赖(见 code-extraction.md §8 禁止事项)。按方案降级链处理:1) 语法上引用window不等于运行时依赖——这是环境兼容写法,实际加密逻辑可能在Python里也能跑;2) 先尝试方案 1(Python 重写)——若算法是标准算法或逻辑简单可读懂;3) 方案 1 试跑失败或非标准复杂算法 → 降级方案 2(iv8 补环境);4) 判定依据:运行时是否真的调用DOM/BOM API,而非语法上是否出现window。这种 typeof window 写法在Node里window未定义会走 require('crypto') 分支,但v8降级链已无Node路径——若Python重写能覆盖则用方案1,否则方案2。",
+      "files": []
+    },
+    {
+      "id": 40,
+      "prompt": "目标 JS 是 Webpack 打包的,但整个 chunk 文件被 OB 混淆了,加密点在其中一个模块里。我没法单独给那个模块去壳,怎么办?",
+      "expected_output": "Webpack整体被壳的处理(stage2-tracing.md Webpack 整体被壳的顺序约束)。按顺序约束:1) OB壳最小还原(字符串表还原,AI视角)——只为让bootstrap可解析,还原__webpack_require__附近的字符串字面量与属性访问,不还原业务模块外的OB。判定标准:能定位__webpack_require__函数体+能识别模块表结构即停;2) 拆bundle提取目标模块——iv8优先(page.load加载还原后bootstrap,expose桥接dump目标模块exports),Node 仅作纯计算备选;3) 对目标模块做OB还原——复用第1步拿到的字符串表(不重新执行旋转函数),对目标模块内部做字符串还原+helper内联+属性标准化。禁止先全量OB还原再拆bundle(OB还原会破坏bootstrap结构导致拆不出模块)。",
+      "files": []
+    },
+    {
+      "id": 41,
+      "prompt": "HAR `_initiator.stack` 定位到加密函数入口是 postMessage,但主线程代码里没有加密逻辑,真正的算子在 Worker 里。怎么处理?",
+      "expected_output": "对应分支 D(Worker)。流程:1) 阶段三载体形态判定:命中 Worker 必要特征(postMessage 调用 + 算子在 Worker 上下文)→ 检查充分特征(Worker 脚本通过 new Worker(url) 或 blob URL 加载)→ 确认 Worker → 分支 D;2) 拿 Worker 源码(统一走 iv8 运行时):iv8 Hook Blob 构造器拦截 Worker 源码字符串(明文/混淆/字符串组装都能拿到),独立文件可直接抓取,iv8 也 Hook 不到→降级方案 2;3) 对 Worker 源码执行阶段二去壳(若 Worker 内有壳);4) 对 Worker 源码执行阶段三载体形态判定——Worker 内可能是 WASM/JSVMP/Webpack/无附加保护;5) 按确认标签走对应分支 A/B/C/E;6) 嵌套 Worker(Worker 内再起 Worker)→ 递归走分支 D(深度警告≤3,超过降级方案 2);7) 桥接层处理:主线程↔Worker 的 postMessage 协议。强调:去壳主线程代码无效;Worker 不是壳(是算子物理隔离);Worker 与 JSVMP 同时命中时按多特征叠加处理(stage3.md §3.5 多特征叠加处理)。",
+      "files": []
+    },
+    {
+      "id": 42,
+      "prompt": "OB 混淆的字符串数组旋转函数静态执行返回空数组,拿不到真实字符串表。原参考文档说用 Node.js Hook,但我只有 iv8,怎么用 iv8 替代?",
+      "expected_output": "字符串表运行时拉取用iv8(stage2-tracing.md iv8 字符串表拉取小节)。场景:字符串表不在文件里(运行时从服务端拉取)或字符串表多层加密(解密函数被CFF切碎形成循环依赖)。处理:1) iv8跑原混淆代码(page.load加载,不解混淆);2) 用expose桥接Python函数Hook字符串解密函数;3) expose函数被JS调用时拿到返回值,dump真实字符串表;4) 回填到脱壳代码。iv8优势:已禁用debugger/vconsole隐藏日志/内置浏览器环境默认值已对齐 Chrome/Windows 基线,反调试检测点比Node更准确,字符串表拉取不会因缺环境误报。不要试图静态推导解密函数本身。**iv8 在阶段二的唯一用途就是字符串表拉取**(见 stage2-tracing.md),不用于加密点定位、不用于数据流追踪。禁止使用 with_devtools/watch_apis(已禁用)。",
+      "files": []
+    },
+    {
+      "id": 43,
+      "prompt": "帮我写个 React 组件,实现一个带搜索和分页的用户列表,后端用 axios 调接口。",
+      "expected_output": "不应触发本 skill。这是普通 web 开发任务,应走前端开发流程。若被触发,说明 description 的触发条件过宽,需收窄。",
+      "files": []
+    },
+    {
+      "id": 44,
+      "prompt": "我要用 Selenium 爬取某电商网站的商品价格,需要登录后翻页抓数据,怎么写?",
+      "expected_output": "不应触发本 skill。这是爬虫工程化任务(RPC/浏览器自动化),description 明确排除。应告知用户本 skill 不覆盖此场景,建议用爬虫框架文档。",
+      "files": []
+    },
+    {
+      "id": 45,
+      "prompt": "这个 App 的登录接口用了 so 层加密,我用 frida hook 了一下 native 方法,但不知道参数怎么组装,能帮我分析吗?",
+      "expected_output": "不应触发本 skill。这是客户端逆向(frida/so 层),description 明确排除。应告知用户本 skill 只覆盖 web JS 逆向,不覆盖客户端逆向。",
+      "files": []
+    },
+    {
+      "id": 46,
+      "prompt": "我抓到一个网站的私有协议,二进制格式,前 4 字节是 magic number,后面是变长字段,怎么解析?",
+      "expected_output": "不应触发本 skill。这是协议逆向(二进制协议解析),description 明确排除。应告知用户本 skill 不覆盖协议逆向。",
+      "files": []
+    },
+    {
+      "id": 47,
+      "prompt": "这个接口返回的 JSON 里有签名校验,但签名是在服务端生成的,我只想调用这个接口拿数据,怎么搞?",
+      "expected_output": "不应触发本 skill。签名在服务端生成不是前端 JS 逆向场景(本 skill 针对 JS 生成的加密参数)。应走普通 API 调用流程,若服务端签名无法绕过则超出本 skill 范围。",
+      "files": []
+    },
+    {
+      "id": 48,
+      "prompt": "用户给了 HAR 文件,我直接看 stack 定位到加密函数,跳过阶段一参数分析报告(觉得没必要写参数溯源表),直接开始阶段二溯源,可以吗?",
+      "expected_output": "禁止跳级。进入阶段二前必须运行 `uv run scripts/stage_gate.py --stage 2 --task-dir <path>`(v9.8 强制前置,见 SKILL.md 阶段门阻断规则)。脚本会检查 ./<task-name>/stage1-params.md 存在 + 含「参数溯源表」「透传链路图」「_initiator.stack」三个字段。当前未写 stage1-params.md → 退出码 1 BLOCK,stdout JSON.action 指示「必须回到阶段 1 补齐产物文件,然后重新运行本检查」。必须先回到阶段一按 param-analysis.md 模板填写 stage1-params.md,补齐后重新运行 stage_gate.py 看到 PASS(exit 0)才能进入阶段二。跳过 stage_gate.py 直接进入阶段二 → 产物无效(P0 阶段门阻断)。这是 v9.8 引入的运行时硬阻断,文档式 checklist 已升级为脚本检查,Agent 不能绕过。",
+      "files": []
+    },
+    {
+      "id": 49,
+      "prompt": "我已经写了 stage2-output.md,里面有加密点位(file+line+col),但是没写变换台账和载体清晰度初判(觉得用不上),直接进入阶段三做载体形态判定,可以吗?",
+      "expected_output": "禁止跳级。进入阶段三前必须运行 `uv run scripts/stage_gate.py --stage 3 --task-dir <path>`(v9.8 强制前置)。脚本检查 stage2-output.md 含「加密点位」「变换台账」「载体清晰度初判」全部 3 个字段(任一缺失即 BLOCK)。当前缺「变换台账」「载体清晰度初判」→ 退出码 1 BLOCK,JSON.missing 列出这两个字段,JSON.action 指示「必须回到阶段 2 补齐产物文件」。必须先回到阶段二按 stage2-output.md 模板 §3(变换台账)+ §5(载体清晰度初判结论)补齐,然后重新运行 stage_gate.py 看到 PASS 才能进入阶段三。注意:变换台账是阶段三载体形态判定的输入(原始观察记录),没有台账阶段三无法做判定。跳过 stage_gate.py → 产物无效(P0)。",
+      "files": []
+    },
+    {
+      "id": 50,
+      "prompt": "我已经完成阶段四的代码实现,加密参数也跑出来了,但没写 stage5-verify.md(觉得没必要写验证报告),直接把代码交给用户就行了吧?",
+      "expected_output": "禁止跳级。任务交付前必须运行 `uv run scripts/stage_gate.py --stage 5 --task-dir <path>`(检查阶段四最终交付物)。stage 5 检查 stage5-verify.md 含「验证方式」「验证结果」「最终交付物」(方案 2 时还检查「iv8 调试总轮次」)。当前未写 stage5-verify.md → 退出码 1 BLOCK,JSON.action 指示「必须回到阶段 4 补齐产物文件」。必须先按 stage5-verify.md 模板完成验证报告(参数级验证 + 接口级验证 + 验证结果 + 参数溯源表),写入 stage5-verify.md,然后重新运行 stage_gate.py --stage 5 看到 PASS,才能向用户交付代码。直接交付未验证代码 → 违反 SKILL.md 阶段门阻断规则(P0)。",
+      "files": []
+    },
+    {
+      "id": 51,
+      "prompt": "我在 stage5.json 填了 validation.status=verified,但 validation.samples 只给了 1 个 capture(确实只抓了一次 HAR),想着反正验证通过就交付,能 PASS 吗?",
+      "expected_output": "BLOCK。stage_gate.py --stage 5 会调用 schema_validator 校验 stage5.json,verified 状态要求 validation.samples 至少 2 个 capture 样本(schema_validator 的条件联动规则:verified → ≥2 capture samples)。只给 1 个 capture → schema 校验失败 → 退出码 1 BLOCK,JSON.missing 含 'verified status requires at least two capture samples'。必须补抓至少 1 个额外的 HAR capture 样本填入 samples,重新跑 stage_gate.py --stage 5 看到 PASS 才能交付。manifest 是硬门(P0),与 md 是否齐全无关。",
+      "files": []
+    },
+    {
+      "id": 52,
+      "prompt": "方案 2 iv8 补环境,我跑了 9 次还是对不齐,太烦了。我在 stage5.json 填 validation.status=provisional(部分成功)直接交付给用户自己看着办,行不行?",
+      "expected_output": "BLOCK。schema_validator 条件联动规则:risk_controls.iv8.attempts ≥ 8 时,stop_reason 必须非空;且 attempts=9 仍填 status=provisional 与失败止损语义冲突。实际行为:stage5.json schema 校验会因 attempts≥8 但 stop_reason 为空而 BLOCK,JSON.missing 含 '8+ iv8 attempts require a non-empty stop_reason'。必须二选一:要么填 status=blocked + implementation=blocked + method=not-run + 非空 stop_reason + ≥1 uncertainty(走失败交付流程);要么若仍想 provisional,需先排查 iv8 失败根因(回溯阶段二脱壳代码完整性 / 阶段三方案选择),降低 attempts 后重试。8 次失败强制记录止损原因,不允许悄悄降级 provisional 交付。",
+      "files": []
+    },
+    {
+      "id": 53,
+      "prompt": "stage3.json 我填了 decision.carrier.kind=webpack,但 webpack_features 字段我留了 null(觉得 W1-W4 逐条填太麻烦,反正结论已经写了 webpack),能进阶段四吗?",
+      "expected_output": "BLOCK。schema_validator 条件联动规则:decision.carrier.kind=webpack 时,webpack_features 必须是对象且含 W1/W2/W3 逐条 hit(boolean)+ evidence(非空)证据。填 null → schema 校验失败,JSON.missing 含 'webpack_features must be an object when carrier=webpack'。必须按 stage3-labels.md §2.1 Webpack 特征核对清单逐条核对 W1-W4 填入 webpack_features(W1-W3 必填 hit+evidence,W4 可选填 '未检查'),重新跑 stage_gate.py --stage 4 看到 PASS 才能进阶段四。禁止凭印象判定 carrier=webpack 却不附特征证据(违反 stage3.md §3.8 Gotcha '禁止凭印象判定')。",
+      "files": []
+    },
+    {
+      "id": 54,
+      "prompt": "阶段二我读脱壳后代码,看到 `CryptoJS.algo.AES._doFinalize()` 这一行,明文 password 在前面已经传给 CryptoJS.AES.encrypt() 了。我把 _doFinalize 这行定位为加密点,因为这里才是真正执行加密 rounds 的地方。可以吗?",
+      "expected_output": "不可。违反 stage2-tracing.md §3 加密点定义 + §4 Gotcha 7 加密点判定三原则。_doFinalize() 是库内部函数,明文早在 encrypt() 调用时已传入,此处入参已是内部对象封装,丢失原始明文形态。加密点 = 明文首次传入加密函数的 Call Site,不是算法内部实现。正确做法:把加密点定位到 CryptoJS.AES.encrypt(rawPass, key) 这一行(file+line+col+functionName 指向 encrypt 调用所在位置),不是 _doFinalize。判定原则:① 有密钥参与 ② 不可逆 ③ 发生数学变化,且必须是'首次'传入。_doFinalize 缺'首次'条件。",
+      "files": []
+    },
+    {
+      "id": 55,
+      "prompt": "我看到目标 JS 里有 `let encoded = btoa(JSON.stringify({user: rawUser, ts: Date.now()}))`,rawUser 是明文用户数据。这行应该是加密点吧?我要 hook btoa 拿到明文。",
+      "expected_output": "不是加密点。违反 stage2-tracing.md §4 Gotcha 7 加密点判定三原则:btoa() 缺'有密钥参与'条件(是编码不是加密),JSON.stringify() 缺'发生数学变化'条件(是序列化不是加密)。两者都是可逆操作,无熵变。正确做法:继续溯源,找 rawUser 被传入真正加密函数(有密钥/不可逆/数学变化三者全满足)的 Call Site,如 CryptoJS.AES.encrypt(rawUser, key) 或 crypto.subtle.encrypt(...)。btoa 和 JSON.stringify 只是数据预处理/编码,不是加密点。hook btoa 拿到的不是'明文首次传入加密函数'的位置,会误导后续 iv8 补环境和方案 1 重写。",
+      "files": []
+    },
+    {
+      "id": 56,
+      "prompt": "目标站点登录函数 `function login(pwd) { return sendRequest(encryptPwd(pwd)); }`,encryptPwd 内部调用 CryptoJS.AES.encrypt。我在 stage2-output.md 把加密点位定位到 login 函数这行(return sendRequest(encryptPwd(pwd))),因为这是业务入口。对吗?",
+      "expected_output": "不对。违反 stage2-tracing.md §3 加密点定义 + §4 Gotcha 7。login 函数这行缺'发生数学变化'条件——pwd 只是透传给 encryptPwd(),login 本身不做加密。加密点应定位到 encryptPwd 内部调用 CryptoJS.AES.encrypt(pwd, key) 的那一行(Call Site)。判定流程:① login(pwd) → 透传,不是加密点;② 进入 encryptPwd 函数体;③ 找到 CryptoJS.AES.encrypt(pwd, key) 调用行 → 这才是加密点(密钥+不可逆+数学变化+首次传入全满足)。stage2-output.md 的 file+line+col+functionName 应指向 encryptPwd 内的 AES.encrypt 调用,不是 login 函数。定位错会导致 iv8 hook 位置错、方案 1 重写入参出参错。",
+      "files": []
+    }
+  ]
+}

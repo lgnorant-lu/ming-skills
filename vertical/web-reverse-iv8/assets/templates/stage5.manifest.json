@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "decision": {
+    "implementation": {
+      "kind": "blocked",
+      "reason": ""
+    }
+  },
+  "risk_controls": {
+    "execution": {
+      "ran_untrusted_code": false,
+      "subprocess": false,
+      "network": "not-executed",
+      "allowed_hosts": [],
+      "time_limit_seconds": null,
+      "memory_limit_mb": null
+    },
+    "iv8": {
+      "attempts": 0,
+      "same_failure_limit": 3,
+      "stop_reason": null
+    },
+    "secrets": "redacted"
+  },
+  "validation": {
+    "status": "blocked",
+    "method": "not-run",
+    "interface_type": "stateless-login",
+    "samples": [],
+    "counterexample": null,
+    "result": ""
+  },
+  "deliverables": {
+    "solution_path": null,
+    "reproduction_command": null
+  },
+  "uncertainties": []
+}

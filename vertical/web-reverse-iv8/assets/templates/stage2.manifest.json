@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "decision": {
+    "shell": {
+      "kind": "unknown",
+      "evidence": []
+    }
+  },
+  "encryption_points": [
+    {"parameter": "", "file": "", "line": 0, "col": 0, "functionName": ""}
+  ],
+  "transform_ledger": [
+    {"step": "", "invariants": "", "evidence": "", "carrier_observation": "", "clarity": "unclear"}
+  ],
+  "carrier_clarity_initial": "unclear",
+  "boundaries": [
+    {"call_site": "", "marker": "", "reason": ""}
+  ]
+}

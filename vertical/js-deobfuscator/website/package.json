@@ -1,0 +1,37 @@
+{
+  "name": "website",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "nuxt build",
+    "dev": "nuxt dev",
+    "generate": "nuxt generate",
+    "preview": "nuxt preview",
+    "typecheck": "nuxi typecheck",
+    "release": "bumpp && tsx scripts/release.ts",
+    "postinstall": "nuxt prepare"
+  },
+  "dependencies": {
+    "debug": "^4.4.3",
+    "deob": "workspace:*",
+    "monaco-editor": "^0.56.0",
+    "splitpanes": "^4.1.2"
+  },
+  "devDependencies": {
+    "@iconify-json/ri": "^1.2.10",
+    "@iconify-json/vscode-icons": "^1.2.70",
+    "@nuxt/devtools": "^3.4.1",
+    "@nuxtjs/seo": "5.3.12",
+    "@types/debug": "^4.1.13",
+    "@unocss/nuxt": "^66.7.5",
+    "@unocss/transformer-variant-group": "^66.7.5",
+    "@vueuse/nuxt": "^14.4.0",
+    "nuxt": "^4.5.2",
+    "nuxt-monaco-editor": "^1.4.1",
+    "unocss": "^66.7.5",
+    "vite-plugin-node-polyfills": "^0.28.0",
+    "vue": "^3.5.41",
+    "vue-router": "^5.2.0",
+    "vue-tsc": "^3.3.9"
+  }
+}
