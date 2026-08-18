@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>配置页面</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <style>
+    .act{
+        background-color: #cbaeae;
+    }
+    </style>
+
+</head>
+<body>
+    <nav id="nav">
+        <ul>
+            <button class="act">dom对象 hook 配置</button>
+            <button>注入代码</button>
+            <button>高级 hook ，修改 response 返回值</button>
+            <button>AST混淆解密</button>
+        </ul>
+    </nav>
+    <div id="container">
+        <section class="tab">
+            <div>
+                  <label ><input type="checkbox" data-key="config-hook-global">是否挂钩总开关</label> 
+                  <br/>
+                  <label ><input type="checkbox" data-key="config-hook-alt-w">启动 alt + w 快捷键（快捷键开启/关闭日志，当前焦点需在网页上才有效）</label> 
+                  <br/>
+                  <label ><input type="checkbox" data-key="config-hook-console">hook-console（使用 v_log 替换 console.log 并将 console 的属性都设置为空函数）</label> 
+                  <br/>
+                  <label ><input type="checkbox" data-key="config-hook-Function">hook-Function</label> 
+                  <br/>
+                  <label ><input type="checkbox" data-key="config-hook-eval">hook-eval（eval函数会记录上下文，若 eval 用到封闭的上下文参数可能报错）</label> 
+                  <br/>
+                  <label ><input type="checkbox" data-key="config-hook-remove-dyn-debugger">remove-dyn-debugger(need selected "hook-Function" or "hook-eval")</label> 
+                  <br/>
+                  <label ><input type="checkbox" data-key="config-hook-settimeout">hook-settimeout</label> 
+                  <br/>
+                  <label ><input type="checkbox" data-key="config-hook-setinterval">hook-setinterval</label> 
+                  <br/>
+                  <label ><input type="checkbox" data-key="config-hook-random">是否启用启用下面四种调试功能（用于固定随机性，便于对比调试）</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-random-freeze">config-hook-random（让 random 函数固定返回 0.5）</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-random-fake">config-hook-random（让 random 变成伪随机函数。如果已经配置了该伪随机，则会覆盖上面的 0.5）</label> 
+                  <br/>
+                  <label style="margin-left: 20px">
+                    <input type="checkbox" data-key="config-hook-time-freeze">config-hook-time（时间函数返回的值固定成一个数字）
+                    <input style="width: 150px; height: 12px" type="text" data-key="config-hook-time-freeze-number" id="show_now">
+                    <button style="padding: 0px; height: 20px" id="get_now">获取当前时间戳用于固定时间 (注意！！！由于固定时间可能会影响到cookie设置，所以请生成一个当前时间戳再行使用)</button>
+                  </label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-time-performance">config-hook-performance-now（这个时间函数返回的值固定成一个数字）</label> 
+                  <br/>
+                  <div style="border: 1px solid red; margin: 1px">
+                    <div style="margin: 1px; color: red">
+                      此处的两个配置会影响后面的全部挂钩操作
+                    </div>
+                    <div style="margin: 1px">
+                      <label >通过正则匹配URL实现日志输出仅针对你关心的js文件</label> 
+                    </div>
+                    <div style="margin: 1px">
+                      <input style="width: 98%" type="text" data-key="config-hook-regexp-url">
+                    </div>
+                  </div>
+                  <label ><input type="checkbox" data-key="config-hook-log-at">是否在调试输出时，输出函数出发的地址</label> 
+                  <br/>
+                  <label ><input type="checkbox" data-key="config-hook-cookie">是否对 cookie 进行挂钩调试输出</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-cookie-add-debugger">hook-cookie-add-debugger</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-cookie-get">hook-cookie-get</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-cookie-set">hook-cookie-set</label> 
+                  <br/>
+                  <label ><input type="checkbox" data-key="config-hook-encrypt-normal">是否启用下面几个加解密函数挂钩输出功能</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-JSON.parse">hook-JSON.parse</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-JSON.stringify">hook-JSON.stringify</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-decodeURI">hook-decodeURI</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-decodeURIComponent">hook-decodeURIComponent</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-encodeURI">hook-encodeURI</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-encodeURIComponent">hook-encodeURIComponent</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-escape">hook-escape</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-unescape">hook-unescape</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-atob">hook-atob</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-btoa">hook-btoa</label> 
+                  <br/>
+                  <label ><input type="checkbox" data-key="config-hook-domobj">是否启用挂钩 DOM 对象的原型的功能调试输出</label>
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-domobj-get">hook-domobj-显示get输出</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-domobj-set">hook-domobj-显示set输出</label> 
+                  <br/>
+                  <label style="margin-left: 20px"><input type="checkbox" data-key="config-hook-domobj-func">hook-domobj-显示func输出</label> 
+                  <br/>
+            </div>
+            <HR>
+            <div>左侧两列为常用挂钩，建议常开</div>
+            <HR>
+            <div id="getsets_0" style="float: left; width: 300px"></div>
+            <div id="funcs_0" style="float: left; width: 300px"></div>
+            <div id="getsets_1" style="float: left"></div>
+            <div id="funcs_1" style="float: left"></div>
+        </section>
+        <section class="tab">
+            <label ><input type="checkbox" data-key="config-myinject_toogle">是否注入代码开关</label>
+            <HR>
+            <textarea id='myinject' data-key="config-myinject" style="width: 100%; height: 500px"></textarea>
+        </section>
+        <section class="tab">
+            <div>这里的功能：在目标网页上右键菜单选择 “打开 v_jstools 动态调试” 即可开启，使用用插件的方式 hook 住目标页面的所有代码，像是在 node 里面一样使用 ast 将原始的代码修改成期望的样子</div>
+            <div>这里的 hook 功能在一定的扩展之后，能 hook 住 script 链接中的 js 代码，也能 hook 到 html 内的 js 代码。</div>
+            <div>*能直接用插件的方式实现 ast 修改代码，用处还是非常大的。不过目前感觉功能稍微有点干瘪，因为暂时还在想有什么 ast 修改模板代码会更好的捕捉代码信息，让代码更方便的调试。</div>
+            <HR>
+            <div>请定义一个名字为 fetch_hook 函数，接受参数为 1.代码 2.url，return 修改后的代码</div>
+            <div>在代码里面你可以直接使用四个对象，你可以像是在 node 里面一样用这四个对象操作和修改 ast 的结构并重新生成新的代码。对象如下：</div>
+            <div>parser = require("@babel/parser");</div>
+            <div>traverse = require("@babel/traverse").default;</div>
+            <div>t = require("@babel/types");</div>
+            <div>generator = require("@babel/generator").default;</div>
+            <HR>
+            <div>你可以实现挂钩修改所有的 script 代码，所有 script 代码都会被下面的函数挂钩，你可以使用 ast 清除掉里面所有的 debugger。</div>
+            <div>一个使用 ast 删除代码中的 debugger 的代码示例，代码如下：</div>
+            <div>function fetch_hook(code, url){</div>
+            <div>  function removedebugger(path){</div>
+            <div>    path.replaceWith(t.identifier("/*debugger*/"))</div>
+            <div>  }</div>
+            <div>  var ast = parser.parse(code);</div>
+            <div>  traverse(ast, {DebuggerStatement: removedebugger});</div>
+            <div>  var { code } = generator(ast, { jsescOption: { minimal: true, } });</div>
+            <div>  return code</div>
+            <div>}</div>
+            <HR>
+            <div>code:</div>
+            <textarea id='fetch_hook' data-key="config-fetch_hook" style="width: 100%; height: 500px"></textarea>
+        </section>
+        <section class="tab">
+            <button id='sojson'>解密sojson混淆</button>
+            <button id='obnormal'>普通解混淆</button>
+            <button id='ob'>解密ob高级混淆</button>
+            <button id='jsfuck'>解密jsfuck混淆</button>
+            <button id='babel_aline'>将代码变成一行，不压缩[babel]</button>
+            <button id='uglify'>仅变量压缩[uglify-es]</button>
+            <button id='uglify_mini'>完全压缩脚本[uglify-es]</button>
+            <label id='env' style="color: #FFEEEE">cilame</label>
+            <br/>
+            <label>source</label>
+            <textarea id='txt' style="width: 100%; height: 500px"></textarea>
+            <label>code</label>
+            <textarea id='txt2' style="width: 100%; height: 2056px"></textarea>
+        </section>
+    </div>
+    <script src="options.js"></script>
+    <script src="tools/babel_asttool.js"></script>
+    <script src="tools/uglify_es.js"></script>
+    <script src="tools/env_maker.js"></script>
+    <script src="tools/btn_utils.js"></script>
+
+</body>
+</html>
