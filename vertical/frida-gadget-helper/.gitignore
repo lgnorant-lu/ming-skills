@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Runtime logs / temporary files
+*.log
+*.tmp
+.DS_Store
+
+# Local/private Gadget builds
+libgadget-custom*.so
+libgadget-custom*.config.so
+private-*.so
+private-*.config.so
