@@ -1,0 +1,4 @@
+interface:
+  display_name: "验证码协议求解器"
+  short_description: "分析滑块、点选、算术等验证码协议，生成识别、轨迹、加密和提交流程。"
+  default_prompt: "使用 $captcha-solver 分析验证码协议流程，并产出可验证的求解方案。"

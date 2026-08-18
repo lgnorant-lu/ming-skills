@@ -1,0 +1,78 @@
+module(name = "jsir")
+
+# https://registry.bazel.build/modules/bazel_skylib
+bazel_dep(name = "bazel_skylib", version = "1.9.0")
+
+# https://registry.bazel.build/modules/rules_license
+# Required because gentbl_rule implicitly depends on //:license.
+bazel_dep(name = "rules_license", version = "1.0.0")
+
+# https://registry.bazel.build/modules/platforms
+# Required by llvm-project's BUILD files.
+bazel_dep(name = "platforms", version = "1.1.0")
+
+# https://registry.bazel.build/modules/rules_cc
+bazel_dep(name = "rules_cc", version = "0.2.0")
+
+# https://registry.bazel.build/modules/rules_shell
+# Required by llvm-project's BUILD files.
+bazel_dep(name = "rules_shell", version = "0.8.0")
+
+# https://registry.bazel.build/modules/zlib-ng
+# https://registry.bazel.build/modules/zstd
+# Required by llvm-project as optional compression dependencies.
+bazel_dep(name = "zlib-ng", version = "2.3.3", repo_name = "llvm_zlib")
+bazel_dep(name = "zstd", version = "1.5.7.bcr.1", repo_name = "llvm_zstd")
+
+# https://registry.bazel.build/modules/rules_python
+bazel_dep(name = "rules_python", version = "1.0.0")
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "pypi",
+    python_version = "3.11",
+    requirements_lock = "//:requirements.txt",
+)
+use_repo(pip, "pypi")
+
+# https://registry.bazel.build/modules/abseil-cpp
+bazel_dep(name = "abseil-cpp", version = "20260526.0")
+
+# https://registry.bazel.build/modules/nlohmann_json
+bazel_dep(name = "nlohmann_json", version = "3.11.3")
+
+# https://registry.bazel.build/modules/googletest
+bazel_dep(name = "googletest", version = "1.17.0")
+
+# https://registry.bazel.build/modules/protobuf
+bazel_dep(
+    name = "protobuf",
+    version = "31.1",
+    repo_name = "com_google_protobuf",
+)
+
+# https://registry.bazel.build/modules/re2
+bazel_dep(name = "re2", version = "2024-07-02.bcr.1")
+
+# LLVM and QuickJS are not in BCR; fetch them via a module extension.
+llvm_extensions = use_extension("//bazel:extensions.bzl", "llvm_deps")
+use_repo(
+    llvm_extensions,
+    "llvm-raw",
+    "quickjs",
+)
+
+# The subset of LLVM backend targets to compile. NVPTX is required because
+# mlir/test:TestGPU depends on //llvm:NVPTXCodeGen (see setup_llvm.bzl comment).
+_LLVM_TARGETS = [
+    "AArch64",
+    "NVPTX",
+    "X86",
+]
+
+llvm_configure = use_repo_rule("@llvm-raw//utils/bazel:configure.bzl", "llvm_configure")
+
+llvm_configure(
+    name = "llvm-project",
+    targets = _LLVM_TARGETS,
+)

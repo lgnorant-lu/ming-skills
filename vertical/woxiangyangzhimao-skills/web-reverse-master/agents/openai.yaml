@@ -1,0 +1,4 @@
+interface:
+  display_name: "Web逆向全流程编排"
+  short_description: "覆盖情报收集、流量分析、加密定位、方案制定和代码还原的总控技能。"
+  default_prompt: "使用 $web-reverse-master 编排一次完整 Web 逆向流程，并输出可验证的交付物。"

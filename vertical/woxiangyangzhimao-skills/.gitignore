@@ -1,0 +1,24 @@
+node_modules/
+**/node_modules/
+
+# Generated reverse-engineering case artifacts
+captures/
+work/
+notes/
+repro/
+logs/
+tmp/
+.tmp/
+
+# Build and runtime noise
+dist/
+build/
+coverage/
+*.log
+*.tmp
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

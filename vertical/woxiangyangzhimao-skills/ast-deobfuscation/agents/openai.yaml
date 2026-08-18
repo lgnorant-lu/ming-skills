@@ -1,0 +1,4 @@
+interface:
+  display_name: "AST反混淆还原"
+  short_description: "用 Babel AST 分层还原混淆 JavaScript，保留中间产物并逐层验证。"
+  default_prompt: "使用 $ast-deobfuscation 对混淆 JavaScript 做分层反混淆，并验证每一步产物。"

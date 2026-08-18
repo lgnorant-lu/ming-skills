@@ -1,0 +1,962 @@
+/* WorkspaceBackend.sys.mjs — 工作目录能力：把一个本地目录绑定到当前会话，给 Agent 提供
+ *   ① 作用域限定在该目录内的文件读写/列目录（fs_list/fs_read/fs_write/fs_mkdir）
+ *   ② 在该目录内执行 node / python（run_node / run_python）
+ *
+ * 设计：
+ * - 文件操作用 IOUtils/PathUtils（system ESM 全局可用）。所有路径一律相对工作目录解析，
+ *   拒绝绝对路径逃逸与 `..` 越界 —— 避免误写到目录外。
+ * - 执行用 Subprocess.sys.mjs（chrome JS 没有 child_process）：父进程(特权)spawn 宿主的
+ *   node/python，cwd=工作目录，合并 stdout/stderr 回传。⚠ 这等于在用户机器上跑任意代码，
+ *   属用户显式开启的工作站能力（目录由用户在侧边栏选定）。
+ * - macOS GUI 启动的 app PATH 很精简（常缺 /opt/homebrew/bin、/usr/local/bin），所以解析
+ *   可执行文件时除 Subprocess.pathSearch 外，再兜底搜常见安装位置 + 允许配置覆盖。
+ * - Node 自测：无 IOUtils/Subprocess → 相关方法抛错，但模块仍可 import（纯逻辑可验证）。
+ */
+
+const OUT_CAP = 200 * 1024; // 单次执行回传输出上限（ToolRouter 还会再截到 ~20KB）
+const READ_CAP = 512 * 1024; // fs_read 默认上限
+
+function lazyESM(url) {
+  try {
+    return ChromeUtils.importESModule(url);
+  } catch {
+    return null;
+  }
+}
+
+// 运行中的子进程登记。Firefox 的 Subprocess 注册了关机阻塞器，会**等所有 spawn 的子进程退出**
+// 才让父进程退；若 agent 跑的 node 还在（或 run_node/npm 未结束），关浏览器后 firefox.exe 会
+// 一直等它→看着像僵尸进程（最终会退，故能删目录）。对策：关机(quit-application-granted)时主动
+// kill 全部登记的子进程，让主进程立刻退。Node 自测无 Services.obs → try 兜底。
+const _runningProcs = new Set();
+try {
+  Services.obs.addObserver(
+    {
+      observe() {
+        for (const p of _runningProcs) {
+          try {
+            p.kill();
+          } catch {
+            /* 已退/不可 kill */
+          }
+        }
+        _runningProcs.clear();
+      },
+    },
+    "quit-application-granted"
+  );
+} catch {
+  /* 非 Firefox 环境（Node 自测）无 Services.obs */
+}
+
+export class WorkspaceBackend {
+  /** @param {object} [opts] { config?: ConfigStore-like(getNodePath/getPythonPath) } */
+  constructor({ config } = {}) {
+    this._root = null;
+    this._config = config || null;
+  }
+
+  _isWindows() {
+    try {
+      return Services.appinfo.OS === "WINNT";
+    } catch {
+      return false;
+    }
+  }
+
+  _pathListSep() {
+    return this._isWindows() ? ";" : ":";
+  }
+
+  _stripQuotes(s) {
+    return String(s ?? "").trim().replace(/^"+|"+$/g, "");
+  }
+
+  _expandWinEnv(s) {
+    if (!this._isWindows()) {
+      return s;
+    }
+    return String(s).replace(/%([^%]+)%/g, (m, name) => {
+      try {
+        const v = Services.env && Services.env.get(name);
+        return v || m;
+      } catch {
+        return m;
+      }
+    });
+  }
+
+  _normalizePath(path) {
+    let p = this._stripQuotes(path);
+    if (this._isWindows()) {
+      p = this._expandWinEnv(p).replace(/\//g, "\\");
+    }
+    return p;
+  }
+
+  _cleanSearchDir(dir) {
+    let d = this._normalizePath(dir);
+    if (this._isWindows() && /^[A-Za-z]:\\$/.test(d)) {
+      return d;
+    }
+    d = d.replace(/[\\/]+$/, "");
+    // Windows PATH/registry entries often contain unexpanded %NVM_SYMLINK%/%SystemRoot%.
+    // PathUtils.join throws NS_ERROR_FILE_UNRECOGNIZED_PATH for those; skip unresolved ones.
+    if (this._isWindows() && /%[^%]+%/.test(d)) {
+      return "";
+    }
+    return d;
+  }
+
+  _isAbs(path) {
+    const p = String(path || "");
+    if (this._isWindows() && (/^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\"))) {
+      return true;
+    }
+    return PathUtils.isAbsolute(p);
+  }
+
+  _cmpPath(path) {
+    let p = this._normalizePath(path).replace(/\\/g, "/").replace(/\/+$/, "");
+    return this._isWindows() ? p.toLowerCase() : p;
+  }
+
+  _insideRoot(abs, root) {
+    const a = this._cmpPath(abs);
+    const r = this._cmpPath(root);
+    return a === r || a.startsWith(r + "/");
+  }
+
+  _joinPath(dir, ...parts) {
+    const d = this._cleanSearchDir(dir);
+    if (!d) {
+      return null;
+    }
+    try {
+      return PathUtils.join(d, ...parts);
+    } catch {
+      return null;
+    }
+  }
+
+  /** 绑定/切换工作目录（绝对路径）。返回规范化后的根。
+   * 注意：此 setter 设置的是后备全局根。优先使用 ctx.workspaceRoot（工具执行时由会话注入）。 */
+  setRoot(path) {
+    const p = path && this._normalizePath(path);
+    this._root = p || null;
+    return this._root;
+  }
+  /** 返回当前生效的工作目录根：ctx.workspaceRoot（会话级，优先）→ this._root（全局后备）。 */
+  getRoot(ctx) {
+    return this._resolveRoot(ctx);
+  }
+  /** ctx.workspaceRoot 优先于全局 this._root，实现多窗口/多会话隔离。 */
+  _resolveRoot(ctx) {
+    const r = (ctx && ctx.workspaceRoot) || this._root;
+    return r ? this._normalizePath(r) : r;
+  }
+
+  _assertRoot(ctx) {
+    const r = this._resolveRoot(ctx);
+    if (!r) {
+      throw new Error("尚未设置工作目录：请在侧边栏点「打开目录」选择一个本地目录。");
+    }
+    return r;
+  }
+
+  /** 自动归整：新建脚本/数据文件时，**裸文件名**（无子目录、非绝对路径）按扩展名自动归到子目录，
+   *  让工作目录默认就是整洁的，不靠模型记得加 work/。已显式带目录（含 /）或在保留名单里的不动。 */
+  _autoTidy(rel) {
+    let r = String(rel ?? "").replace(/\\/g, "/").trim();
+    if (!r || r.includes("/") || r.startsWith(".")) {
+      return rel; // 已带子目录 / 隐藏文件（.agent-tools 等）→ 尊重原样
+    }
+    const low = r.toLowerCase();
+    // 必须留在根的工具约定文件：npm/pip/ts 等靠它在根才能跑；进展/账本/笔记/说明用户要一眼看到。
+    const ROOT_KEEP = new Set([
+      "package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+      "requirements.txt", "pipfile", "pyproject.toml", "tsconfig.json", "jsconfig.json",
+    ]);
+    if (
+      ROOT_KEEP.has(low) ||
+      /\.md$/i.test(r) ||
+      /^(progress|ledger|notes|readme|report|结论|conclusion)[.\-_]/i.test(r)
+    ) {
+      return rel;
+    }
+    const ext = (r.match(/\.([a-z0-9]+)$/i) || [, ""])[1].toLowerCase();
+    // 脚本 → work/（你写的 loader/实验脚本）；数据 → work/（中间产物）。signer 源码用 scripts_save 落 scripts/，
+    // wasm 用 scripts_save 落 wasm/——那是另两个工具的事，这里只管 fs_write 新建的散文件。
+    if (["js", "cjs", "mjs", "ts", "py", "json", "txt", "ndjson", "hex", "wat"].includes(ext)) {
+      return "work/" + r;
+    }
+    return rel;
+  }
+
+  /** 把用户给的相对/绝对路径安全解析为工作目录内的绝对路径（拒绝越界）。 */
+  _resolve(rel, ctx) {
+    const root = this._assertRoot(ctx);
+    let r = String(rel ?? "").trim();
+    if (!r || r === "." || r === "./") {
+      return root;
+    }
+    r = this._isWindows() ? this._normalizePath(r) : r.replace(/\\/g, "/");
+    const scan = r.replace(/\\/g, "/");
+    const segs = scan.split("/").filter(s => s && s !== ".");
+    if (segs.includes("..")) {
+      throw new Error("路径不允许包含 ..（必须在工作目录内）：" + rel);
+    }
+    if (this._isAbs(r)) {
+      const abs = this._normalizePath(r);
+      if (!this._insideRoot(abs, root)) {
+        throw new Error("路径越界（必须在工作目录内）：" + rel);
+      }
+      return abs;
+    }
+    const abs = PathUtils.join(root, ...segs);
+    if (!this._insideRoot(abs, root)) {
+      throw new Error("路径越界（必须在工作目录内）：" + rel);
+    }
+    return abs;
+  }
+
+  _safeChildPath(dir, name) {
+    return this._joinPath(dir, name);
+  }
+
+  /** 工作目录状态。 */
+  async info() {
+    const root = this._root;
+    if (!root) {
+      return { ok: true, set: false, root: null, note: "未设置工作目录" };
+    }
+    let exists = false;
+    let isDir = false;
+    try {
+      const s = await IOUtils.stat(root);
+      exists = true;
+      isDir = s.type === "directory";
+    } catch {
+      /* 不存在 */
+    }
+    return { ok: true, set: true, root, exists, isDir };
+  }
+
+  /** 列出工作目录（或子目录）下的文件/目录，浅递归（默认 2 层），上限 400 条。 */
+  async list({ subdir = "", depth = 2 } = {}, ctx) {
+    const base = this._resolve(subdir, ctx);
+    const maxDepth = Math.min(Math.max(1, depth | 0), 3);
+    const baseRel = String(subdir || "").replace(/\\/g, "/").replace(/^\.?\/*/, "").replace(/\/+$/, "");
+    const out = [];
+    const walk = async (dir, rel, lvl) => {
+      let children;
+      try {
+        children = await IOUtils.getChildren(dir);
+      } catch {
+        return;
+      }
+      for (const c of children) {
+        if (out.length >= 400) {
+          return;
+        }
+        const name = PathUtils.filename(c);
+        if (name === ".DS_Store") {
+          continue;
+        }
+        let st;
+        try {
+          st = await IOUtils.stat(c);
+        } catch {
+          continue;
+        }
+        const isDir = st.type === "directory";
+        const relPath = rel ? rel + "/" + name : name;
+        out.push({ path: relPath, type: isDir ? "dir" : "file", size: isDir ? undefined : st.size || 0 });
+        if (isDir && lvl < maxDepth) {
+          await walk(c, relPath, lvl + 1);
+        }
+      }
+    };
+    await walk(base, baseRel, 1);
+    out.sort((a, b) => (a.type === b.type ? a.path.localeCompare(b.path) : a.type === "dir" ? -1 : 1));
+    return { ok: true, root: this._resolveRoot(ctx), subdir: subdir || "", count: out.length, entries: out };
+  }
+
+  /** 读工作目录内的文本文件。 */
+  /** 裸文件名在根目录找不到时，扫**一层子目录**(work/scripts/wasm/…)按文件名匹配，返回 {abs, rel} 或 null。
+   *  治实战痛点："fs_write 自动归整到 work/、或文件落在 scripts//wasm/，之后按根路径 fs_read/run_node 报不存在"
+   *  ——写了却读不到（用户实测 run_sign.js 凭空消失）。只扫一层、命中即返回，开销小。 */
+  async _findByBasename(name, ctx) {
+    const root = this._assertRoot(ctx);
+    const atRoot = this._safeChildPath(root, name);
+    if (!atRoot) {
+      return null;
+    }
+    if (await IOUtils.exists(atRoot)) {
+      return { abs: atRoot, rel: name };
+    }
+    let children = [];
+    try {
+      children = await IOUtils.getChildren(root);
+    } catch {
+      return null;
+    }
+    for (const child of children) {
+      let isDir = false;
+      try {
+        isDir = (await IOUtils.stat(child)).type === "directory";
+      } catch {
+        /* 取不到类型就跳过 */
+      }
+      if (!isDir) {
+        continue;
+      }
+      const cand = this._safeChildPath(child, name);
+      if (!cand) {
+        continue;
+      }
+      if (await IOUtils.exists(cand)) {
+        return { abs: cand, rel: PathUtils.filename(child) + "/" + name };
+      }
+    }
+    return null;
+  }
+
+  async read({ path, offset, limit, maxBytes = READ_CAP } = {}, ctx) {
+    if (!path) {
+      throw new Error("path required");
+    }
+    let abs = this._resolve(path, ctx);
+    let size = 0;
+    try {
+      size = (await IOUtils.stat(abs)).size || 0;
+    } catch {
+      // 兜底：裸文件名根目录没有 → 扫一层子目录按文件名找（自动归整到 work/、或落在 scripts//wasm/ 后，
+      // 按根路径读会"不存在"——写了却读不到）。找到就用，并把**真实相对路径**回报给模型。
+      const found = !String(path).includes("/") ? await this._findByBasename(path, ctx) : null;
+      if (found) {
+        abs = found.abs;
+        size = (await IOUtils.stat(abs)).size || 0;
+        path = found.rel; // 回报真实相对路径，模型后续按这个用
+      } else {
+        throw new Error(
+          "文件不存在：" + path + "（根目录与各子目录都没有同名文件；用 fs_list 看实际文件/路径，别凭记忆猜路径）"
+        );
+      }
+    }
+    const hasSlice = offset != null || limit != null;
+    const off = Math.max(0, offset | 0);
+    const BIG = 32 * 1024;
+    // 大文件**未指定切片就整读** → 不 dump 全文（防上下文爆炸/卡死/断掉）。只回头部 + 硬提示：
+    // 把大文件当数据处理——code_search 查询 / run_node 写脚本提取&转换 / 或带 offset+limit 切片读。
+    if (!hasSlice && size > BIG) {
+      const headBytes = await IOUtils.read(abs, { maxBytes: 2000 });
+      const head = new TextDecoder("utf-8", { fatal: false }).decode(headBytes);
+      return {
+        ok: true,
+        path,
+        size,
+        partial: true,
+        truncated: true,
+        content: head,
+        note:
+          `文件 ${size} 字节，过大未整读（仅回头部 2KB）。**大文件是数据、别整读进对话**：` +
+          `① code_search("关键词","${path}") 精搜片段；② 写 run_node 脚本 fs.readFileSync 提取/转换你要的部分，只回小结果或 fs.writeFileSync 落盘（内容不进对话）；` +
+          `③ 确需读某段用 fs_read({path,offset,limit}) 切片。`,
+      };
+    }
+    const cap = Math.min((limit != null ? limit : maxBytes) | 0 || READ_CAP, 4 * 1024 * 1024);
+    const bytes = await IOUtils.read(abs, { offset: off, maxBytes: cap });
+    const content = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    return { ok: true, path, size, offset: off, bytes: bytes.length, truncated: off + bytes.length < size, content };
+  }
+
+  /** 写工作目录内文本文件（自动建父目录）。append=true 时**追加**而非覆盖：
+   *  用于大文件分多次写——避免把整个文件当单次 fs_write 的 content 导致输出被 max_tokens 截断。 */
+  async write({ path, content = "", append = false } = {}, ctx) {
+    if (!path) {
+      throw new Error("path required");
+    }
+    const tidied = this._autoTidy(path); // 裸脚本/数据文件名 → 自动归 work/，保持根目录整洁
+    const abs = this._resolve(tidied, ctx);
+    const dir = PathUtils.parent(abs);
+    if (dir) {
+      await IOUtils.makeDirectory(dir, { ignoreExisting: true, createAncestors: true });
+    }
+    const text = String(content);
+    if (append) {
+      // appendOrCreate：文件不存在则建、存在则在尾部追加（首段也可直接用）。
+      await IOUtils.writeUTF8(abs, text, { mode: "appendOrCreate" });
+    } else {
+      await IOUtils.writeUTF8(abs, text, { tmpPath: abs + ".tmp" });
+    }
+    // 回报**实际落盘路径**（tidied）——若自动归整了，告诉模型后续 fs_read/run_node 用这个路径。
+    const out = { ok: true, path: tidied, bytes: text.length, append: !!append };
+    if (tidied !== path) {
+      out.tidiedFrom = path;
+      out.note = `已自动归整到 \`${tidied}\`（保持工作目录根整洁）。后续 fs_read/run_node 用这个路径。`;
+    }
+    return out;
+  }
+
+  /** 在工作目录内复制文件（服务端直接拷，内容**不经模型输出**）。
+   *  用途：要在 node 里跑/改一个已落盘的大文件（如 scripts_save 落盘的 wasm-bindgen glue），
+   *  复制现成的 + 只写几十行小 loader/补丁；**绝不用 fs_write 把大文件全文重新生成**
+   *  （那要模型一轮吐上万字符 → 撞单轮输出上限被截断 → 卡死/空转）。 */
+  async copy({ src, dst, overwrite = true } = {}, ctx) {
+    if (!src || !dst) {
+      throw new Error("src + dst required");
+    }
+    const absSrc = this._resolve(src, ctx);
+    const absDst = this._resolve(dst, ctx);
+    let size = 0;
+    try {
+      size = (await IOUtils.stat(absSrc)).size || 0;
+    } catch {
+      throw new Error("源文件不存在：" + src);
+    }
+    const dir = PathUtils.parent(absDst);
+    if (dir) {
+      await IOUtils.makeDirectory(dir, { ignoreExisting: true, createAncestors: true });
+    }
+    await IOUtils.copy(absSrc, absDst, { noOverwrite: !overwrite });
+    return { ok: true, src, dst, bytes: size };
+  }
+
+  /** 在工作目录内建子目录。 */
+  async mkdir({ path } = {}, ctx) {
+    if (!path) {
+      throw new Error("path required");
+    }
+    const abs = this._resolve(path, ctx);
+    await IOUtils.makeDirectory(abs, { ignoreExisting: true, createAncestors: true });
+    return { ok: true, path };
+  }
+
+  /** 删除工作目录内的文件/目录（recursive 删目录）。 */
+  async remove({ path, recursive = false } = {}, ctx) {
+    if (!path) {
+      throw new Error("path required");
+    }
+    const abs = this._resolve(path, ctx);
+    if (abs === this._resolveRoot(ctx)) {
+      throw new Error("不能删除工作目录根");
+    }
+    await IOUtils.remove(abs, { recursive: !!recursive, ignoreAbsent: true });
+    return { ok: true, path };
+  }
+
+  /** 解析 node/python 可执行文件：配置覆盖 → PATH 搜索 → 常见安装位置兜底。 */
+  async _resolveExe(kind) {
+    const isWin = (() => { try { return Services.appinfo.OS === "WINNT"; } catch { return false; } })();
+    const baseNames = kind === "node" ? ["node"] : ["python3", "python"];
+    // Windows 可执行带扩展名（node.exe / python.exe），裸名保留兜底
+    const names = isWin ? baseNames.flatMap(n => [n + ".exe", n]) : baseNames;
+    // 1. 配置覆盖
+    try {
+      const cfg = this._config && (kind === "node" ? this._config.getNodePath?.() : this._config.getPythonPath?.());
+      const cfgPath = cfg && this._normalizePath(cfg);
+      if (cfgPath && (await IOUtils.exists(cfgPath))) {
+        return cfgPath;
+      }
+    } catch {
+      /* ignore */
+    }
+    // 2. PATH 搜索
+    const SP = lazyESM("resource://gre/modules/Subprocess.sys.mjs");
+    const Subprocess = SP && SP.Subprocess;
+    if (Subprocess && Subprocess.pathSearch) {
+      for (const n of names) {
+        try {
+          const p = await Subprocess.pathSearch(n);
+          if (p) {
+            return p;
+          }
+        } catch {
+          /* not found, keep trying */
+        }
+      }
+    }
+    // 3. 常见安装位置 + Windows 注册表权威 PATH。
+    //    根因：GUI 启动的浏览器进程继承的 PATH 可能过期/不全（装 Node 后未重登录，
+    //    或版本管理器只写用户 PATH）→ pathSearch 找不到已装的 node。读注册表 PATH 兜底。
+    const dirs = [];
+    if (isWin) {
+      const env = n => Services.env.get(n);
+      const pf = env("ProgramFiles"); if (pf) dirs.push(pf + "\\nodejs");
+      const pf86 = env("ProgramFiles(x86)"); if (pf86) dirs.push(pf86 + "\\nodejs");
+      const ad = env("APPDATA"); if (ad) dirs.push(ad + "\\npm", ad + "\\nvm");
+      const lad = env("LOCALAPPDATA"); if (lad) dirs.push(lad + "\\Microsoft\\WinGet\\Links", lad + "\\fnm", lad + "\\Volta\\bin", lad + "\\nvm");
+      const up = env("USERPROFILE"); if (up) dirs.push(up + "\\scoop\\shims", up + "\\scoop\\apps\\nodejs\\current", up + "\\.volta\\bin");
+      const pd = env("ProgramData"); if (pd) dirs.push(pd + "\\chocolatey\\bin");
+      const nvmHome = env("NVM_HOME"); if (nvmHome) dirs.push(nvmHome);
+      const nvmSymlink = env("NVM_SYMLINK"); if (nvmSymlink) dirs.push(nvmSymlink);
+      // 注册表权威 PATH（HKCU + HKLM 系统环境）：进程继承的 PATH 可能过期，注册表才是真值
+      try {
+        const roots = [
+          [Ci.nsIWindowsRegKey.ROOT_KEY_CURRENT_USER, "Environment"],
+          [Ci.nsIWindowsRegKey.ROOT_KEY_LOCAL_MACHINE,
+            "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment"],
+        ];
+        for (const [root, sub] of roots) {
+          try {
+            const k = Cc["@mozilla.org/windows-registry-key;1"].createInstance(Ci.nsIWindowsRegKey);
+            k.open(root, sub, k.ACCESS_READ);
+            if (k.hasValue("Path")) {
+              for (const d of k.readStringValue("Path").split(";")) {
+                const t = d.trim();
+                if (t) dirs.push(t);
+              }
+            }
+            k.close();
+          } catch { /* ignore this hive */ }
+        }
+      } catch { /* ignore */ }
+    } else {
+      // GUI(Finder/Dock) 启动的 app 不 source 用户 shell rc → 继承的 PATH 精简,常缺 homebrew
+      // 与版本管理器(nvm/fnm/volta/pyenv/asdf…)装的 node/python（用户终端 `which node` 找得到、
+      // 浏览器找不到即此因；nvm 装在 ~/.nvm/versions/node/<ver>/bin 这类版本化目录）。三路兜底，
+      // 顺序贴合用户终端 `which`：① 登录交互 shell 的真实 PATH（覆盖任意管理器、与用户终端一致）
+      // ② 常见 bin ③ 版本管理器目录（治 rc 懒加载 nvm 时登录 PATH 也取不到的情况）。
+      for (const d of await this._loginShellPathDirs()) {
+        dirs.push(d);
+      }
+      dirs.push("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/opt/local/bin");
+      for (const d of await this._versionManagerBinDirs()) {
+        dirs.push(d);
+      }
+    }
+    for (const d of dirs) {
+      for (const n of names) {
+        const p = this._joinPath(d, n);
+        if (!p) {
+          continue;
+        }
+        try {
+          if (await IOUtils.exists(p)) {
+            return p;
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    return null;
+  }
+
+  /** 用用户【登录+交互】shell 取回真实 PATH —— GUI(Finder/Dock) 启动的 app 不 source ~/.zshrc，
+   *  继承的 PATH 里没有 nvm/fnm/volta/asdf 注入的目录（用户终端 `which node` 找得到、浏览器报
+   *  「找不到 node」即此因）。缓存一次；失败/超时返回 []。仅冒号分隔 PATH 的 shell(zsh/bash/sh)有效，
+   *  够覆盖绝大多数 mac/Linux；fish 等少数走下面的版本管理器目录兜底。 */
+  async _loginShellPathDirs() {
+    if (this.__loginPathDirs) {
+      return this.__loginPathDirs;
+    }
+    let out = [];
+    try {
+      const cands = [];
+      try {
+        const s = Services.env && Services.env.get("SHELL");
+        if (s) {
+          cands.push(s);
+        }
+      } catch {
+        /* ignore */
+      }
+      cands.push("/bin/zsh", "/bin/bash", "/bin/sh");
+      let shell = null;
+      for (const c of cands) {
+        try {
+          if (await IOUtils.exists(c)) {
+            shell = c;
+            break;
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      if (shell) {
+        // -l 读 profile（path_helper/版本管理器 init）、-i 读 rc（nvm 常在此）、-c 跑命令即退。
+        const r = await this._spawn(shell, ["-lic", "echo __FRXPATH__=$PATH"], { timeoutMs: 6000 });
+        const m = /__FRXPATH__=([^\n]*)/.exec((r && r.output) || "");
+        if (m && m[1]) {
+          out = m[1].trim().split(":").filter(Boolean);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    this.__loginPathDirs = out;
+    return out;
+  }
+
+  /** 版本管理器装 node/python 的 bin 目录（deterministic 兜底，治 shell rc 懒加载 nvm 时登录 PATH 也取不到）。
+   *  nvm 版本化目录优先 `alias/default`，其余按版本降序；另含 fnm/volta/n/asdf、pyenv/conda、~/.local/bin。 */
+  async _versionManagerBinDirs() {
+    let home;
+    try {
+      home = Services.env.get("HOME");
+    } catch {
+      home = null;
+    }
+    if (!home) {
+      return [];
+    }
+    const J = (...p) => p.join("/");
+    const out = [];
+    const listVersDesc = async root => {
+      try {
+        if (!(await IOUtils.exists(root))) {
+          return [];
+        }
+        const vs = (await IOUtils.getChildren(root)).map(p => PathUtils.filename(p));
+        vs.sort((a, b) => this._cmpVerDesc(a, b));
+        return vs;
+      } catch {
+        return [];
+      }
+    };
+    // nvm: ~/.nvm/versions/node/<ver>/bin —— 优先 default 别名指向的版本，其余按版本降序
+    const nvmRoot = J(home, ".nvm", "versions", "node");
+    let nvmVers = await listVersDesc(nvmRoot);
+    try {
+      const def = J(home, ".nvm", "alias", "default");
+      if (await IOUtils.exists(def)) {
+        const d = (await IOUtils.readUTF8(def)).trim();
+        if (d) {
+          nvmVers = [d, ...nvmVers.filter(v => v !== d)];
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    for (const v of nvmVers) {
+      out.push(J(nvmRoot, v, "bin"));
+    }
+    // fnm: ~/.local/share/fnm/... 或 ~/Library/Application Support/fnm/...
+    for (const fnmRoot of [
+      J(home, ".local", "share", "fnm", "node-versions"),
+      J(home, "Library", "Application Support", "fnm", "node-versions"),
+    ]) {
+      for (const v of await listVersDesc(fnmRoot)) {
+        out.push(J(fnmRoot, v, "installation", "bin"));
+      }
+    }
+    // volta / n / asdf shims / 用户 local + python 管理器(pyenv shims / conda)
+    out.push(
+      J(home, ".volta", "bin"),
+      J(home, "n", "bin"),
+      J(home, ".asdf", "shims"),
+      J(home, ".local", "bin"),
+      J(home, ".pyenv", "shims"),
+      J(home, ".pyenv", "bin"),
+      J(home, "miniconda3", "bin"),
+      J(home, "anaconda3", "bin"),
+      J(home, "miniforge3", "bin")
+    );
+    return out;
+  }
+
+  /** 版本目录名降序比较（"v23.11.0"/"23.9.0"… 取数字段比较；非数字段当 -1）。 */
+  _cmpVerDesc(a, b) {
+    const parse = s =>
+      String(s)
+        .replace(/^v/, "")
+        .split(/[.\-+]/)
+        .map(x => (/^\d+$/.test(x) ? parseInt(x, 10) : -1));
+    const pa = parse(a);
+    const pb = parse(b);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const x = pa[i] ?? -1;
+      const y = pb[i] ?? -1;
+      if (x !== y) {
+        return y - x;
+      }
+    }
+    return 0;
+  }
+
+  /**
+   * 构造派生进程的 PATH：exe 所在目录 + 常见 bin + 继承的 PATH（去重保序）。
+   * 根因：GUI(Finder/Dock) 启动的浏览器 PATH 精简(常无 /usr/local/bin、/opt/homebrew/bin)，
+   * node 本体能被 _resolveExe 兜底找到，但 node 再 spawn 兄弟工具(npm/npx)时用的是**继承的精简 PATH**→找不到=「npm 不可用」。
+   * 把 exe 目录并入 PATH，node 的 child_process 与 npm 的 `env node` shebang 就都能寻到。
+   */
+  _mergedPath(exe) {
+    let base = "";
+    try {
+      const env =
+        Services.env || Cc["@mozilla.org/process/environment;1"].getService(Ci.nsIEnvironment);
+      base = (env && env.get("PATH")) || "";
+    } catch {
+      /* ignore */
+    }
+    const isWin = this._isWindows();
+    const sep = this._pathListSep();
+    const parts = [];
+    if (exe) {
+      try {
+        parts.push(PathUtils.parent(exe));
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!isWin) {
+      for (const d of ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/opt/local/bin", "/usr/sbin", "/sbin"]) {
+        parts.push(d);
+      }
+    }
+    for (const d of base.split(sep)) {
+      const clean = this._cleanSearchDir(d);
+      if (clean) {
+        parts.push(clean);
+      }
+    }
+    const seen = new Set();
+    return parts.filter(p => p && !seen.has(p) && seen.add(p)).join(sep);
+  }
+
+  /** 派生子进程并捕获合并输出（node/python/npm 共用）。PATH 经 _mergedPath 补全。 */
+  async _spawn(command, argv, { root, timeoutMs = 120000, signal } = {}) {
+    const SP = lazyESM("resource://gre/modules/Subprocess.sys.mjs");
+    const Subprocess = SP && SP.Subprocess;
+    if (!Subprocess) {
+      throw new Error("Subprocess 不可用（须在 firefox-reverse 浏览器内运行）");
+    }
+    const proc = await Subprocess.call({
+      command,
+      arguments: argv,
+      workdir: root,
+      environment: { PATH: this._mergedPath(command) },
+      environmentAppend: true, // 继承父进程环境，仅覆盖 PATH（补 exe 目录+常见 bin，让 npm/npx 可寻）
+      stderr: "stdout", // 合并 stderr 到 stdout 一并回传
+    });
+    _runningProcs.add(proc); // 登记，供关机/中止时统一 kill（防 Subprocess 关机阻塞器等待）
+    // ★中止即杀子进程：stop() 触发 ctx.signal abort 时立刻 kill，否则 hang 住的 run_node
+    //   会把整个回合卡到 timeoutMs(300s) 才 settle（用户撞到的"stop 不即时生效"根因）。
+    let aborted = false;
+    const onAbort = () => {
+      aborted = true;
+      try {
+        proc.kill();
+      } catch {
+        /* ignore */
+      }
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+    const T = lazyESM("resource://gre/modules/Timer.sys.mjs");
+    let timedOut = false;
+    let timer = null;
+    if (T && T.setTimeout) {
+      timer = T.setTimeout(() => {
+        timedOut = true;
+        try {
+          proc.kill();
+        } catch {
+          /* ignore */
+        }
+      }, Math.max(1000, timeoutMs | 0));
+    }
+    let output = "";
+    let capped = false;
+    try {
+      let chunk;
+      while ((chunk = await proc.stdout.readString())) {
+        output += chunk;
+        if (output.length > OUT_CAP) {
+          output = output.slice(0, OUT_CAP) + "\n…（输出已截断）";
+          capped = true;
+          try {
+            proc.kill();
+          } catch {
+            /* ignore */
+          }
+          break;
+        }
+      }
+    } finally {
+      if (timer && T && T.clearTimeout) {
+        T.clearTimeout(timer);
+      }
+    }
+    let exitCode = null;
+    try {
+      ({ exitCode } = await proc.wait());
+    } catch {
+      /* killed */
+    }
+    _runningProcs.delete(proc); // 已退出 → 取消登记
+    if (signal) {
+      try {
+        signal.removeEventListener("abort", onAbort);
+      } catch {
+        /* ignore */
+      }
+    }
+    return { exitCode, timedOut, capped, output, aborted };
+  }
+
+  async _run(kind, { code, file, args = [], timeoutMs = 30000 } = {}, ctx) {
+    const root = this._assertRoot(ctx);
+    await IOUtils.makeDirectory(root, { ignoreExisting: true, createAncestors: true });
+    const exe = await this._resolveExe(kind);
+    if (!exe) {
+      throw new Error(
+        `找不到 ${kind} 可执行文件（已尝试：继承 PATH + 登录 shell 真实 PATH + homebrew/usr-local + ` +
+          `nvm/fnm/volta/pyenv 等版本管理器目录）。请确认已安装；若用的是少见安装方式（如 fish shell 下的 nvm），` +
+          `直接在 Agent 设置里把 ${kind} 路径填成 \`which ${kind}\` 的输出即可。`
+      );
+    }
+    const argv = [];
+    if (code != null && String(code).length) {
+      argv.push(kind === "node" ? "-e" : "-c", String(code));
+    } else if (file) {
+      // 兜底：传了裸文件名但根目录没有 → 扫一层子目录按文件名找（自动归整到 work/、或落在 scripts//wasm/）。
+      let abs = this._resolve(file, ctx);
+      if (!file.includes("/") && !(await IOUtils.exists(abs))) {
+        const found = await this._findByBasename(file, ctx);
+        if (found) {
+          abs = found.abs;
+        }
+      }
+      argv.push(abs);
+    } else {
+      throw new Error("需要 code（内联代码）或 file（目录内脚本路径）之一");
+    }
+    for (const a of Array.isArray(args) ? args : []) {
+      argv.push(String(a));
+    }
+    const r = await this._spawn(exe, argv, { root, timeoutMs, signal: ctx && ctx.signal });
+    const out = {
+      ok: r.exitCode === 0 && !r.timedOut && !r.aborted,
+      kind,
+      exe,
+      exitCode: r.exitCode,
+      timedOut: r.timedOut,
+      aborted: r.aborted,
+      capped: r.capped,
+      cwd: root,
+      output: r.output,
+    };
+    // 反卡死：内联 code 很大且反复改跑 → 每个 assistant 消息都带这段大 code（工具入参不受结果上限约束）
+    // → 上下文飞涨 → 大请求让中转站/推理模型 >300s 出不来响应头 → 超时卡死。引导改用落盘脚本。
+    if (code != null && String(code).length > 3000) {
+      out.note =
+        `本次 inline code ${String(code).length} 字符偏大。反复改跑大 inline 脚本会把它一份份堆进上下文→拖慢甚至 300s 超时。` +
+        `建议：fs_write 到 work/xxx.${kind === "node" ? "js" : "py"} 一次，之后 run_${kind}(file:"work/xxx...") 跑、只改文件，不再内联大段代码。`;
+    }
+    return out;
+  }
+
+  /** 解析 npm：优先 node 同级目录（版本匹配最可靠），再 PATH/常见目录兜底。 */
+  async _resolveNpm() {
+    const isWin = (() => { try { return Services.appinfo.OS === "WINNT"; } catch { return false; } })();
+    // Windows 的 npm 是 npm.cmd（不是无扩展名的 npm）
+    const npmNames = isWin ? ["npm.cmd", "npm.exe", "npm"] : ["npm"];
+    try {
+      const node = await this._resolveExe("node");
+      if (node) {
+        const parent = PathUtils.parent(node);
+        for (const nm of npmNames) {
+          const sib = this._joinPath(parent, nm);
+          if (!sib) {
+            continue;
+          }
+          if (await IOUtils.exists(sib)) {
+            return sib;
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    const SP = lazyESM("resource://gre/modules/Subprocess.sys.mjs");
+    const Subprocess = SP && SP.Subprocess;
+    if (Subprocess && Subprocess.pathSearch) {
+      for (const nm of npmNames) {
+        try {
+          const p = await Subprocess.pathSearch(nm);
+          if (p) {
+            return p;
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    const dirs = [];
+    if (isWin) {
+      const env = n => Services.env.get(n);
+      const pf = env("ProgramFiles"); if (pf) dirs.push(pf + "\\nodejs");
+      const ad = env("APPDATA"); if (ad) dirs.push(ad + "\\npm", ad + "\\nvm");
+      const nvmHome = env("NVM_HOME"); if (nvmHome) dirs.push(nvmHome);
+      const nvmSymlink = env("NVM_SYMLINK"); if (nvmSymlink) dirs.push(nvmSymlink);
+      const lad = env("LOCALAPPDATA"); if (lad) dirs.push(lad + "\\Volta\\bin", lad + "\\Microsoft\\WinGet\\Links");
+    } else {
+      dirs.push("/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/opt/local/bin");
+    }
+    for (const d of dirs) {
+      for (const nm of npmNames) {
+        const p = this._joinPath(d, nm);
+        if (!p) {
+          continue;
+        }
+        try {
+          if (await IOUtils.exists(p)) {
+            return p;
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * npm install（在工作目录内）。装到 <工作目录>/node_modules，run_node 里可直接 require。
+   * 解决「三方加密库正常 npm 加载」：jsdom / crypto-js / sm-crypto / node-forge 等。
+   * @param {object} p { packages?: string[]|string, args?: string[], timeoutMs?: number }
+   */
+  async npmInstall({ packages = [], args = [], timeoutMs = 300000 } = {}, ctx) {
+    const root = this._assertRoot(ctx);
+    await IOUtils.makeDirectory(root, { ignoreExisting: true, createAncestors: true });
+    const npm = await this._resolveNpm();
+    if (!npm) {
+      throw new Error(
+        "找不到 npm。请确认已安装 Node.js（安装包自带 npm；Windows 为 npm.cmd）并使 node 在 PATH 中，或在设置里配置 node 路径。"
+      );
+    }
+    const pkgs = (Array.isArray(packages) ? packages : [packages]).filter(Boolean).map(String);
+    const extra = (Array.isArray(args) ? args : []).map(String);
+    const argv = ["install", ...pkgs, ...extra];
+    const r = await this._spawn(npm, argv, { root, timeoutMs, signal: ctx && ctx.signal });
+    return {
+      ok: r.exitCode === 0 && !r.timedOut,
+      npm,
+      packages: pkgs,
+      exitCode: r.exitCode,
+      timedOut: r.timedOut,
+      capped: r.capped,
+      cwd: root,
+      output: r.output,
+      note:
+        r.exitCode === 0 && !r.timedOut
+          ? `已安装 ${pkgs.length ? pkgs.join(", ") : "package.json 依赖"} 到 ${root}/node_modules，run_node 里可直接 require。`
+          : "npm install 失败/超时，看 output。常见原因：无网络 / 包名错 / 需先有 package.json。",
+    };
+  }
+
+  runNode(a = {}, ctx) {
+    return this._run("node", a, ctx);
+  }
+  runPython(a = {}, ctx) {
+    return this._run("python", a, ctx);
+  }
+}

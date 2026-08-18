@@ -1,0 +1,4 @@
+interface:
+  display_name: "浏览器补环境生成器"
+  short_description: "为 Node.js VM 生成浏览器 API 补环境，让目标 SDK 能加载并通过验证。"
+  default_prompt: "使用 $env-patcher 为目标 SDK 生成最小浏览器补环境，并验证加载结果。"

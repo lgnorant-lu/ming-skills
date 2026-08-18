@@ -1,0 +1,4 @@
+interface:
+  display_name: "加密参数生成器"
+  short_description: "复现 MD5、AES、RSA、H5ST、a_bogus 等 Web 签名和加密参数。"
+  default_prompt: "使用 $param-encryptor 根据样本复现 Web 签名或加密参数，并做本地对照验证。"

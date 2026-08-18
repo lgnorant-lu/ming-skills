@@ -1,0 +1,4 @@
+interface:
+  display_name: "逆向证据链排错"
+  short_description: "排查签名不一致、Hook 失效、补环境漂移等问题，一次只验证一个假设。"
+  default_prompt: "使用 $web-reverse-systematic-debugging 对逆向结果不一致问题做证据链排错。"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "逆向样本驱动复现"
+  short_description: "先写 parity 对照测试，再最小实现签名、加密、解密或协议复现逻辑。"
+  default_prompt: "使用 $web-reverse-test-driven-development 用真实样本驱动复现 Web 签名或加密逻辑。"

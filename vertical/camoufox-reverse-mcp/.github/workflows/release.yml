@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' pyproject.toml)
+          tag="v${version}"
+          title=$(git tag -l "$tag" --format='%(contents:subject)')
+          notes_file="docs/releases/${tag}.md"
+          if ! git rev-parse --verify "refs/tags/${tag}^{commit}" >/dev/null 2>&1; then
+            echo "No ${tag} tag exists; skipping release."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            if [[ -f "$notes_file" ]]; then
+              gh release edit "$tag" \
+                --title "${title:-$tag}" \
+                --notes-file "$notes_file" \
+                --latest
+              echo "Release ${tag} notes updated from ${notes_file}."
+            else
+              echo "Release ${tag} already exists; no versioned notes found."
+            fi
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "title=${title:-$tag}" >> "$GITHUB_OUTPUT"
+          echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/setup-python@v6
+        if: steps.release.outputs.publish == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Build release artifacts
+        if: steps.release.outputs.publish == 'true'
+        run: |
+          git checkout --detach "${{ steps.release.outputs.tag }}"
+          python -m pip install build
+          python -m build
+      - name: Publish GitHub release
+        if: steps.release.outputs.publish == 'true'
+        shell: bash
+        run: |
+          notes_file="${{ steps.release.outputs.notes_file }}"
+          if [[ -f "$notes_file" ]]; then
+            gh release create "${{ steps.release.outputs.tag }}" \
+              dist/* \
+              --verify-tag \
+              --title "${{ steps.release.outputs.title }}" \
+              --notes-file "$notes_file" \
+              --latest
+          else
+            gh release create "${{ steps.release.outputs.tag }}" \
+              dist/* \
+              --verify-tag \
+              --title "${{ steps.release.outputs.title }}" \
+              --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}

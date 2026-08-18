@@ -1,0 +1,4 @@
+interface:
+  display_name: "逆向按计划执行"
+  short_description: "严格按计划逐步执行逆向任务，每一步保存证据、运行验证并记录结论。"
+  default_prompt: "使用 $web-reverse-executing-plans 按计划执行逆向任务，并逐步验收每个产物。"

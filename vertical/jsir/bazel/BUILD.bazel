@@ -1,0 +1,17 @@
+# Helper files for setting up the bazel workspace
+
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bzl_library(
+    name = "extensions_bzl",
+    srcs = ["extensions.bzl"],
+    visibility = ["//visibility:private"],
+)
+
+bzl_library(
+    name = "lit_bzl",
+    srcs = ["lit.bzl"],
+    visibility = ["//visibility:private"],
+)

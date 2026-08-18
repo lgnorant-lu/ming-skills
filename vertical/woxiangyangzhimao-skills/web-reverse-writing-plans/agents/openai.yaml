@@ -1,0 +1,4 @@
+interface:
+  display_name: "逆向实施计划"
+  short_description: "把逆向目标拆成可执行、可验证、可回退的小步骤和产物清单。"
+  default_prompt: "使用 $web-reverse-writing-plans 把已确定的逆向路线拆成逐步验证的实施计划。"
