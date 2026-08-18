@@ -1,0 +1,17 @@
+[
+  {
+    "id": 1,
+    "prompt": "小程序反编译后的代码在 ./wx_reverse_output/ 目录，帮我分析请求签名逻辑，写 sign_core.py 并验证。",
+    "expected": "定位签名算法源文件和行号、输出 ./output/sign_core.py、包含 verify_sign.py 验证脚本"
+  },
+  {
+    "id": 2,
+    "prompt": "帮我反编译 ./app.wxapkg，分析签名和加密逻辑，构建完整的 mitm 双代理适配器。",
+    "expected": "完整 Step 1-7 流程，产出 sign_core.py、上下游 adapter、TASK_REPORT.md（中文）"
+  },
+  {
+    "id": 3,
+    "prompt": "这个反编译目录里有 __TENCENT_CHAOS_VM 混淆，帮我用动态提取方式走 Node.js 拿到签名，构建 adapter。",
+    "expected": "使用 chaos_vm_guide.md 指导，走 sign_helper_template.js 动态提取路径"
+  }
+]
