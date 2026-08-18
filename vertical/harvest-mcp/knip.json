@@ -1,0 +1,39 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": ["src/server.ts"],
+  "project": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts"],
+  "ignore": [
+    "coverage/**",
+    "dist/**",
+    "html/**",
+    "manual-session-artifacts/**",
+    "node_modules/**",
+    "docs/**",
+    "issues/**",
+    "tests/manual/**",
+    // These files are used by generated code, so knip cannot detect their usage statically
+    "src/core/ast/CookieManager.ts",
+    "src/core/ast/SharedTypes.ts"
+  ],
+  "ignoreDependencies": ["pino-pretty"],
+  "ignoreBinaries": ["tsc"],
+  "ignoreExportsUsedInFile": true,
+  "rules": {
+    "binaries": "warn",
+    "dependencies": "error",
+    "devDependencies": "warn",
+    "duplicates": "error",
+    "enumMembers": "warn",
+    "exports": "error",
+    "files": "error",
+    "nsExports": "warn",
+    "classMembers": "warn",
+    "types": "warn",
+    "nsTypes": "warn",
+    "unlisted": "warn",
+    "unresolved": "error"
+  },
+  "vitest": {
+    "config": "vitest.config.ts"
+  }
+}
