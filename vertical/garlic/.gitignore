@@ -1,0 +1,10 @@
+build/
+.idea/
+.vscode/
+.zig-cache/
+zig-out/
+zig-pkg/
+cmake-build-debug/
+doc/
+cmake-build-release/
+/*.java
