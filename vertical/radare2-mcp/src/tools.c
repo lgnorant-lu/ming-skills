@@ -1,0 +1,1600 @@
+/* r2mcp - MIT - Copyright 2025-2026 - pancake */
+
+#include <r_core.h>
+#include "r2mcp.h"
+#include "tools.h"
+#include "validation.h"
+#include "path.inc.c"
+#include "utils.inc.c"
+#include "jsonrpc.h"
+
+#define HAVE_VSQL 0
+
+typedef char *(*ToolFunc)(ServerState *ss, RJson *tool_args);
+
+typedef struct {
+	const char *name;
+	ToolFunc func;
+} ToolEntry;
+
+extern ToolSpec tool_specs[];
+
+// Parameter validation helpers
+static inline bool validate_required_string_param(RJson *args, const char *param_name, const char **out_value) {
+	const char *value = r_json_get_str (args, param_name);
+	if (value) {
+		*out_value = value;
+		return true;
+	}
+	return false;
+}
+
+static bool validate_address_param(RJson *args, const char *param_name, const char **out_address) {
+	return validate_required_string_param (args, param_name, out_address);
+}
+
+static bool rjson_get_int_param(RJson *args, const char *param_name, int *out_value) {
+	const RJson *field = r_json_get (args, param_name);
+	if (!field) {
+		return false;
+	}
+	if (field->type == R_JSON_INTEGER) {
+		*out_value = (int)field->num.s_value;
+		return true;
+	}
+	if (field->type == R_JSON_DOUBLE) {
+		*out_value = (int)field->num.dbl_value;
+		return true;
+	}
+	if (field->type == R_JSON_STRING && R_STR_ISNOTEMPTY (field->str_value)) {
+		char *end = NULL;
+		double n = strtod (field->str_value, &end);
+		if (end != field->str_value) {
+			while (IS_WHITESPACE (*end)) {
+				end++;
+			}
+			if (!*end) {
+				*out_value = (int)n;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static bool rjson_get_baddr_param(RJson *args, ut64 *out_baddr, char **out_error) {
+	const RJson *field = r_json_get (args, "baddr");
+	*out_baddr = UT64_MAX;
+	if (out_error) {
+		*out_error = NULL;
+	}
+	if (!field) {
+		return true;
+	}
+	if (field->type != R_JSON_STRING || R_STR_ISEMPTY (field->str_value)) {
+		if (out_error) {
+			*out_error = strdup ("Invalid parameter 'baddr': expected numeric string");
+		}
+		return false;
+	}
+	if (!r_num_is_valid_input (NULL, field->str_value)) {
+		if (out_error) {
+			*out_error = strdup ("Invalid parameter 'baddr': expected numeric expression");
+		}
+		return false;
+	}
+	*out_baddr = r_num_math (NULL, field->str_value);
+	return true;
+}
+
+// Read an optional boolean flag using radare2's standard string forms.
+static bool rjson_get_bool_flag(RJson *args, const char *param_name) {
+	const RJson *field = r_json_get (args, param_name);
+	if (!field) {
+		return false;
+	}
+	switch (field->type) {
+	case R_JSON_BOOLEAN:
+		return field->num.u_value != 0;
+	case R_JSON_INTEGER:
+		return field->num.s_value != 0;
+	case R_JSON_DOUBLE:
+		return field->num.dbl_value != 0;
+	case R_JSON_STRING:
+		return r_str_is_true (field->str_value);
+	default:
+		break;
+	}
+	return false;
+}
+
+static char *tool_cmd_response(char *res);
+static char *tool_cmd_response_paginated(ServerState *ss, char *res, RJson *tool_args);
+static char *filter_lines_by_regex(const char *input, const char *pattern);
+
+// Count results of a r2 listing command using r2's native grep facility.
+// Filtered counts are done locally because r2's `~` syntax is not a regex.
+static int r2_grep_count(ServerState *ss, const char *cmd) {
+	char *res = r2mcp_cmdf (ss, "%s~?", cmd);
+	int n = R_STR_ISEMPTY (res)? 0: atoi (r_str_trim_head_ro (res));
+	free (res);
+	if (n < 0) {
+		n = 0;
+	}
+	return n;
+}
+
+static char *count_response(int n) {
+	char *s = r_str_newf ("%d", n);
+	char *resp = jsonrpc_tooltext_response (s);
+	free (s);
+	return resp;
+}
+
+static void pagination_params(RJson *tool_args, const char **cursor, int *page_size) {
+	*cursor = tool_args? r_json_get_str (tool_args, "cursor"): NULL;
+	*page_size = 0;
+	if (tool_args) {
+		rjson_get_int_param (tool_args, "page_size", page_size);
+	}
+	if (*page_size <= 0) {
+		*page_size = R2MCP_DEFAULT_PAGE_SIZE;
+	}
+	if (*page_size > R2MCP_MAX_PAGE_SIZE) {
+		*page_size = R2MCP_MAX_PAGE_SIZE;
+	}
+}
+
+static int list_line_count(const char *res) {
+	return R_STR_ISEMPTY (res)? 0: r_str_char_count (res, '\n');
+}
+
+static char *filter_list_result(char *res, RJson *tool_args) {
+	const char *filter = tool_args? r_json_get_str (tool_args, "filter"): NULL;
+	if (R_STR_ISNOTEMPTY (filter)) {
+		char *r = filter_lines_by_regex (res, filter);
+		free (res);
+		res = r;
+	}
+	return res;
+}
+
+static char *list_text_response(ServerState *ss, char *res, RJson *tool_args) {
+	res = filter_list_result (res, tool_args);
+	if (tool_args && rjson_get_bool_flag (tool_args, "count")) {
+		int n = list_line_count (res);
+		free (res);
+		return count_response (n);
+	}
+	const char *filter = tool_args? r_json_get_str (tool_args, "filter"): NULL;
+	if (R_STR_ISNOTEMPTY (filter) && R_STR_ISEMPTY (res)) {
+		free (res);
+		return jsonrpc_tooltext_response ("No results matched the given filter.");
+	}
+	return tool_cmd_response_paginated (ss, res, tool_args);
+}
+
+// Shared implementation for list_* tools that share the simple pattern
+// "run a r2 listing command, optionally filter the output by regex, optionally
+// return only a count, otherwise page the result". Returns a JSON-RPC response
+// string (caller frees).
+static char *list_cmd_response(ServerState *ss, RJson *tool_args, const char *cmd) {
+	bool count_only = tool_args && rjson_get_bool_flag (tool_args, "count");
+	const char *filter = tool_args? r_json_get_str (tool_args, "filter"): NULL;
+	if (count_only && R_STR_ISEMPTY (filter)) {
+		int n = r2_grep_count (ss, cmd);
+		if (n >= 0) {
+			return count_response (n);
+		}
+	}
+	char *res = r2mcp_cmd (ss, cmd);
+	return list_text_response (ss, res, tool_args);
+}
+
+static char *tool_cmd_response(char *res) {
+	char *response = jsonrpc_tooltext_response (res);
+	free (res);
+	return response;
+}
+
+static char *tool_cmd_response_paginated(ServerState *ss, char *res, RJson *tool_args) {
+	const char *cursor;
+	int page_size;
+	bool has_more = false;
+	char *next_cursor = NULL;
+	char *paginated;
+	char *response;
+	R2McpContentMode mode = ss? ss->content_mode: R2MCP_CONTENT_TEXT;
+	pagination_params (tool_args, &cursor, &page_size);
+	char *json_buf = strdup (res? res: "");
+	r_str_trim (json_buf);
+	if (R_STR_ISNOTEMPTY (json_buf) && (*json_buf == '[' || *json_buf == '{')) {
+		RJson *json = r_json_parse (json_buf);
+		if (json) {
+			paginated = paginate_json_value (json, cursor, page_size, &has_more, &next_cursor);
+			r_json_free (json);
+			free (json_buf);
+			free (res);
+			if (!paginated) {
+				paginated = strdup ("");
+			}
+			response = jsonrpc_tool_response_paginated (paginated, paginated, mode, has_more, next_cursor);
+			free (paginated);
+			free (next_cursor);
+			return response;
+		}
+	}
+	free (json_buf);
+	paginated = paginate_text_by_lines (res, cursor, page_size, &has_more, &next_cursor);
+	free (res);
+	if (!paginated) {
+		paginated = strdup ("");
+	}
+	response = jsonrpc_tool_response_paginated (paginated, NULL, mode, has_more, next_cursor);
+	free (paginated);
+	free (next_cursor);
+	return response;
+}
+
+// Mode-aware variant of tool_cmd_response, frees both inputs
+R_UNUSED static char *tool_mode_response(ServerState *ss, char *text, char *structured_json) {
+	char *response = jsonrpc_tool_response (text, structured_json, ss->content_mode);
+	free (text);
+	free (structured_json);
+	return response;
+}
+
+static inline const char *fx(ServerState *ss) {
+	return ss->frida_mode? ":": "";
+}
+
+static inline ToolMode current_mode(const ServerState *ss) {
+	ToolMode mode = 0;
+	if (ss->readonly_mode) {
+		mode |= TOOL_MODE_RO;
+	} else {
+		if (ss->http_mode) {
+			mode |= TOOL_MODE_HTTP;
+		}
+		if (ss->frida_mode) {
+			mode |= TOOL_MODE_FRIDA;
+		}
+		if (ss->minimode) {
+			mode |= TOOL_MODE_MINI;
+		}
+		if (mode == 0) {
+			mode = TOOL_MODE_NORMAL;
+		}
+	}
+	if (ss->use_sessions) {
+		mode |= TOOL_MODE_SESSIONS;
+	}
+	if (ss->enable_run_command_tool) {
+		mode |= TOOL_MODE_EXEC;
+	}
+	return mode;
+}
+
+static bool tool_eligible(const ServerState *ss, const ToolSpec *t, ToolMode mode) {
+	bool mode_match = (!(t->modes & TOOL_MODE_EXEC) || (mode & TOOL_MODE_EXEC))
+		&& (t->modes & mode & ~TOOL_MODE_EXEC);
+	bool included = !ss->enabled_tools || r_list_find (ss->enabled_tools, t->name, (RListComparator)strcmp);
+	bool excluded = ss->disabled_tools && r_list_find (ss->disabled_tools, t->name, (RListComparator)strcmp);
+	return mode_match && included && !excluded;
+}
+
+static bool tool_available(const ServerState *ss, const ToolSpec *t, ToolMode mode) {
+	return tool_eligible (ss, t, mode)
+		|| (ss->permissive_tools && (!(t->modes & TOOL_MODE_EXEC) || (mode & TOOL_MODE_EXEC)));
+}
+
+static ToolSpec *tool_spec_by_name(const char *name) {
+	size_t i;
+	if (!name) {
+		return NULL;
+	}
+	for (i = 0; tool_specs[i].name; i++) {
+		ToolSpec *t = &tool_specs[i];
+		if (!strcmp (t->name, name)) {
+			return t;
+		}
+	}
+	return NULL;
+}
+
+typedef struct {
+	char flag;
+	ToolMode mode;
+	const char *name;
+	const char *selector;
+	const char *description;
+} ToolModeHelp;
+
+static const ToolModeHelp tool_mode_help[] = {
+	{ 'M', TOOL_MODE_MINI, "mini", "-m", "minimal local tool subset" },
+	{ 'H', TOOL_MODE_HTTP, "http", "-u [url]", "remote r2 webserver client tools" },
+	{ 'F', TOOL_MODE_FRIDA, "frida", "frida://", "Frida target/process tools" },
+	{ 'R', TOOL_MODE_RO, "readonly", "-R", "non-mutating tools; overrides N/M/H/F selection" },
+	{ 'S', TOOL_MODE_SESSIONS, "sessions", "-L", "session management tools; additive" },
+	{ 'X', TOOL_MODE_EXEC, "exec", "-r", "permit run_* tools" },
+	{ 'N', TOOL_MODE_NORMAL, "normal", "default", "standard local radare2 tools" },
+	{ 0, 0, NULL, NULL, NULL }
+};
+
+static void tool_modes_string(int modes, char *buf, size_t len) {
+	size_t p = 0;
+	size_t i;
+	if (!buf || len < 1) {
+		return;
+	}
+	for (i = 0; tool_mode_help[i].flag && p + 1 < len; i++) {
+		if (modes & tool_mode_help[i].mode) {
+			buf[p++] = tool_mode_help[i].flag;
+		}
+	}
+	buf[p] = '\0';
+}
+
+char *tools_build_catalog_json(const ServerState *ss, const char *cursor, int page_size) {
+	int start_index = 0;
+	if (cursor) {
+		start_index = atoi (cursor);
+		if (start_index < 0) {
+			start_index = 0;
+		}
+	}
+
+	int end_index = start_index + page_size;
+	int idx = 0;
+	ToolMode mode = current_mode (ss);
+	PJ *pj = pj_new ();
+	pj_o (pj);
+	pj_k (pj, "tools");
+	pj_a (pj);
+	size_t i;
+	for (i = 0; tool_specs[i].name; i++) {
+		ToolSpec *t = &tool_specs[i];
+		if (!tool_eligible (ss, t, mode)) {
+			continue;
+		}
+		if (idx >= start_index && idx < end_index) {
+			pj_o (pj);
+			pj_ks (pj, "name", t->name);
+			pj_ks (pj, "description", t->description);
+			pj_k (pj, "inputSchema");
+			pj_raw (pj, t->schema_json);
+			pj_end (pj);
+		}
+		idx++;
+	}
+	pj_end (pj);
+	if (end_index < idx) {
+		char next_cursor[32];
+		snprintf (next_cursor, sizeof (next_cursor), "%d", end_index);
+		pj_ks (pj, "nextCursor", next_cursor);
+	}
+	pj_end (pj);
+	return pj_drain (pj);
+}
+
+void tools_print_mode_help(void) {
+	size_t i;
+	printf ("\nTool mode flags:\n");
+	printf ("  The modes column uses these letters. Multiple letters mean a tool belongs to multiple modes.\n");
+	for (i = 0; tool_mode_help[i].flag; i++) {
+		const ToolModeHelp *mh = &tool_mode_help[i];
+		printf ("  %c %-8s %-10s %s\n", mh->flag, mh->name, mh->selector, mh->description);
+	}
+	printf ("Use -e to include only named tools, -E to exclude named tools, and -p to permit bypassing tool availability checks\n");
+}
+
+void tools_print_table(const ServerState *ss) {
+	RTable *table = r_table_new ("tools", NULL);
+	if (!table) {
+		R_LOG_ERROR ("Failed to allocate table");
+		return;
+	}
+	RTableColumnType *s = r_table_type ("string");
+	r_table_add_column (table, s, "name", 0);
+	r_table_add_column (table, s, "modes", 0);
+	r_table_add_column (table, s, "description", 0);
+
+	ToolMode mode = current_mode (ss);
+	for (size_t i = 0; tool_specs[i].name; i++) {
+		ToolSpec *t = &tool_specs[i];
+		if (!tool_eligible (ss, t, mode)) {
+			continue;
+		}
+		char modes_buf[8];
+		tool_modes_string (t->modes, modes_buf, sizeof (modes_buf));
+		const char *desc = t->description? t->description: "";
+		r_table_add_rowf (table, "sss", t->name, modes_buf, desc);
+	}
+
+	char *table_str = r_table_tostring (table);
+	if (table_str) {
+		printf ("%s\n", table_str);
+		free (table_str);
+	}
+	r_table_free (table);
+}
+
+// Filter lines in `input` by `pattern` regex. Returns a newly allocated string.
+static char *filter_lines_by_regex(const char *input, const char *pattern) {
+	const char *src = input? input: "";
+	if (!pattern || !*pattern) {
+		return strdup (src);
+	}
+	RRegex rx;
+	int re_flags = r_regex_flags ("e");
+	if (r_regex_init (&rx, pattern, re_flags) != 0) {
+		return strdup ("Invalid regex used in filter parameter, try a simpler expression");
+	}
+	RStrBuf *sb = r_strbuf_new ("");
+	RList *lines = r_str_split_list (strdup (src), "\n", 0);
+	RListIter *it;
+	char *line;
+	r_list_foreach (lines, it, line) {
+		if (r_regex_exec (&rx, line, 0, 0, 0) == 0) {
+			r_strbuf_appendf (sb, "%s\n", line);
+		}
+	}
+	r_list_free (lines);
+	r_regex_fini (&rx);
+	return r_strbuf_drain (sb);
+}
+
+static char *filter_named_functions_only(const char *input) {
+	const char *src = input? input: "";
+	RStrBuf *sb = r_strbuf_new ("");
+	RList *lines = r_str_split_list (strdup (src), "\n", 0);
+	RListIter *it;
+	char *line;
+	r_list_foreach (lines, it, line) {
+		const char *last_dot = r_str_lchr (line, '.');
+		if (!last_dot || !last_dot[1] || !isdigit (last_dot[1])) {
+			r_strbuf_appendf (sb, "%s\n", line);
+		}
+	}
+	r_list_free (lines);
+	return r_strbuf_drain (sb);
+}
+
+static char *tool_close_file(ServerState *ss, RJson *tool_args) {
+	(void)tool_args;
+	if (ss->http_mode) {
+		return jsonrpc_tooltext_response ("In r2pipe mode we won't close the file.");
+	}
+	if (ss->rstate->core) {
+		RCore *core = ss->rstate->core;
+		bool was_sandboxed = r_sandbox_enable (false);
+		if (was_sandboxed) {
+			r_sandbox_disable (true);
+		}
+		free (r2mcp_cmd (ss, "o-*"));
+		r_anal_purge (core->anal);
+		r_flag_unset_all (core->flags);
+		if (was_sandboxed) {
+			r_sandbox_disable (false);
+		}
+		ss->rstate->file_opened = false;
+		ss->rstate->current_baddr = UT64_MAX;
+		ss->frida_mode = false;
+		free (ss->rstate->current_file);
+		ss->rstate->current_file = NULL;
+		ss->rstate->analyze_level = -1;
+	}
+	return jsonrpc_tooltext_response ("File closed successfully.");
+}
+
+static char *tool_list_functions(ServerState *ss, RJson *tool_args) {
+	if (ss->frida_mode) {
+		return jsonrpc_tooltext_response ("In Frida mode we won't list functions. List exports or classes instead.");
+	}
+	bool only_named = rjson_get_bool_flag (tool_args, "only_named");
+	bool count_only = rjson_get_bool_flag (tool_args, "count");
+
+	const char *filter = r_json_get_str (tool_args, "filter");
+
+	// Fast path for an unfiltered count. Filtered counts must use the same regex
+	// path as filtered lists so their results cannot disagree.
+	if (count_only && !only_named && R_STR_ISEMPTY (filter)) {
+		char *cnt = r2mcp_cmd (ss, "aflc");
+		int n = R_STR_ISEMPTY (cnt)? 0: atoi (r_str_trim_head_ro (cnt));
+		free (cnt);
+		if (n == 0) {
+			// nothing yet, try implicit analysis once
+			free (r2mcp_cmd (ss, "aaa"));
+			int implicit_level = ss->ignore_analysis_level ? 0 : 2;
+			if (implicit_level > ss->rstate->analyze_level) {
+				ss->rstate->analyze_level = implicit_level;
+			}
+			cnt = r2mcp_cmd (ss, "aflc");
+			n = R_STR_ISEMPTY (cnt)? 0: atoi (r_str_trim_head_ro (cnt));
+			free (cnt);
+		}
+		if (n < 0) {
+			n = 0;
+		}
+		return count_response (n);
+	}
+
+	// Acquire additional parameters `start` and `max_length`.
+	int start = 0;
+	int max_length = 50;
+	rjson_get_int_param (tool_args, "start", &start);
+	rjson_get_int_param (tool_args, "max_length", &max_length);
+
+	char *res = r2mcp_cmd (ss, "afl,addr/cols/name");
+	r_str_trim (res);
+	if (R_STR_ISEMPTY (res)) {
+		free (res);
+		free (r2mcp_cmd (ss, "aaa"));
+		int implicit_level = ss->ignore_analysis_level ? 0 : 2;
+		if (implicit_level > ss->rstate->analyze_level) {
+			ss->rstate->analyze_level = implicit_level;
+		}
+		res = r2mcp_cmd (ss, "afl,addr/cols/name");
+		r_str_trim (res);
+		if (R_STR_ISEMPTY (res)) {
+			free (res);
+			if (count_only) {
+				return count_response (0);
+			}
+			char *err = strdup ("No functions found after running analysis (aaa). The binary may have no recognizable code, try analyze with a higher level (3 or 4) or inspect entrypoints/imports.");
+			return tool_cmd_response (err);
+		}
+	}
+	// Apply filtering if only_named is true
+	if (only_named && R_STR_ISNOTEMPTY (res)) {
+		char *filtered = filter_named_functions_only (res);
+		if (filtered) {
+			free (res);
+			res = filtered;
+		}
+	}
+	// Apply regex filter if provided
+	if (R_STR_ISNOTEMPTY (filter) && R_STR_ISNOTEMPTY (res)) {
+		char *r = filter_lines_by_regex (res, filter);
+		free (res);
+		res = r;
+	}
+	r_str_trim (res);
+	if (R_STR_ISEMPTY (res)) {
+		free (res);
+		if (count_only) {
+			return count_response (0);
+		}
+		const char *msg;
+		if (R_STR_ISNOTEMPTY (filter) || only_named) {
+			msg = "No functions matched the given filter.";
+		} else {
+			msg = "No functions found. Run analyze first.";
+		}
+		return tool_cmd_response (strdup (msg));
+	}
+	if (count_only) {
+		int header_lines = R_STR_ISNOTEMPTY (filter)? 0: 2;
+		int n = r_str_char_count (res, '\n') + 1 - header_lines;
+		if (n < 0) {
+			n = 0;
+		}
+		free (res);
+		return count_response (n);
+	}
+	// Regex filtering removes the table headers, so only skip them when the
+	// unfiltered table is being paginated.
+	int header_lines = R_STR_ISNOTEMPTY (filter)? 0: 2;
+	int total_lines = r_str_char_count (res, '\n') + 1 - header_lines;
+	int page_size = (max_length < 1)? total_lines: max_length;
+	char cursor_buf[32];
+	snprintf (cursor_buf, sizeof (cursor_buf), "%d", start + header_lines);
+	char *next_cursor = NULL;
+	bool has_more = false;
+	char *paginated = paginate_text_by_lines (res, cursor_buf, page_size, &has_more, &next_cursor);
+	free (res);
+	free (next_cursor);
+	return tool_cmd_response (paginated);
+}
+
+static char *tool_list_files(ServerState *ss, RJson *tool_args) {
+	const char *path;
+	if (!validate_required_string_param (tool_args, "path", &path)) {
+		return jsonrpc_error_missing_param ("path");
+	}
+
+	const char *err = r2mcp_sandbox_check (ss, path);
+	if (err) {
+		return jsonrpc_error_response (-32603, err, NULL, NULL);
+	}
+
+	// 'ls quotes the path so r2 grep modifiers can't be appended; we filter
+	// and count locally instead.
+	char *cmd = r_str_newf ("'ls -q %s", path);
+	char *res = r2mcp_cmd (ss, cmd);
+	free (cmd);
+	return list_text_response (ss, res, tool_args);
+}
+
+static char *tool_list_classes(ServerState *ss, RJson *tool_args) {
+	return list_cmd_response (ss, tool_args, ss->frida_mode? ":ic": "icqq");
+}
+
+static char *tool_list_methods(ServerState *ss, RJson *tool_args) {
+	const char *classname;
+	if (!validate_required_string_param (tool_args, "classname", &classname)) {
+		return jsonrpc_error_missing_param ("classname");
+	}
+	// The quote/colon prefixes quote the rest of the line, so r2 grep modifiers
+	// can't be appended. Count and filter locally.
+	char *res = r2mcp_cmdf (ss, "'%sic %s", fx (ss), classname);
+	return list_text_response (ss, res, tool_args);
+}
+
+static char *tool_list_decompilers(ServerState *ss, RJson *tool_args) {
+	(void)tool_args;
+	return tool_cmd_response (r2mcp_cmd (ss, "e cmd.pdc=?"));
+}
+
+static char *tool_list_functions_tree(ServerState *ss, RJson *tool_args) {
+	return list_cmd_response (ss, tool_args, "aflmu");
+}
+
+static char *tool_list_imports(ServerState *ss, RJson *tool_args) {
+	return list_cmd_response (ss, tool_args, ss->frida_mode? ":ii": "iiq");
+}
+
+static char *tool_list_exports(ServerState *ss, RJson *tool_args) {
+	return list_cmd_response (ss, tool_args, ss->frida_mode? ":iE": "iEq");
+}
+
+static char *tool_list_sections(ServerState *ss, RJson *tool_args) {
+	return list_cmd_response (ss, tool_args, ss->frida_mode? ":iS": "iS;iSS");
+}
+
+static char *tool_list_memory_maps(ServerState *ss, RJson *tool_args) {
+	return list_cmd_response (ss, tool_args, ss->frida_mode? ":dm": "dm");
+}
+
+static char *tool_show_info(ServerState *ss, RJson *tool_args) {
+	(void)tool_args;
+	return tool_cmd_response (r2mcp_cmd (ss, ss->frida_mode? ":i": "i;iH"));
+}
+
+static char *tool_show_function_details(ServerState *ss, RJson *tool_args) {
+	(void)tool_args;
+	return tool_cmd_response (r2mcp_cmd (ss, "afi"));
+}
+
+static char *tool_get_current_address(ServerState *ss, RJson *tool_args) {
+	(void)tool_args;
+	return tool_cmd_response (r2mcp_cmd (ss, "s;fd"));
+}
+
+static char *tool_list_symbols(ServerState *ss, RJson *tool_args) {
+	return list_cmd_response (ss, tool_args, ss->frida_mode? ":is": "isq~!func.,!imp.");
+}
+
+static char *tool_list_entrypoints(ServerState *ss, RJson *tool_args) {
+	(void)tool_args;
+	return tool_cmd_response (r2mcp_cmd (ss, ss->frida_mode? ":ie": "ies"));
+}
+
+static char *tool_list_libraries(ServerState *ss, RJson *tool_args) {
+	return list_cmd_response (ss, tool_args, ss->frida_mode? ":il": "ilq");
+}
+
+static char *tool_calculate(ServerState *ss, RJson *tool_args) {
+	const char *expression;
+	if (!validate_required_string_param (tool_args, "expression", &expression)) {
+		return jsonrpc_error_missing_param ("expression");
+	}
+	if (!ss->rstate->core || !ss->rstate->core->num) {
+		return jsonrpc_error_response (-32611, "Core or number parser unavailable (open a file first)", NULL, NULL);
+	}
+	RCore *core = ss->rstate->core;
+	ut64 calc_result = r_num_math (core->num, expression);
+	char *numstr = r_str_newf ("0x%" PFMT64x, (ut64)calc_result);
+	char *resp = jsonrpc_tooltext_response (numstr);
+	free (numstr);
+	return resp;
+}
+
+static char *tool_set_comment(ServerState *ss, RJson *tool_args) {
+	const char *address, *message;
+	if (!validate_address_param (tool_args, "address", &address) ||
+		!validate_required_string_param (tool_args, "message", &message)) {
+		return jsonrpc_error_missing_param ("address and message");
+	}
+
+	char *cmd_cc = r_str_newf ("'@%s'CC %s", address, message);
+	char *tmpres_cc = r2mcp_cmd (ss, cmd_cc);
+	free (tmpres_cc);
+	free (cmd_cc);
+	return jsonrpc_tooltext_response ("ok");
+}
+
+static char *tool_set_function_prototype(ServerState *ss, RJson *tool_args) {
+	const char *address, *prototype;
+	if (!validate_address_param (tool_args, "address", &address) ||
+		!validate_required_string_param (tool_args, "prototype", &prototype)) {
+		return jsonrpc_error_missing_param ("address and prototype");
+	}
+	char *cmd_afs = r_str_newf ("'@%s'afs %s", address, prototype);
+	char *tmpres_afs = r2mcp_cmd (ss, cmd_afs);
+	free (tmpres_afs);
+	free (cmd_afs);
+	return jsonrpc_tooltext_response ("ok");
+}
+
+static char *tool_get_function_prototype(ServerState *ss, RJson *tool_args) {
+	const char *address;
+	if (!validate_address_param (tool_args, "address", &address)) {
+		return jsonrpc_error_missing_param ("address");
+	}
+	char *s = r_str_newf ("'@%s'afs", address);
+	char *res = r2mcp_cmd (ss, s);
+	free (s);
+	return tool_cmd_response (res);
+}
+
+static char *tool_list_strings(ServerState *ss, RJson *tool_args) {
+	const char *strings_cmd = ss->frida_mode? ":iz": "izqq";
+	return list_cmd_response (ss, tool_args, strings_cmd);
+}
+
+static char *tool_list_all_strings(ServerState *ss, RJson *tool_args) {
+	return list_cmd_response (ss, tool_args, "izzzqq");
+}
+
+static char *tool_analyze(ServerState *ss, RJson *tool_args) {
+	if (ss->frida_mode) {
+		return jsonrpc_tooltext_response ("Analysis is not available in frida mode. Use list_functions to see exports or run_command with r2frida commands.");
+	}
+	int level = 0;
+	rjson_get_int_param (tool_args, "level", &level);
+	const RJson *timeout_json = r_json_get (tool_args, "timeout_seconds");
+	int timeout_seconds = R2MCP_ANALYZE_TIMEOUT_UNSET;
+	if (timeout_json) {
+		rjson_get_int_param (tool_args, "timeout_seconds", &timeout_seconds);
+		if (timeout_seconds < 0) {
+			timeout_seconds = 0;
+		}
+	}
+	int effective_level = ss->ignore_analysis_level ? 0 : level;
+	int prev_level = ss->rstate->analyze_level;
+	int func_count_before = r2_function_count (ss);
+	if (func_count_before > 0 && prev_level >= effective_level) {
+		char *text;
+		if (prev_level == effective_level) {
+			text = r_str_newf ("File was already analyzed at level %d. Found %d functions. Re-analysis skipped.", effective_level, func_count_before);
+		} else {
+			text = r_str_newf ("File was already analyzed at level %d (>= requested level %d). Found %d functions. Re-analysis skipped.", prev_level, effective_level, func_count_before);
+		}
+		char *response = jsonrpc_tooltext_response (text);
+		free (text);
+		return response;
+	}
+	char *err = r2_analyze (ss, level, timeout_seconds);
+	char *cmd_result = r2mcp_cmd (ss, "aflc");
+	char *errstr;
+	if (R_STR_ISNOTEMPTY (err)) {
+		errstr = r_str_newf ("\n\n<log>\n%s\n</log>\n", err);
+	} else {
+		errstr = strdup ("");
+	}
+	bool timed_out = timeout_json && R_STR_ISNOTEMPTY (err) && r_str_casestr (err, "timeout");
+	char *text;
+	if (timed_out) {
+		text = r_str_newf ("Analysis stopped after %d second%s at level %d.\nFound %d functions so far.%s",
+			timeout_seconds,
+			timeout_seconds == 1? "": "s",
+			level,
+			atoi (cmd_result),
+			errstr);
+	} else {
+		text = r_str_newf ("Analysis completed with level %d.\nFound %d functions.%s", level, atoi (cmd_result), errstr);
+	}
+	char *response = jsonrpc_tooltext_response (text);
+	free (err);
+	free (errstr);
+	free (cmd_result);
+	free (text);
+	return response;
+}
+
+static char *tool_disassemble(ServerState *ss, RJson *tool_args) {
+	const char *address;
+	if (!validate_address_param (tool_args, "address", &address)) {
+		return jsonrpc_error_missing_param ("address");
+	}
+
+	int num_instructions = 10;
+	rjson_get_int_param (tool_args, "num_instructions", &num_instructions);
+
+	return tool_cmd_response (r2mcp_cmdf (ss, "'@%s'pd %d", address, num_instructions));
+}
+
+static char *tool_use_decompiler(ServerState *ss, RJson *tool_args) {
+	const char *deco;
+	if (!validate_required_string_param (tool_args, "name", &deco)) {
+		return jsonrpc_error_missing_param ("name");
+	}
+	char *decompilersAvailable = r2mcp_cmd (ss, "e cmd.pdc=?");
+	const char *response = "ok";
+	if (strstr (deco, "ghidra")) {
+		if (strstr (decompilersAvailable, "pdg")) {
+			free (r2mcp_cmd (ss, "-e cmd.pdc=pdg"));
+		} else {
+			response = "This decompiler is not available";
+		}
+	} else if (strstr (deco, "decai")) {
+		if (strstr (decompilersAvailable, "decai")) {
+			free (r2mcp_cmd (ss, "-e cmd.pdc=decai -d"));
+		} else {
+			response = "This decompiler is not available";
+		}
+	} else if (strstr (deco, "r2dec")) {
+		if (strstr (decompilersAvailable, "pdd")) {
+			free (r2mcp_cmd (ss, "-e cmd.pdc=pdd"));
+		} else {
+			response = "This decompiler is not available";
+		}
+	} else {
+		response = "Unknown decompiler";
+	}
+	free (decompilersAvailable);
+	return jsonrpc_tooltext_response (response);
+}
+
+static char *tool_xrefs_to(ServerState *ss, RJson *tool_args) {
+	const char *address;
+	if (!validate_address_param (tool_args, "address", &address)) {
+		return jsonrpc_error_missing_param ("address");
+	}
+	return tool_cmd_response (r2mcp_cmdf (ss, "'@%s'axt", address));
+}
+
+static char *tool_disassemble_function(ServerState *ss, RJson *tool_args) {
+	const char *address;
+	if (!validate_address_param (tool_args, "address", &address)) {
+		return jsonrpc_error_missing_param ("address");
+	}
+	return tool_cmd_response_paginated (ss, r2mcp_cmdf (ss, "'@%s'pdf", address), tool_args);
+}
+
+static char *tool_rename_flag(ServerState *ss, RJson *tool_args) {
+	const char *address, *name, *new_name;
+	if (!validate_address_param (tool_args, "address", &address) ||
+		!validate_required_string_param (tool_args, "name", &name) ||
+		!validate_required_string_param (tool_args, "new_name", &new_name)) {
+		return jsonrpc_error_missing_param ("address, name, and new_name");
+	}
+	char *remove_res = r2mcp_cmdf (ss, "'@%s'fr %s %s", address, name, new_name);
+	if (R_STR_ISNOTEMPTY (remove_res)) {
+		return tool_cmd_response (remove_res);
+	}
+	free (remove_res);
+	return jsonrpc_tooltext_response ("ok");
+}
+
+static char *tool_rename_function(ServerState *ss, RJson *tool_args) {
+	const char *address, *name;
+	if (!validate_address_param (tool_args, "address", &address) ||
+		!validate_required_string_param (tool_args, "name", &name)) {
+		return jsonrpc_error_missing_param ("address and name");
+	}
+	free (r2mcp_cmdf (ss, "'@%s'afn %s", address, name));
+	return jsonrpc_tooltext_response ("ok");
+}
+
+static char *tool_decompile_function(ServerState *ss, RJson *tool_args) {
+	const char *address;
+	if (!validate_address_param (tool_args, "address", &address)) {
+		return jsonrpc_error_missing_param ("address");
+	}
+	return tool_cmd_response_paginated (ss, r2mcp_cmdf (ss, "'@%s'pdc", address), tool_args);
+}
+
+static char *tool_get_pid(ServerState *ss, RJson *tool_args) {
+	(void)tool_args;
+	return tool_cmd_response (r2mcp_cmdf (ss, "%sdp", fx (ss)));
+}
+
+static char *tool_list_threads(ServerState *ss, RJson *tool_args) {
+	const char *cmd = ss->frida_mode? ":dpt": "dpt";
+	return list_cmd_response (ss, tool_args, cmd);
+}
+
+static char *tool_dump_registers(ServerState *ss, RJson *tool_args) {
+	const RJson *thread_id_json = r_json_get (tool_args, "thread_id");
+	if (thread_id_json) {
+		int thread_id;
+		if (!rjson_get_int_param (tool_args, "thread_id", &thread_id)) {
+			return jsonrpc_error_response (-32602, "'thread_id' must be a number", NULL, NULL);
+		}
+		return tool_cmd_response (r2mcp_cmdf (ss, "%sdr %d", fx (ss), thread_id));
+	}
+	return tool_cmd_response (r2mcp_cmdf (ss, "%sdr", fx (ss)));
+}
+
+static char *tool_hexdump(ServerState *ss, RJson *tool_args) {
+	const char *address;
+	if (!validate_address_param (tool_args, "address", &address)) {
+		return jsonrpc_error_missing_param ("address");
+	}
+	const char *size = r_json_get_str (tool_args, "size");
+	if (R_STR_ISNOTEMPTY (size)) {
+		return tool_cmd_response (r2mcp_cmdf (ss, "'@%s'px %s", address, size));
+	}
+	return tool_cmd_response (r2mcp_cmdf (ss, "'@%s'px", address));
+}
+
+static char *tool_memory_map_here(ServerState *ss, RJson *tool_args) {
+	(void)tool_args;
+	return tool_cmd_response (r2mcp_cmdf (ss, "%sdm.", fx (ss)));
+}
+
+static char *tool_list_heap_allocations(ServerState *ss, RJson *tool_args) {
+	const char *cmd = ss->frida_mode? ":dmh": "dmh";
+	return list_cmd_response (ss, tool_args, cmd);
+}
+
+static char *tool_alloc_memory(ServerState *ss, RJson *tool_args) {
+	const char *string_value = r_json_get_str (tool_args, "string");
+	if (R_STR_ISNOTEMPTY (string_value)) {
+		return tool_cmd_response (r2mcp_cmdf (ss, ":dmas %s", string_value));
+	}
+	int size = 0;
+	rjson_get_int_param (tool_args, "size", &size);
+	if (size <= 0) {
+		return jsonrpc_error_response (-32602, "Provide either 'size' (number of bytes) or 'string' to allocate", NULL, NULL);
+	}
+	return tool_cmd_response (r2mcp_cmdf (ss, ":dma %d", size));
+}
+
+static char *tool_change_memory_protection(ServerState *ss, RJson *tool_args) {
+	const char *address, *protection;
+	if (!validate_address_param (tool_args, "address", &address)) {
+		return jsonrpc_error_missing_param ("address");
+	}
+	int size = 0;
+	rjson_get_int_param (tool_args, "size", &size);
+	if (size <= 0) {
+		return jsonrpc_error_missing_param ("size");
+	}
+	if (!validate_required_string_param (tool_args, "protection", &protection)) {
+		return jsonrpc_error_missing_param ("protection");
+	}
+	return tool_cmd_response (r2mcp_cmdf (ss, ":dmp %s %d %s", address, size, protection));
+}
+
+static char *tool_search(ServerState *ss, RJson *tool_args) {
+	const char *query;
+	if (!validate_required_string_param (tool_args, "query", &query)) {
+		return jsonrpc_error_missing_param ("query");
+	}
+	const char *type = r_json_get_str (tool_args, "type");
+	if (R_STR_ISEMPTY (type)) {
+		type = "string";
+	}
+	if (!strcmp (type, "hex")) {
+		return tool_cmd_response (r2mcp_cmdf (ss, "'%s/x %s", fx (ss), query));
+	}
+	if (!strcmp (type, "wide")) {
+		return tool_cmd_response (r2mcp_cmdf (ss, "'%s/w %s", fx (ss), query));
+	}
+	if (!strcmp (type, "value")) {
+		int value_size = 0;
+		rjson_get_int_param (tool_args, "value_size", &value_size);
+		if (value_size != 1 && value_size != 2 && value_size != 4 && value_size != 8) {
+			value_size = 4;
+		}
+		return tool_cmd_response (r2mcp_cmdf (ss, "'%s/v%d %s", fx (ss), value_size, query));
+	}
+	// default: string search
+	return tool_cmd_response (r2mcp_cmdf (ss, "'%s/ %s", fx (ss), query));
+}
+
+static char *tool_lookup_address(ServerState *ss, RJson *tool_args) {
+	const char *address;
+	if (!validate_address_param (tool_args, "address", &address)) {
+		return jsonrpc_error_missing_param ("address");
+	}
+	return tool_cmd_response (r2mcp_cmdf (ss, "%sfd @ %s", fx (ss), address));
+}
+
+static char *tool_lookup_export(ServerState *ss, RJson *tool_args) {
+	const char *name;
+	if (!validate_required_string_param (tool_args, "name", &name)) {
+		return jsonrpc_error_missing_param ("name");
+	}
+	return tool_cmd_response (r2mcp_cmdf (ss, "%siaE %s", fx (ss), name));
+}
+
+static char *tool_lookup_symbol(ServerState *ss, RJson *tool_args) {
+	const char *address;
+	if (!validate_address_param (tool_args, "address", &address)) {
+		return jsonrpc_error_missing_param ("address");
+	}
+	return tool_cmd_response (r2mcp_cmdf (ss, "%sis. @ %s", fx (ss), address));
+}
+
+static char *tool_run_command(ServerState *ss, RJson *tool_args) {
+	const char *command;
+	if (!validate_required_string_param (tool_args, "command", &command)) {
+		return jsonrpc_error_missing_param ("command");
+	}
+	return tool_cmd_response_paginated (ss, r2mcp_cmd (ss, command), tool_args);
+}
+
+#if HAVE_VSQL
+static char *tool_sql(ServerState *ss, RJson *tool_args) {
+	const char *query;
+	RCore *core;
+	char *cmd;
+	char *res;
+	if (!validate_required_string_param (tool_args, "query", &query)) {
+		return jsonrpc_error_missing_param ("query");
+	}
+	if (R_STR_ISEMPTY (query)) {
+		return jsonrpc_error_response (-32602, "Invalid parameter 'query': expected non-empty string", NULL, NULL);
+	}
+	if (!ss->rstate) {
+		return jsonrpc_error_response (-32603, "Cannot run SQL without server state", NULL, NULL);
+	}
+	core = ss->rstate->core;
+	if (core && !ss->rstate->own_core) {
+		ss->rstate->file_opened = core->io && core->io->desc;
+	}
+	if (!core || !ss->rstate->file_opened) {
+		return jsonrpc_error_file_required ();
+	}
+	cmd = r_str_newf ("r2vsql %s", query);
+	R_CRITICAL_ENTER (core);
+	res = r_core_call_str_at (core, core->addr, cmd);
+	R_CRITICAL_LEAVE (core);
+	free (cmd);
+	if (!res) {
+		res = strdup ("Error: r2vsql command returned NULL");
+	}
+	return tool_cmd_response (res);
+}
+#endif
+
+static char *tool_run_javascript(ServerState *ss, RJson *tool_args) {
+	const char *script;
+	if (!validate_required_string_param (tool_args, "script", &script)) {
+		return jsonrpc_error_missing_param ("script");
+	}
+	char *encoded = r_base64_encode_dyn ((const ut8 *)script, strlen (script));
+	if (!encoded) {
+		return jsonrpc_error_response (-32603, "Failed to encode script", NULL, NULL);
+	}
+	char *cmd = r_str_newf ("js base64:%s", encoded);
+	char *res = r2mcp_cmd (ss, cmd);
+	free (cmd);
+	free (encoded);
+	return tool_cmd_response (res);
+}
+
+static char *tool_run_frida_script(ServerState *ss, RJson *tool_args) {
+	const char *script;
+	if (!ss->frida_mode) {
+		return jsonrpc_error_response (-32603, "Frida mode is not enabled", NULL, NULL);
+	}
+	if (!validate_required_string_param (tool_args, "script", &script)) {
+		return jsonrpc_error_missing_param ("script");
+	}
+	char *encoded = r_base64_encode_dyn ((const ut8 *)script, strlen (script));
+
+	if (!encoded) {
+		return jsonrpc_error_response (-32603, "Failed to encode script", NULL, NULL);
+	}
+
+	char *cmd = r_str_newf (": base64:%s", encoded);
+	char *res = r2mcp_cmd (ss, cmd);
+	free (cmd);
+	free (encoded);
+	return tool_cmd_response (res);
+}
+
+static char *tool_run_script(ServerState *ss, RJson *tool_args) {
+	const char *file_path;
+	if (!validate_required_string_param (tool_args, "file_path", &file_path)) {
+		return jsonrpc_error_missing_param ("file_path");
+	}
+	if (R_STR_ISEMPTY (file_path)) {
+		return jsonrpc_error_response (-32602, "Empty file_path", NULL, NULL);
+	}
+	if (ss->http_mode) {
+		return jsonrpc_error_response (-32603, "run_script is not supported in HTTP mode", NULL, NULL);
+	}
+	const char *err = r2mcp_sandbox_check (ss, file_path);
+	if (err) {
+		return jsonrpc_error_response (-32603, err, NULL, NULL);
+	}
+	if (!r_sandbox_check (R_SANDBOX_GRAIN_FILES | R_SANDBOX_GRAIN_DISK)) {
+		return jsonrpc_error_response (-32603, "Sandbox forbids reading script files", NULL, NULL);
+	}
+	return tool_cmd_response_paginated (ss, r2mcp_cmd_file (ss, file_path), tool_args);
+}
+
+static char *tool_list_sessions(ServerState *ss, RJson *tool_args) {
+	if (!ss->use_sessions) {
+		return jsonrpc_error_response (-32603, "Start r2mcp with -L to support sessions", NULL, NULL);
+	}
+	(void)tool_args;
+	(void)ss;
+	// r2agent command doesn't require an open file, run it directly
+	char *res = NULL;
+	if (ss->http_mode) {
+		// In HTTP mode, we can't run r2agent locally, return empty result
+		res = strdup ("[]");
+	} else {
+		res = r_sys_cmd_str ("r2agent -Lj 2>/dev/null", NULL, NULL);
+		if (R_STR_ISEMPTY (res)) {
+			free (res);
+			res = strdup ("[]");
+		}
+	}
+	return tool_cmd_response (res);
+}
+
+static bool is_localhost(const char *url) {
+	if (R_STR_ISEMPTY (url)) {
+		return false;
+	}
+	if (!r_str_startswith (url, "http://") && !r_str_startswith (url, "https://")) {
+		return false;
+	}
+	const char *host = strstr (url, "://");
+	if (!host) {
+		return false;
+	}
+	host += 3;
+	if (R_STR_ISEMPTY (host)) {
+		return false;
+	}
+	if (r_str_startswith (host, "localhost")) {
+		char ch = host[9];
+		return ch == 0 || ch == ':' || ch == '/' || ch == '?';
+	}
+	if (r_str_startswith (host, "127.0.0.1")) {
+		char ch = host[9];
+		return ch == 0 || ch == ':' || ch == '/' || ch == '?';
+	}
+	if (r_str_startswith (host, "[::1]")) {
+		char ch = host[5];
+		return ch == 0 || ch == ':' || ch == '/' || ch == '?';
+	}
+	return false;
+}
+
+static char *tool_open_session(ServerState *ss, RJson *tool_args) {
+	if (!ss->use_sessions) {
+		return jsonrpc_error_response (-32603, "Start r2mcp with -L to support sessions", NULL, NULL);
+	}
+	const char *url;
+	if (!validate_required_string_param (tool_args, "url", &url)) {
+		return jsonrpc_error_missing_param ("url");
+	}
+	if (!is_localhost (url)) {
+		return jsonrpc_error_response (-32603, "Only localhost session URLs are allowed", NULL, NULL);
+	}
+
+	// Preserve the previous baseurl even when reconnecting from one remote
+	// session to another, so failed probes can fully restore the old state.
+	char *old_baseurl = NULL;
+	bool old_http_mode = ss->http_mode;
+	if (ss->baseurl) {
+		old_baseurl = strdup (ss->baseurl);
+	}
+
+	// Set up HTTP mode for this session
+	ss->http_mode = true;
+	free (ss->baseurl);
+	ss->baseurl = strdup (url);
+
+	// Test the connection by running a simple command
+	char *test_result = r2mcp_cmd (ss, "i");
+	if (!test_result || strstr (test_result, "HTTP request failed")) {
+		// Restore previous state if connection failed
+		ss->http_mode = old_http_mode;
+		free (ss->baseurl);
+		ss->baseurl = old_baseurl;
+		free (test_result);
+
+		char *error_msg = r_str_newf ("Failed to connect to URL: %s", url);
+		char *error_resp = jsonrpc_error_response (-32603, error_msg, NULL, NULL);
+		free (error_msg);
+		return error_resp;
+	}
+
+	free (test_result);
+	free (old_baseurl);
+
+	ss->rstate->file_opened = true;
+	ss->rstate->current_baddr = UT64_MAX;
+	ss->rstate->analyze_level = -1;
+
+	char *success_msg = r_str_newf ("Successfully connected to remote r2 instance at %s", url);
+	char *response = jsonrpc_tooltext_response (success_msg);
+	free (success_msg);
+	return response;
+}
+
+static char *tool_close_session(ServerState *ss, RJson *tool_args) {
+	if (!ss->use_sessions) {
+		return jsonrpc_error_response (-32603, "Start r2mcp with -L to support sessions", NULL, NULL);
+	}
+	(void)tool_args;
+
+	if (!ss->http_mode) {
+		return jsonrpc_tooltext_response ("No active remote session to close.");
+	}
+
+	// Clear the HTTP mode and baseurl
+	ss->http_mode = false;
+	ss->frida_mode = false;
+	ss->rstate->file_opened = false;
+	ss->rstate->current_baddr = UT64_MAX;
+	free (ss->rstate->current_file);
+	ss->rstate->current_file = NULL;
+	ss->rstate->analyze_level = -1;
+	free (ss->baseurl);
+	ss->baseurl = NULL;
+
+	return jsonrpc_tooltext_response ("Remote session closed successfully.");
+}
+
+#if R_LIB_ABIVERSION >= 106
+static void pj_append_rjson(PJ *pj, RJson *j) {
+	return pj_rj (pj, j);
+}
+
+#else
+static void pj_append_rjson(PJ *pj, RJson *j) {
+	if (!j) {
+		pj_null (pj);
+		return;
+	}
+	switch (j->type) {
+	case R_JSON_NULL:
+		pj_null (pj);
+		break;
+	case R_JSON_BOOLEAN:
+		pj_b (pj, j->num.u_value);
+		break;
+	case R_JSON_INTEGER:
+		pj_n (pj, j->num.s_value);
+		break;
+	case R_JSON_DOUBLE:
+		pj_d (pj, j->num.dbl_value);
+		break;
+	case R_JSON_STRING:
+		pj_s (pj, j->str_value);
+		break;
+	case R_JSON_ARRAY:
+		pj_a (pj);
+		RJson *child = j->children.first;
+		while (child) {
+			pj_append_rjson (pj, child);
+			child = child->next;
+		}
+		pj_end (pj);
+		break;
+	case R_JSON_OBJECT:
+		pj_o (pj);
+		child = j->children.first;
+		while (child) {
+			pj_k (pj, child->key);
+			pj_append_rjson (pj, child);
+			child = child->next;
+		}
+		pj_end (pj);
+		break;
+	}
+}
+#endif
+
+static char *check_supervisor_permission(ServerState *ss, const char *tool_name, RJson *tool_args, char **new_tool_name_out, RJson **new_tool_args_out, RJson **parsed_json_out, char **parsed_buf_out) {
+	if (!ss->svc_baseurl) {
+		return NULL;
+	}
+	*parsed_json_out = NULL;
+	*parsed_buf_out = NULL;
+	PJ *pj = pj_new ();
+	pj_o (pj);
+	pj_ks (pj, "tool", tool_name);
+	pj_k (pj, "arguments");
+	pj_append_rjson (pj, tool_args);
+	pj_k (pj, "available_tools");
+	pj_a (pj);
+	ToolMode mode = current_mode (ss);
+	size_t i;
+	for (i = 0; tool_specs[i].name; i++) {
+		ToolSpec *t = &tool_specs[i];
+		if (tool_available (ss, t, mode)) {
+			pj_s (pj, t->name);
+		}
+	}
+	pj_end (pj);
+	pj_end (pj);
+	char *req = pj_drain (pj);
+	int rc;
+	char *resp = curl_post_capture (ss->svc_baseurl, req, &rc);
+	free (req);
+	if (!resp || rc != 0) {
+		free (resp);
+		return NULL;
+	}
+	*parsed_json_out = r_json_parse (resp);
+	if (!*parsed_json_out) {
+		free (resp);
+		return NULL;
+	}
+	const char *err = r_json_get_str (*parsed_json_out, "error");
+	if (err) {
+		char *error_resp = jsonrpc_error_response (-32000, err, NULL, NULL);
+		r_json_free (*parsed_json_out);
+		*parsed_json_out = NULL;
+		free (resp);
+		return error_resp;
+	}
+	const char *r2cmd = r_json_get_str (*parsed_json_out, "r2cmd");
+	if (r2cmd) {
+		r_json_free (*parsed_json_out);
+		*parsed_json_out = NULL;
+		free (resp);
+		return jsonrpc_error_response (-32000, "Supervisor responses with 'r2cmd' are not allowed. Return 'tool' + 'arguments' instead.", NULL, NULL);
+	}
+	const RJson *new_args = r_json_get (*parsed_json_out, "arguments");
+	if (new_args) {
+		const char *new_tool = r_json_get_str (*parsed_json_out, "tool");
+		if (new_tool && strcmp (new_tool, tool_name)) {
+			*new_tool_name_out = strdup (new_tool);
+		}
+		*new_tool_args_out = (RJson *)new_args;
+		*parsed_buf_out = resp;
+	} else {
+		r_json_free (*parsed_json_out);
+		*parsed_json_out = NULL;
+		free (resp);
+	}
+	return NULL;
+}
+
+// Main dispatcher that handles tool calls. Returns heap-allocated JSON
+// string representing the tool "result" (caller must free it).
+char *tools_call(ServerState *ss, const char *tool_name, RJson *tool_args) {
+	RJson nil = { 0 };
+	if (!tool_args) {
+		tool_args = &nil;
+	}
+	char *result = NULL;
+	char *allocated_tool_name = NULL;
+	RJson *parsed_json = NULL;
+	char *parsed_buf = NULL;
+	if (!tool_name) {
+		result = jsonrpc_error_missing_param ("name");
+		goto cleanup;
+	}
+	ToolMode mode = current_mode (ss);
+	ToolSpec *t = tool_spec_by_name (tool_name);
+	// Enforce tool availability per mode unless permissive is enabled
+	if (!t || !tool_available (ss, t, mode)) {
+		result = jsonrpc_error_tool_not_allowed (tool_name);
+		goto cleanup;
+	}
+
+	// Supervisor control check
+	char *supervisor_override = check_supervisor_permission (ss, tool_name, tool_args, &allocated_tool_name, &tool_args, &parsed_json, &parsed_buf);
+	if (supervisor_override) {
+		result = supervisor_override;
+		goto cleanup;
+	}
+	if (allocated_tool_name) {
+		tool_name = allocated_tool_name;
+		t = tool_spec_by_name (tool_name);
+	}
+
+	// Special-case: open_file
+	if (!strcmp (tool_name, "open_file")) {
+		if (ss->http_mode) {
+			char *res = r2mcp_cmd (ss, "i");
+			char *foo = r_str_newf ("File was already opened, this are the details:\n%s", res);
+			char *out = jsonrpc_tooltext_response (foo);
+			free (res);
+			free (foo);
+			result = out;
+			goto cleanup;
+		}
+		const char *filepath;
+		if (!validate_required_string_param (tool_args, "file_path", &filepath)) {
+			result = jsonrpc_error_missing_param ("file_path");
+			goto cleanup;
+		}
+		ut64 baddr = UT64_MAX;
+		char *baddr_error = NULL;
+		if (!rjson_get_baddr_param (tool_args, &baddr, &baddr_error)) {
+			result = jsonrpc_error_response (-32602, baddr_error, NULL, NULL);
+			free (baddr_error);
+			goto cleanup;
+		}
+		// Optional explicit arch/bits/cpu, for raw/headerless binaries (eg.
+		// MCU firmware .bin dumps) that cannot be autodetected and would
+		// otherwise disassemble with the host's default arch.
+		const char *arch = r_json_get_str (tool_args, "arch");
+		const char *cpu = r_json_get_str (tool_args, "cpu");
+		int bits = 0;
+		(void)rjson_get_int_param (tool_args, "bits", &bits);
+
+		char *filteredpath = strdup (filepath);
+		r_str_replace_ch (filteredpath, '`', 0, true);
+		if (r_str_startswith (filteredpath, "file://")) {
+			char *localpath = filteredpath + strlen ("file://");
+			memmove (filteredpath, localpath, strlen (localpath) + 1);
+		}
+		if (ss->rstate->file_opened && ss->rstate->current_file && !strcmp (ss->rstate->current_file, filteredpath) && ss->rstate->current_baddr == baddr) {
+			int func_count = r2_function_count (ss);
+			int prev_level = ss->rstate->analyze_level;
+			char *text;
+			if (func_count > 0 && prev_level >= 0) {
+				text = r_str_newf ("File already opened and analyzed: %s (level %d, %d functions). Skip calling analyze again unless you want a deeper level.", ss->rstate->current_file, prev_level, func_count);
+			} else if (prev_level >= 0) {
+				text = r_str_newf ("File already opened: %s (analyze ran at level %d but no functions were found; consider a higher level).", ss->rstate->current_file, prev_level);
+				ss->rstate->analyze_level = -1;
+			} else {
+				text = r_str_newf ("File already opened: %s (not yet analyzed; call analyze to discover functions).", ss->rstate->current_file);
+			}
+			result = jsonrpc_tooltext_response (text);
+			free (text);
+			free (filteredpath);
+			goto cleanup;
+		}
+
+		bool is_uri = strstr (filteredpath, "://") != NULL;
+		bool had_file_opened = ss->rstate->file_opened;
+		char *previous_file = (had_file_opened && ss->rstate->current_file)? strdup (ss->rstate->current_file): NULL;
+		if (had_file_opened && !is_uri && r2mcp_sandbox_check (ss, filteredpath)) {
+			had_file_opened = false;
+			R_FREE (previous_file);
+		}
+		if (had_file_opened) {
+			char *close_res = tool_close_file (ss, &nil);
+			free (close_res);
+		}
+		bool success = r2_open_file (ss, filteredpath, baddr, arch, bits, cpu);
+		free (filteredpath);
+		if (success && previous_file) {
+			char *text = r_str_newf ("Closed previously opened file: %s\nFile opened successfully.", previous_file);
+			result = jsonrpc_tooltext_response (text);
+			free (text);
+		} else {
+			result = jsonrpc_tooltext_response (success? "File opened successfully.": "Failed to open file.");
+		}
+		free (previous_file);
+		goto cleanup;
+	}
+
+	// Special-case: open_session
+	if (!strcmp (tool_name, "open_session")) {
+		result = tool_open_session (ss, tool_args);
+		goto cleanup;
+	}
+
+	// Special-case: list_sessions
+	if (!strcmp (tool_name, "list_sessions")) {
+		result = tool_list_sessions (ss, tool_args);
+		goto cleanup;
+	}
+
+	// Special-case: close_session
+	if (!strcmp (tool_name, "close_session")) {
+		result = tool_close_session (ss, tool_args);
+		goto cleanup;
+	}
+
+	if (!ss->http_mode && !ss->rstate->file_opened) {
+		if (!strcmp (tool_name, "list_functions")) {
+			result = jsonrpc_tooltext_response ("No file is currently open. Call open_file first, then call list_functions again.");
+			goto cleanup;
+		}
+		result = jsonrpc_error_file_required ();
+		goto cleanup;
+	}
+
+	if (t && t->schema_json) {
+		ValidationResult vr = validate_arguments (tool_args, t->schema_json);
+		if (!vr.valid) {
+			result = jsonrpc_error_response (-32602, vr.error_message, NULL, NULL);
+			free (vr.error_message);
+			goto cleanup;
+		}
+	}
+
+	if (t && t->func) {
+		result = t->func (ss, tool_args);
+		goto cleanup;
+	}
+
+	char *tmp = r_str_newf ("Unknown tool: %s", tool_name);
+	char *err = jsonrpc_error_response (-32602, tmp, NULL, NULL);
+	free (tmp);
+	result = err;
+	goto cleanup;
+
+cleanup:
+	free (allocated_tool_name);
+	r_json_free (parsed_json);
+	free (parsed_buf);
+	return result;
+}
+#define TOOL_SCHEMA_PAGE_PROPS "\"cursor\":{\"type\":\"string\",\"description\":\"Cursor for pagination (line number to start from)\"},\"page_size\":{\"type\":\"integer\",\"description\":\"Number of lines per page (default: 1000, max: 10000)\"}"
+#define TOOL_SCHEMA_FILTER_COUNT_PROPS "\"filter\":{\"type\":\"string\",\"description\":\"Regular expression to filter the results\"},\"count\":{\"type\":\"boolean\",\"description\":\"If true, return only the number of matching results instead of the full list\"}"
+#define TOOL_SCHEMA_LIST_PROPS TOOL_SCHEMA_FILTER_COUNT_PROPS "," TOOL_SCHEMA_PAGE_PROPS
+#define TOOL_SCHEMA_LIST "{\"type\":\"object\",\"properties\":{" TOOL_SCHEMA_LIST_PROPS "}}"
+#define TOOL_SCHEMA_LIST_WITH_STRING_PARAM(name, desc) "{\"type\":\"object\",\"properties\":{\"" name "\":{\"type\":\"string\",\"description\":\"" desc "\"}," TOOL_SCHEMA_LIST_PROPS "},\"required\":[\"" name "\"]}"
+#define TOOL_SCHEMA_ADDRESS_PAGE(desc) "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\",\"description\":\"" desc "\"}," TOOL_SCHEMA_PAGE_PROPS "},\"required\":[\"address\"]}"
+#define TOOL_SCHEMA_COMMAND_PAGE "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"The radare2 command to execute\"}," TOOL_SCHEMA_PAGE_PROPS "},\"required\":[\"command\"]}"
+#define TOOL_SCHEMA_SQL "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"SQL query to pass to the r2vsql plugin\"}},\"required\":[\"query\"]}"
+#define TOOL_SCHEMA_SCRIPT_FILE_PAGE "{\"type\":\"object\",\"properties\":{\"file_path\":{\"type\":\"string\",\"description\":\"Absolute path to the radare2 script file to execute\"}," TOOL_SCHEMA_PAGE_PROPS "},\"required\":[\"file_path\"]}"
+
+ToolSpec tool_specs[] = {
+	{ "open_file", "Opens a binary file with radare2 for analysis <think>Call this tool before any other one from r2mcp. Use an absolute file_path</think>", "{\"type\":\"object\",\"properties\":{\"file_path\":{\"type\":\"string\",\"description\":\"Path to the file to open\"},\"baddr\":{\"type\":\"string\",\"description\":\"Optional base address for PIE binaries, same as radare2 -B / -m (for example 0x400000). For raw/headerless files (no ELF/PE magic), this now also creates an explicit io map so the file's content actually appears at this address, matching radare2 CLI's -m behavior\"},\"arch\":{\"type\":\"string\",\"description\":\"Optional asm.arch override (eg. 'arm'), same as radare2 -a. Needed for raw/headerless binaries which cannot be autodetected and would otherwise default to the host arch\"},\"bits\":{\"type\":\"string\",\"description\":\"Optional asm.bits override (eg. 16 for ARM Thumb), same as radare2 -b\"},\"cpu\":{\"type\":\"string\",\"description\":\"Optional asm.cpu override (eg. 'cortex'), same as radare2 -k/-e asm.cpu\"}},\"required\":[\"file_path\"]}", TOOL_MODE_NORMAL | TOOL_MODE_MINI, NULL },
+	{ "run_javascript", "Executes JavaScript code using radare2's qjs runtime", "{\"type\":\"object\",\"properties\":{\"script\":{\"type\":\"string\",\"description\":\"The JavaScript code to execute\"}},\"required\":[\"script\"]}", TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_EXEC, tool_run_javascript },
+	{ "run_frida_script", "Executes Frida JavaScript code", "{\"type\":\"object\",\"properties\":{\"script\":{\"type\":\"string\",\"description\":\"The script code to execute\"}},\"required\":[\"script\"]}", TOOL_MODE_FRIDA | TOOL_MODE_EXEC, tool_run_frida_script },
+	{ "run_command", "Executes a raw radare2 command directly", TOOL_SCHEMA_COMMAND_PAGE, TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_EXEC, tool_run_command },
+#if HAVE_VSQL
+	{ "sql", "Runs an SQL query through the r2vsql plugin", TOOL_SCHEMA_SQL, TOOL_MODE_NORMAL | TOOL_MODE_MINI, tool_sql },
+#endif
+	{ "run_script", "Runs a local radare2 command script file through r2's command-file API. The path must satisfy MCP path policy and the active r2 sandbox.", TOOL_SCHEMA_SCRIPT_FILE_PAGE, TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_FRIDA | TOOL_MODE_EXEC, tool_run_script },
+	{ "list_sessions", "Lists available r2agent sessions in JSON format", "{\"type\":\"object\",\"properties\":{}}", TOOL_MODE_SESSIONS, tool_list_sessions },
+	{ "open_session", "Connects to a remote r2 instance using r2pipe API", "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"URL of the remote r2 instance to connect to\"}},\"required\":[\"url\"]}", TOOL_MODE_SESSIONS, tool_open_session },
+	{ "close_session", "Close the currently open remote session", "{\"type\":\"object\",\"properties\":{}}", TOOL_MODE_SESSIONS, tool_close_session },
+	{ "close_file", "Close the currently open file", "{\"type\":\"object\",\"properties\":{}}", TOOL_MODE_NORMAL, tool_close_file },
+	{ "list_functions", "Lists all functions discovered during analysis", "{\"type\":\"object\",\"properties\":{\"only_named\":{\"type\":\"boolean\",\"description\":\"If true, only list functions with named symbols (excludes functions with numeric suffixes like sym.func.1000016c8)\"},\"filter\":{\"type\":\"string\",\"description\":\"Regular expression to filter the results\"},\"count\":{\"type\":\"boolean\",\"description\":\"If true, return only the number of matching results instead of the full list\"},\"start\":{\"type\":\"integer\",\"description\":\"Starting index for pagination (default: 0)\"},\"max_length\":{\"type\":\"integer\",\"description\":\"Maximum number of results to return, -1 for all (default: 50)\"}}}", TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_RO, tool_list_functions },
+	{ "list_functions_tree", "Lists functions and successors (aflmu)", TOOL_SCHEMA_LIST, TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_RO, tool_list_functions_tree },
+	{ "list_libraries", "Lists all shared libraries linked to the binary", TOOL_SCHEMA_LIST, TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_list_libraries },
+	{ "list_imports", "Lists imported symbols (note: use list_symbols for addresses with sym.imp. prefix)", TOOL_SCHEMA_LIST, TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_list_imports },
+	{ "list_exports", "Lists exported symbols from the binary or process", TOOL_SCHEMA_LIST, TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_list_exports },
+	{ "list_sections", "Displays memory sections and segments from the binary", TOOL_SCHEMA_LIST, TOOL_MODE_NORMAL | TOOL_MODE_HTTP | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_list_sections },
+	{ "list_memory_maps", "Lists memory regions of the process with addresses and permissions", TOOL_SCHEMA_LIST, TOOL_MODE_NORMAL | TOOL_MODE_HTTP | TOOL_MODE_FRIDA, tool_list_memory_maps },
+	{ "show_function_details", "Displays detailed information about the current function", "{\"type\":\"object\",\"properties\":{}}", TOOL_MODE_NORMAL | TOOL_MODE_RO, tool_show_function_details },
+	{ "get_current_address", "Shows the current position and function name", "{\"type\":\"object\",\"properties\":{}}", TOOL_MODE_NORMAL | TOOL_MODE_RO, tool_get_current_address },
+	{ "show_info", "Displays information about the binary or target process", "{\"type\":\"object\",\"properties\":{}}", TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_show_info },
+	{ "list_symbols", "Shows all symbols (functions, variables, imports) with addresses", TOOL_SCHEMA_LIST, TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_list_symbols },
+	{ "list_entrypoints", "Displays program entrypoints, constructors and main function", "{\"type\":\"object\",\"properties\":{}}", TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_list_entrypoints },
+	{ "list_methods", "Lists all methods belonging to the specified class", TOOL_SCHEMA_LIST_WITH_STRING_PARAM ("classname", "Name of the class to list methods for"), TOOL_MODE_NORMAL | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_list_methods },
+	{ "list_classes", "Lists class names from various languages (C++, ObjC, Swift, Java, Dalvik)", TOOL_SCHEMA_LIST, TOOL_MODE_NORMAL | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_list_classes },
+	{ "list_decompilers", "Shows all available decompiler backends", "{\"type\":\"object\",\"properties\":{}}", TOOL_MODE_NORMAL | TOOL_MODE_RO, tool_list_decompilers },
+	{ "rename_function", "Renames the function at the specified address", "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"New function name\"},\"address\":{\"type\":\"string\",\"description\":\"Address of the function to rename\"}},\"required\":[\"name\",\"address\"]}", TOOL_MODE_NORMAL, tool_rename_function },
+	{ "rename_flag", "Renames a local variable or data reference within the specified address", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\",\"description\":\"Address of the flag containing the variable or data reference\"},\"name\":{\"type\":\"string\",\"description\":\"Current variable name or data reference\"},\"new_name\":{\"type\":\"string\",\"description\":\"New variable name or data reference\"}},\"required\":[\"address\",\"name\",\"new_name\"]}", TOOL_MODE_NORMAL | TOOL_MODE_HTTP, tool_rename_flag },
+	{ "use_decompiler", "Selects which decompiler backend to use (default: pdc)", "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Name of the decompiler\"}},\"required\":[\"name\"]}", TOOL_MODE_NORMAL, tool_use_decompiler },
+	{ "get_function_prototype", "Retrieves the function signature at the specified address", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\",\"description\":\"Address of the function\"}},\"required\":[\"address\"]}", TOOL_MODE_NORMAL | TOOL_MODE_RO, tool_get_function_prototype },
+	{ "set_function_prototype", "Sets the function signature (return type, name, arguments)", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\",\"description\":\"Address of the function\"},\"prototype\":{\"type\":\"string\",\"description\":\"Function signature in C-like syntax\"}},\"required\":[\"address\",\"prototype\"]}", TOOL_MODE_NORMAL, tool_set_function_prototype },
+	{ "set_comment", "Adds a comment at the specified address", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\",\"description\":\"Address to put the comment in\"},\"message\":{\"type\":\"string\",\"description\":\"Comment text to use\"}},\"required\":[\"address\",\"message\"]}", TOOL_MODE_NORMAL | TOOL_MODE_HTTP, tool_set_comment },
+	{ "list_strings", "Lists strings from data sections with optional regex filter", TOOL_SCHEMA_LIST, TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_list_strings },
+	{ "list_all_strings", "Scans the entire binary for strings with optional regex filter", TOOL_SCHEMA_LIST, TOOL_MODE_NORMAL | TOOL_MODE_RO, tool_list_all_strings },
+	{ "analyze", "Runs binary analysis with optional depth level", "{\"type\":\"object\",\"properties\":{\"level\":{\"type\":\"number\",\"description\":\"Analysis level (0-4, higher is more thorough)\"},\"timeout_seconds\":{\"type\":\"integer\",\"description\":\"Optional maximum analysis time in seconds for this call only. Use 0 to disable the timeout.\"}},\"required\":[]}", TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_FRIDA, tool_analyze },
+	{ "xrefs_to", "Finds all code references to the specified address", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\",\"description\":\"Address to check for cross-references\"}},\"required\":[\"address\"]}", TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_RO, tool_xrefs_to },
+	{ "decompile_function", "Show C-like pseudocode of the function in the given address. <think>Use this to inspect the code in a function, do not run multiple times in the same offset</think>", TOOL_SCHEMA_ADDRESS_PAGE ("Address of the function to decompile"), TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_RO, tool_decompile_function },
+	{ "list_files", "Lists files in the specified path using radare2's ls -q command. Files ending with / are directories, otherwise they are files.", TOOL_SCHEMA_LIST_WITH_STRING_PARAM ("path", "Path to list files from"), TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_HTTP | TOOL_MODE_RO, tool_list_files },
+	{ "disassemble_function", "Shows assembly listing of the function at the specified address", TOOL_SCHEMA_ADDRESS_PAGE ("Address of the function to disassemble"), TOOL_MODE_NORMAL | TOOL_MODE_RO, tool_disassemble_function },
+	{ "disassemble", "Disassembles a specific number of instructions from an address <think>Use this tool to inspect a portion of memory as code without depending on function analysis boundaries. Use this tool when functions are large and you are only interested on few instructions</think>", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\",\"description\":\"Address to start disassembly\"},\"num_instructions\":{\"type\":\"integer\",\"description\":\"Number of instructions to disassemble (default: 10)\"}},\"required\":[\"address\"]}", TOOL_MODE_NORMAL | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_disassemble },
+	{ "calculate", "Evaluate a math expression using core->num (r_num_math). Usecases: do proper 64-bit math, resolve addresses for flag names/symbols, and avoid hallucinated results.", "{\"type\":\"object\",\"properties\":{\"expression\":{\"type\":\"string\",\"description\":\"Math expression to evaluate (eg. 0x100 + sym.flag - 4)\"}},\"required\":[\"expression\"]}", TOOL_MODE_NORMAL | TOOL_MODE_MINI | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_calculate },
+	{ "get_pid", "Get the process ID of the target process", "{\"type\":\"object\",\"properties\":{}}", TOOL_MODE_NORMAL | TOOL_MODE_FRIDA, tool_get_pid },
+	{ "list_threads", "List all threads in the target process with their IDs and state", TOOL_SCHEMA_LIST, TOOL_MODE_NORMAL | TOOL_MODE_FRIDA, tool_list_threads },
+	{ "dump_registers", "Show register values for the target process threads", "{\"type\":\"object\",\"properties\":{\"thread_id\":{\"type\":\"integer\",\"description\":\"Optional thread ID to show registers for a specific thread\"}}}", TOOL_MODE_NORMAL | TOOL_MODE_FRIDA, tool_dump_registers },
+	{ "hexdump", "Print memory contents in hexdump style at the given address", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\",\"description\":\"Address to hexdump\"},\"size\":{\"type\":\"string\",\"description\":\"Number of bytes to dump (empty string for default size)\"}},\"required\":[\"address\",\"size\"]}", TOOL_MODE_NORMAL | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_hexdump },
+	{ "memory_map_here", "Show memory map information at the current address", "{\"type\":\"object\",\"properties\":{}}", TOOL_MODE_NORMAL | TOOL_MODE_FRIDA, tool_memory_map_here },
+	{ "list_heap_allocations", "List malloc/heap memory ranges in the target process", TOOL_SCHEMA_LIST, TOOL_MODE_NORMAL | TOOL_MODE_FRIDA, tool_list_heap_allocations },
+	{ "alloc_memory", "Allocate memory in the target process heap. Provide either size (bytes) or string to allocate", "{\"type\":\"object\",\"properties\":{\"size\":{\"type\":\"integer\",\"description\":\"Number of bytes to allocate\"},\"string\":{\"type\":\"string\",\"description\":\"String to allocate in target heap (returns its address)\"}}}", TOOL_MODE_FRIDA, tool_alloc_memory },
+	{ "change_memory_protection", "Change memory protection (rwx) at the given address and size", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\",\"description\":\"Address of the memory region\"},\"size\":{\"type\":\"integer\",\"description\":\"Size in bytes of the region\"},\"protection\":{\"type\":\"string\",\"description\":\"New protection string (e.g. rwx, r-x, rw-)\"}},\"required\":[\"address\",\"size\",\"protection\"]}", TOOL_MODE_FRIDA, tool_change_memory_protection },
+	{ "search", "Search for strings, hex patterns, wide strings, or numeric values", "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"The search query (string, hex bytes, or numeric value)\"},\"type\":{\"type\":\"string\",\"description\":\"Search type: string (default), hex, wide, or value\"},\"value_size\":{\"type\":\"integer\",\"description\":\"For value search: byte width 1, 2, 4 (default), or 8\"}},\"required\":[\"query\"]}", TOOL_MODE_NORMAL | TOOL_MODE_FRIDA, tool_search },
+	{ "lookup_address", "Describe what is at a given address (flag name, symbol, module)", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\",\"description\":\"Address to describe\"}},\"required\":[\"address\"]}", TOOL_MODE_NORMAL | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_lookup_address },
+	{ "lookup_export", "Resolve an export name to its implementation address", "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Export name to look up\"}},\"required\":[\"name\"]}", TOOL_MODE_NORMAL | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_lookup_export },
+	{ "lookup_symbol", "Resolve an address to its symbol name", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\",\"description\":\"Address to resolve\"}},\"required\":[\"address\"]}", TOOL_MODE_NORMAL | TOOL_MODE_RO | TOOL_MODE_FRIDA, tool_lookup_symbol },
+	{ NULL, NULL, NULL, 0, NULL }
+};

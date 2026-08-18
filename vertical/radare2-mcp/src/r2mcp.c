@@ -1,0 +1,866 @@
+/* r2mcp - MIT - Copyright 2025-2026 - pancake, dnakov */
+
+#include <signal.h>
+#if R2__UNIX__
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+#include <r_core.h>
+#include "config.h"
+#include "jsonrpc.h"
+#include "r2mcp.h"
+#include "sessions.h"
+#include "tools.h"
+#include "prompts.h"
+
+#define LATEST_PROTOCOL_VERSION "2025-06-18"
+// #define LATEST_PROTOCOL_VERSION "2024-11-05"
+
+#include "path.inc.c"
+#include "utils.inc.c"
+#include "bind.inc.c"
+#include "r2api.inc.c"
+
+static volatile sig_atomic_t running = 1;
+/* fd of the active listening socket, or -1. Used by r2mcp_break to wake
+ * accept ()/select () from a signal handler. */
+static volatile sig_atomic_t http_server_fd = -1;
+
+void r2mcp_running_set(int value) {
+	running = value? 1: 0;
+}
+
+void r2mcp_break(void) {
+	running = 0;
+#if R2__UNIX__
+	int fd = http_server_fd;
+	if (fd >= 0) {
+		shutdown (fd, SHUT_RDWR);
+	}
+#endif
+}
+
+static void fill_random_bytes(ut8 *buf, int len) {
+	int i;
+#if R2__UNIX__
+	int fd = open ("/dev/urandom", O_RDONLY);
+	if (fd != -1) {
+		int off = 0;
+		while (off < len) {
+			int n = (int)read (fd, buf + off, len - off);
+			if (n <= 0) {
+				break;
+			}
+			off += n;
+		}
+		close (fd);
+		if (off == len) {
+			return;
+		}
+	}
+#endif
+	r_num_irand ();
+	for (i = 0; i < len; i++) {
+		buf[i] = (ut8)r_num_rand (256);
+	}
+}
+
+char *r2mcp_auth_token_random(void) {
+	ut8 bytes[32];
+	char *token = malloc ((sizeof (bytes) * 2) + 1);
+	if (!token) {
+		return NULL;
+	}
+	fill_random_bytes (bytes, sizeof (bytes));
+	r_hex_bin2str (bytes, sizeof (bytes), token);
+	return token;
+}
+
+const char *r2mcp_effective_sandbox_grain(const ServerState *ss) {
+	if (ss && R_STR_ISNOTEMPTY (ss->sandbox_grain)) {
+		return ss->sandbox_grain;
+	}
+	return (ss && ss->http_mode)? "exec,network": "exec,socket";
+}
+
+static bool r2mcp_http_bearer_authorized(const ServerState *ss, RSocketHTTPRequest *rs) {
+	if (!ss || R_STR_ISEMPTY (ss->auth_token)) {
+		return true;
+	}
+#if R2MCP_HAS_HTTP_HEADERS
+	const char *auth = r_socket_http_header (rs, "Authorization");
+	if (R_STR_ISEMPTY (auth) || r_str_ncasecmp (auth, "Bearer ", 7)) {
+		return false;
+	}
+	char *token = r_str_trim_dup (auth + 7);
+	bool ok = token && !strcmp (token, ss->auth_token);
+	free (token);
+	return ok;
+#else
+	return false;
+#endif
+}
+
+static bool is_valid_json_response(const char *str) {
+	if (!str || *str != '{') {
+		return false;
+	}
+	char *copy = strdup (str);
+	RJson *json = r_json_parse (copy);
+	if (json) {
+		r_json_free (json);
+		free (copy);
+		return true;
+	}
+	free (copy);
+	return false;
+}
+
+static char *extract_jsonrpc_error_response(const char *str, const char *id, bool id_is_number) {
+	if (!str || *str != '{') {
+		return NULL;
+	}
+	char *copy = strdup (str);
+	RJson *json = r_json_parse (copy);
+	if (!json) {
+		free (copy);
+		return NULL;
+	}
+	RJson *error = (RJson *)r_json_get (json, "error");
+	char *out = NULL;
+	if (error && error->type == R_JSON_OBJECT) {
+		int code = (int)r_json_get_num (error, "code");
+		const char *message = r_json_get_str (error, "message");
+		const char *uri = NULL;
+		RJson *data = (RJson *)r_json_get (error, "data");
+		if (data && data->type == R_JSON_OBJECT) {
+			uri = r_json_get_str (data, "uri");
+		}
+		if (message) {
+			out = jsonrpc_error_response_typed (code, message, id, id_is_number, uri);
+		}
+	}
+	r_json_free (json);
+	free (copy);
+	return out;
+}
+
+// Local I/O mode helper (moved from utils.inc.c to avoid unused warnings in other TUs)
+static void set_nonblocking_io(bool nonblocking) {
+#if defined(R2__UNIX__)
+	int flags = fcntl (STDIN_FILENO, F_GETFL, 0);
+	if (nonblocking) {
+		flags |= O_NONBLOCK;
+	} else {
+		flags &= ~O_NONBLOCK;
+	}
+	fcntl (STDIN_FILENO, F_SETFL, flags);
+	setvbuf (stdout, NULL, _IOLBF, 0);
+#elif defined(R2__WINDOWS__)
+	// Windows doesn't support POSIX fcntl/O_NONBLOCK on stdin reliably.
+	// We set stdin mode to binary/text depending on requested mode and
+	// keep line-buffered stdout. This is a best-effort no-op for nonblocking.
+	if (nonblocking) {
+		_setmode (_fileno (stdin), _O_BINARY);
+	} else {
+		_setmode (_fileno (stdin), _O_TEXT);
+	}
+	setvbuf (stdout, NULL, _IOLBF, 0);
+#else
+	(void)nonblocking;
+#endif
+}
+
+/* Public wrappers to expose internal static helpers from r2api.inc.c */
+bool r2mcp_rstate_init(RadareState *rs) {
+	RCore *core = r_core_new ();
+	if (!core) {
+		R_LOG_ERROR ("Failed to initialize radare2 core");
+		return false;
+	}
+	/* r_core_new installs its own SIGINT handler via r_cons_break_push, and
+	 * the matching pop restores SIG_IGN — which would clobber our handler
+	 * from main.c on every analysis. Disabling r_sys signal installation
+	 * keeps our handler in charge. We avoid r_cons_thready () because in
+	 * 6.1.x it swaps the thread-local cons singleton with a zero-initialised
+	 * RCons (NULL context), corrupting any r2 code path that reaches for
+	 * r_cons_singleton () instead of core->cons. */
+	r_sys_signable (false);
+	if (core->cons && core->cons->context) {
+		core->cons->context->unbreakable = true;
+	}
+	r2state_settings (core);
+	rs->core = core;
+	rs->own_core = true;
+	rs->current_baddr = UT64_MAX;
+	rs->analyze_level = -1;
+	return true;
+}
+
+void r2mcp_rstate_fini(RadareState *rs) {
+	if (!rs) {
+		return;
+	}
+	if (rs->core && rs->own_core) {
+		r_core_free (rs->core);
+	}
+	rs->core = NULL;
+	rs->own_core = false;
+	free (rs->current_file);
+	rs->current_file = NULL;
+	rs->file_opened = false;
+	rs->current_baddr = UT64_MAX;
+	rs->analyze_level = -1;
+}
+
+bool r2mcp_state_init(ServerState *ss) {
+	if (!r2mcp_rstate_init (ss->rstate)) {
+		return false;
+	}
+	R_LOG_INFO ("Radare2 core initialized");
+	r_log_add_callback (logcb, ss);
+	ss->log_callback_added = true;
+	return true;
+}
+
+bool r2mcp_state_use_core(ServerState *ss, RCore *core) {
+	R_RETURN_VAL_IF_FAIL (ss && core, false);
+	RadareState *rs = ss->rstate;
+	R_RETURN_VAL_IF_FAIL (rs, false);
+	rs->core = core;
+	rs->own_core = false;
+	rs->file_opened = core->io && core->io->desc;
+	rs->current_baddr = UT64_MAX;
+	rs->analyze_level = -1;
+	if (R_STR_ISNOTEMPTY (ss->sandbox_grain)) {
+		r2state_sandbox_settings (ss, core);
+	}
+	r_log_add_callback (logcb, ss);
+	ss->log_callback_added = true;
+	return true;
+}
+
+void r2mcp_state_fini(ServerState *ss) {
+	if (ss->log_callback_added) {
+		r_log_del_callback (logcb);
+		ss->log_callback_added = false;
+	}
+	r2mcp_rstate_fini (ss->rstate);
+	r_strbuf_free (ss->sb);
+	ss->sb = NULL;
+	r_list_free (ss->client_capability_keys);
+	ss->client_capability_keys = NULL;
+}
+
+char *r2mcp_cmd(ServerState *ss, const char *cmd) {
+	if (ss && ss->http_mode) {
+		char *res = r2cmd_over_http (ss, cmd);
+		if (!res) {
+			return strdup ("HTTP request failed");
+		}
+		return res;
+	}
+	RCore *core = ss->rstate->core;
+	if (core && !ss->rstate->own_core) {
+		ss->rstate->file_opened = core->io && core->io->desc;
+	}
+	if (!core || !ss->rstate->file_opened) {
+		return strdup ("Cannot run commands without calling the `open_file` tool first");
+	}
+	bool changed = false;
+	char *filteredCommand = r2_cmd_filter (cmd, &changed);
+	if (changed) {
+		r2mcp_log (ss, "command injection prevented");
+	}
+	r2mcp_log_reset (ss);
+	R_CRITICAL_ENTER (core);
+	char *res = r_core_cmd_str (core, filteredCommand);
+	R_CRITICAL_LEAVE (core);
+	char *err = r2mcp_log_drain (ss);
+	free (filteredCommand);
+	if (!res) {
+		res = strdup ("Error: command returned NULL");
+	}
+	// r2state_settings (core);
+	if (err) {
+		char *newres = r_str_newf ("%s<log>\n%s\n</log>\n", res, err);
+		free (err);
+		free (res);
+		res = newres;
+	}
+	return res;
+}
+
+char *r2mcp_cmd_file(ServerState *ss, const char *file) {
+	if (!ss || !ss->rstate) {
+		return strdup ("Cannot run script files without server state");
+	}
+	if (!ss->enable_run_command_tool) {
+		return strdup ("Cannot run script files in HTTP mode");
+	}
+	RCore *core = ss->rstate->core;
+	if (core && !ss->rstate->own_core) {
+		ss->rstate->file_opened = core->io && core->io->desc;
+	}
+	if (!core || !ss->rstate->file_opened) {
+		return strdup ("Cannot run script files without calling the `open_file` tool first");
+	}
+	r2mcp_log_reset (ss);
+	R_CRITICAL_ENTER (core);
+	bool ok = false;
+#if defined(R2_ABIVERSION) && R2_ABIVERSION >= 103
+	char *res = r_core_cmd_file_str (core, file, &ok);
+#else
+	ok = r_core_cmd_file (core, file);
+	char *res = strdup (ok? "script ok": "script fail");
+#endif
+	R_CRITICAL_LEAVE (core);
+	char *err = r2mcp_log_drain (ss);
+	if (!res) {
+		res = strdup (ok? "script ok": "script fail");
+	}
+	if (!ok && R_STR_ISEMPTY (res)) {
+		free (res);
+		res = strdup ("script fail");
+	}
+	if (err) {
+		char *newres = r_str_newf ("%s<log>\n%s\n</log>\n", res, err);
+		free (err);
+		free (res);
+		res = newres;
+	}
+	return res;
+}
+
+void r2mcp_log_pub(ServerState *ss, const char *msg) {
+	r2mcp_log (ss, msg);
+}
+
+typedef bool(*CapCheckFn)(ServerState *, const char *);
+
+typedef struct {
+	const char *prefix;
+	const char *cap;
+	const char *errmsg;
+} CapMap;
+
+static const CapMap server_caps[] = {
+	{ "sampling/createMessage", "sampling", "Server does not support sampling" },
+	{ "prompts/", "prompts", "Server does not support prompts" },
+	{ "tools/", "tools", "Server does not support tools" },
+	{ "resources/", "resources", "Server does not support resources" },
+	{ NULL, NULL, NULL }
+};
+
+static const CapMap client_caps[] = {
+	{ "sampling/createMessage", "sampling", "Client does not support sampling" },
+	{ "roots/list", "roots", "Client does not support listing roots" },
+	{ NULL, NULL, NULL }
+};
+
+static bool has_client_cap(ServerState *ss, const char *cap) {
+	if (!ss->client_capability_keys) {
+		return false;
+	}
+	RListIter *it;
+	const char *k;
+	r_list_foreach (ss->client_capability_keys, it, k) {
+		if (!strcmp (k, cap)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool has_server_cap(ServerState *ss, const char *cap) {
+	if (!strcmp (cap, "tools")) {
+		return ss->capabilities.tools;
+	}
+	if (!strcmp (cap, "prompts")) {
+		return ss->capabilities.prompts;
+	}
+	if (!strcmp (cap, "resources")) {
+		return ss->capabilities.resources;
+	}
+	return false;
+}
+
+static bool check_cap(ServerState *ss, const CapMap *map, CapCheckFn fn, const char *method, char **error) {
+	int i;
+	for (i = 0; map[i].prefix; i++) {
+		if (!strcmp (method, map[i].prefix) || r_str_startswith (method, map[i].prefix)) {
+			if (!fn (ss, map[i].cap)) {
+				*error = strdup (map[i].errmsg);
+				return false;
+			}
+			return true;
+		}
+	}
+	return true;
+}
+
+static bool check_capabilities(ServerState *ss, const char *method, char **error) {
+	if (!check_cap (ss, client_caps, has_client_cap, method, error)) {
+		return false;
+	}
+	return check_cap (ss, server_caps, has_server_cap, method, error);
+}
+
+static char *handle_initialize(ServerState *ss, RJson *params) {
+	if (!params || params->type != R_JSON_OBJECT) {
+		return jsonrpc_error_response (-32602, "Invalid params: expected object", NULL, NULL);
+	}
+	// Snapshot client capability keys: the params JSON tree is owned by the
+	// caller and freed when this request is done, so we must not store
+	// pointers into it.
+	r_list_free (ss->client_capability_keys);
+	ss->client_capability_keys = r_list_newf (free);
+	const RJson *caps = r_json_get (params, "capabilities");
+	if (caps && caps->type == R_JSON_OBJECT) {
+		const RJson *child = caps->children.first;
+		while (child) {
+			if (child->key) {
+				r_list_append (ss->client_capability_keys, strdup (child->key));
+			}
+			child = child->next;
+		}
+	}
+
+	// Create a proper initialize response
+	PJ *pj = pj_new ();
+	pj_o (pj);
+	pj_ks (pj, "protocolVersion", LATEST_PROTOCOL_VERSION);
+
+	pj_k (pj, "serverInfo");
+	pj_o (pj);
+	pj_ks (pj, "name", ss->info.name);
+	pj_ks (pj, "version", ss->info.version);
+	pj_end (pj);
+
+	// Capabilities need to be objects with specific structure, not booleans
+	pj_k (pj, "capabilities");
+	pj_o (pj);
+
+	// Tools capability - needs to be an object
+	pj_k (pj, "tools");
+	pj_o (pj);
+	pj_kb (pj, "listChanged", false);
+	pj_end (pj);
+
+	// Prompts capability - object with listChanged
+	pj_k (pj, "prompts");
+	pj_o (pj);
+	pj_kb (pj, "listChanged", false);
+	pj_end (pj);
+
+	// Resources capability - empty object since we only support list
+	pj_k (pj, "resources");
+	pj_o (pj);
+	pj_end (pj);
+
+	// For any capability we don't support, don't include it at all
+	// Don't add: roots, notifications, sampling
+
+	pj_end (pj); // End capabilities
+
+	if (ss->instructions) {
+		pj_ks (pj, "instructions", ss->instructions);
+	}
+
+	pj_end (pj);
+
+	// initialization flag is set when notifications/initialized is received
+	return pj_drain (pj);
+}
+
+static char *handle_list_tools(ServerState *ss, RJson *params) {
+	if (params && params->type != R_JSON_OBJECT) {
+		return NULL;
+	}
+	const char *cursor = params? r_json_get_str (params, "cursor"): NULL;
+	int page_size = 32;
+	return tools_build_catalog_json (ss, cursor, page_size);
+}
+
+static char *handle_list_prompts(ServerState *ss, RJson *params) {
+	if (params && params->type != R_JSON_OBJECT) {
+		return NULL;
+	}
+	const char *cursor = params? r_json_get_str (params, "cursor"): NULL;
+	int page_size = 32;
+	return prompts_build_list_json (ss, cursor, page_size);
+}
+
+static char *handle_get_prompt(ServerState *ss, RJson *params) {
+	if (!params || params->type != R_JSON_OBJECT) {
+		return jsonrpc_error_response (-32602, "Invalid params: expected object", NULL, NULL);
+	}
+	const char *name = r_json_get_str (params, "name");
+	if (!name) {
+		return jsonrpc_error_response (-32602, "Missing required parameter: name", NULL, NULL);
+	}
+	RJson *args = (RJson *)r_json_get (params, "arguments");
+	char *prompt = prompts_get_json (ss, name, args);
+	if (!prompt) {
+		return jsonrpc_error_response (-32602, "Unknown prompt name", NULL, NULL);
+	}
+	return prompt;
+}
+
+static bool is_valid_mcp_method(const char *method) {
+	if (!method || !*method) {
+		return false;
+	}
+	// MCP method names must be lowercase letters with optional '/' or '.' separators
+	// Examples: initialize, ping, tools/list, notifications/initialized
+	for (int i = 0; method[i]; i++) {
+		char c = method[i];
+		if (c == '/' || c == '.') {
+			continue;
+		}
+		if (c < 'a' || c > 'z') {
+			return false;
+		}
+	}
+	return true;
+}
+
+static char *handle_mcp_request(ServerState *ss, const char *method, RJson *params, const char *id, bool id_is_number) {
+	char *error = NULL;
+	char *result = NULL;
+
+	// Validate method name format: lowercase, dot-separated
+	if (!is_valid_mcp_method (method)) {
+		return jsonrpc_error_response_typed (-32601, "Invalid method name: must be lowercase and dot-separated (e.g., tools/list)", id, id_is_number, NULL);
+	}
+
+	if (!check_capabilities (ss, method, &error)) {
+		char *response = jsonrpc_error_response_typed (-32601, error, id, id_is_number, NULL);
+		free (error);
+		return response;
+	}
+
+	/* The MCP spec asks clients to send notifications/initialized before any
+	 * other requests, but several clients in the wild skip it. Be permissive:
+	 * accept requests regardless and let the notification (if it ever arrives)
+	 * still flip the flag below. */
+
+	if (!strcmp (method, "initialize")) {
+		result = handle_initialize (ss, params);
+	} else if (!strcmp (method, "notifications/initialized")) {
+		ss->initialized = true;
+		return NULL; // No response for notifications
+	} else if (!strcmp (method, "ping")) {
+		result = strdup ("{}");
+
+	} else if (!strcmp (method, "tools/list")) {
+		result = handle_list_tools (ss, params);
+	} else if (!strcmp (method, "tools/call")) {
+		if (!params || params->type != R_JSON_OBJECT) {
+			return jsonrpc_error_response_typed (-32602, "Invalid params: expected object", id, id_is_number, NULL);
+		}
+		const char *tool_name = r_json_get_str (params, "name");
+		if (!tool_name) {
+			tool_name = r_json_get_str (params, "tool");
+		}
+		RJson *tool_args = (RJson *)r_json_get (params, "arguments");
+		if (!tool_args) {
+			tool_args = (RJson *)r_json_get (params, "args");
+		}
+		result = tools_call (ss, tool_name, tool_args);
+	} else if (!strcmp (method, "prompts/list")) {
+		result = handle_list_prompts (ss, params);
+	} else if (!strcmp (method, "prompts/get")) {
+		result = handle_get_prompt (ss, params);
+	} else if (!strcmp (method, "resources/list")) {
+		result = strdup ("{\"resources\":[]}");
+	} else if (!strcmp (method, "resources/templates/list")) {
+		result = strdup ("{\"resourceTemplates\":[]}");
+	} else {
+		return jsonrpc_error_response_typed (-32601, "Unknown method", id, id_is_number, NULL);
+	}
+
+	char *error_response = extract_jsonrpc_error_response (result, id, id_is_number);
+	if (error_response) {
+		free (result);
+		return error_response;
+	}
+	char *response = jsonrpc_success_response_typed (ss, result, id, id_is_number);
+	free (result);
+	return response;
+}
+
+// Send a JSON-RPC response to stdout with proper framing
+static void send_response(ServerState *ss, const char *response) {
+	if (!response) {
+		return;
+	}
+
+	// Validate response is valid JSON before writing to stdout
+	if (!is_valid_json_response (response)) {
+		R_LOG_ERROR ("send_response: response is not valid JSON - dropping output");
+		return;
+	}
+
+	r2mcp_log (ss, ">>>");
+	r2mcp_log (ss, response);
+	size_t len = strlen (response);
+	const bool needsnewline = len == 0 || response[len - 1] != '\n';
+
+	// Write response with proper error handling and partial write support
+	const char *ptr = response;
+	size_t remaining = len;
+	while (remaining > 0) {
+		ssize_t written = write (STDOUT_FILENO, ptr, remaining);
+		if (written <= 0) {
+			if (written == 0) {
+				// write () returned 0 - this is an error condition (e.g., invalid fd or pipe broken)
+				R_LOG_ERROR ("send_response: write returned 0 to stdout");
+				return;
+			}
+			if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+				continue; // Retry on interrupt or temporary unavailable
+			}
+			R_LOG_ERROR ("send_response: write error to stdout: %s", strerror (errno));
+			return;
+		}
+		ptr += written;
+		remaining -= written;
+	}
+
+	if (needsnewline) {
+		const char nl = '\n';
+		if (write (STDOUT_FILENO, &nl, 1) < 0) {
+			R_LOG_ERROR ("send_response: write newline error: %s", strerror (errno));
+		}
+	}
+
+#if R2__UNIX__
+	fsync (STDOUT_FILENO);
+#elif R2__WINDOWS__
+	FlushFileBuffers (GetStdHandle (STD_OUTPUT_HANDLE));
+#endif
+}
+
+// Build a JSON-RPC response string for an incoming message. Returns NULL when
+// the message is a notification (no response expected). Caller must free.
+static char *build_mcp_response(ServerState *ss, const char *msg) {
+	r2mcp_log (ss, "<<<");
+	r2mcp_log (ss, msg);
+
+	RJson *request = r_json_parse ((char *)msg);
+	if (!request) {
+		R_LOG_ERROR ("build_mcp_response: received invalid JSON from client");
+		return jsonrpc_error_response (-32700, "Parse error: invalid JSON", NULL, NULL);
+	}
+
+	RJson *id_json = (RJson *)r_json_get (request, "id");
+	const char *method = r_json_get_str (request, "method");
+	RJson *params = (RJson *)r_json_get (request, "params");
+
+	const char *id = NULL;
+	char id_buf[32] = { 0 };
+	bool id_is_number = false;
+	bool has_id = false;
+	if (id_json) {
+		if (id_json->type == R_JSON_STRING) {
+			id = id_json->str_value;
+			has_id = true;
+		} else if (id_json->type == R_JSON_INTEGER) {
+			snprintf (id_buf, sizeof (id_buf), "%lld", (long long)id_json->num.u_value);
+			id = id_buf;
+			id_is_number = true;
+			has_id = true;
+		}
+	}
+
+	char *response = NULL;
+	if (!method) {
+		response = jsonrpc_error_response_typed (-32600, "Invalid Request: missing method", id, id_is_number, NULL);
+	} else if (has_id) {
+		response = handle_mcp_request (ss, method, params, id, id_is_number);
+	} else {
+		// Notification: no response (no id or id is null)
+		if (!strcmp (method, "notifications/cancelled")) {
+			r2mcp_log (ss, "Received cancelled notification");
+		} else if (!strcmp (method, "notifications/initialized")) {
+			r2mcp_log (ss, "Received initialized notification");
+			ss->initialized = true;
+		} else {
+			r2mcp_log (ss, "Received unknown notification");
+		}
+	}
+
+	r_json_free (request);
+	return response;
+}
+
+// Process a JSON-RPC message from the client (stdio path)
+static void process_mcp_message(ServerState *ss, const char *msg) {
+	char *response = build_mcp_response (ss, msg);
+	if (response) {
+		send_response (ss, response);
+		free (response);
+	}
+}
+
+// MCPO protocol-compliant direct mode loop
+void r2mcp_eventloop_stdio(ServerState *ss) {
+	r2mcp_log (ss, "Starting MCP direct mode (stdin/stdout)");
+
+	// Use consistent unbuffered mode for stdout
+	setvbuf (stdout, NULL, _IONBF, 0);
+
+	// Set to blocking I/O for simplicity
+	set_nonblocking_io (false);
+
+	ReadBuffer *buffer = read_buffer_new ();
+	const size_t chunk_size = 32768;
+	char *chunk = malloc (chunk_size);
+
+	while (running) {
+		// Read data from stdin
+		ssize_t bytes_read = read (STDIN_FILENO, chunk, chunk_size);
+
+		if (bytes_read > 0) {
+			// Append to our buffer
+			read_buffer_append (buffer, chunk, bytes_read);
+
+			// Try to process any complete messages
+			char *msg;
+			while ((msg = read_buffer_get_message (buffer)) != NULL) {
+				r2mcp_log (ss, "Complete message received:");
+				r2mcp_log (ss, msg);
+				process_mcp_message (ss, msg);
+				free (msg);
+			}
+		} else if (bytes_read == 0) {
+			// EOF - stdin closed
+			r2mcp_log (ss, "End of input stream - exiting");
+			break;
+		} else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+			r2mcp_log (ss, "Read error");
+			break;
+		}
+	}
+
+	free (chunk);
+	read_buffer_free (buffer);
+	r2mcp_log (ss, "Direct mode loop terminated");
+}
+
+// HTTP MCP server loop. Single-threaded: accept one client at a time,
+// read the JSON-RPC POST body, dispatch, write the JSON response and close.
+bool r2mcp_eventloop_http(ServerState *ss, const char *address_port) {
+	R2McpBind bind;
+	if (!r2mcp_bind_parse (address_port, "3000", &bind)) {
+		R_LOG_ERROR ("Invalid HTTP bind address '%s' (use [127.0.0.1|0.0.0.0]:port)", address_port);
+		return false;
+	}
+	RSocket *server = r_socket_new (false);
+	if (!server) {
+		R_LOG_ERROR ("Failed to create HTTP server socket");
+		r2mcp_bind_fini (&bind);
+		return false;
+	}
+	server->local = bind.local_only;
+	if (!r_socket_listen (server, bind.port, NULL)) {
+		R_LOG_ERROR ("Cannot listen on %s:%s", bind.address, bind.port);
+		r_socket_free (server);
+		r2mcp_bind_fini (&bind);
+		return false;
+	}
+	http_server_fd = server->fd;
+	R_LOG_INFO ("r2mcp HTTP server listening on %s:%s", bind.address, bind.port);
+	{
+		char *msg = r_str_newf ("Starting MCP HTTP mode on %s:%s", bind.address, bind.port);
+		r2mcp_log (ss, msg);
+		free (msg);
+	}
+
+	const char *cors_post_headers =
+		"Content-Type: application/json\r\n"
+		"Access-Control-Allow-Origin: *\r\n";
+	const char *cors_auth_headers =
+		"Content-Type: application/json\r\n"
+		"Access-Control-Allow-Origin: *\r\n"
+		"WWW-Authenticate: Bearer\r\n";
+	const char *cors_options_headers =
+		"Access-Control-Allow-Origin: *\r\n"
+		"Access-Control-Allow-Methods: POST, GET, OPTIONS\r\n"
+		"Access-Control-Allow-Headers: Content-Type, Authorization, Accept\r\n";
+
+	while (running) {
+		if (ss->sessions) {
+			r2mcp_sessions_sweep (ss->sessions);
+		}
+		RSocketHTTPOptions so = { 0 };
+		so.accept_timeout = true; // non-blocking accept (~1s) so the loop can re-check running
+		so.timeout = 2; // close socket after 2s of no data
+		RSocketHTTPRequest *rs = r_socket_http_accept (server, &so);
+		if (!rs) {
+			continue;
+		}
+		if (!rs->method) {
+			r_socket_http_response (rs, 400, "Bad Request", 0, NULL);
+			r_socket_http_close (rs);
+			r_socket_http_free (rs);
+			continue;
+		}
+		if (R_STR_ISNOTEMPTY (ss->auth_token) && strcmp (rs->method, "OPTIONS") && !r2mcp_http_bearer_authorized (ss, rs)) {
+			r_socket_http_response (rs, 401, "{\"error\":\"Unauthorized\"}", 0, cors_auth_headers);
+			r_socket_http_close (rs);
+			r_socket_http_free (rs);
+			continue;
+		}
+		/* Per-request session swap. With sessions enabled, every request
+		 * is routed to its own RadareState keyed by X-Session-ID. Requests
+		 * without that header fall back to the default state. */
+		RadareState *prev_rstate = ss->rstate;
+		R2McpSession *sess = NULL;
+#if R2MCP_HAS_HTTP_HEADERS
+		if (ss->sessions) {
+			const char *sid = r_socket_http_header (rs, "X-Session-ID");
+			if (R_STR_ISNOTEMPTY (sid)) {
+				sess = r2mcp_sessions_acquire (ss->sessions, sid);
+				if (sess) {
+					ss->rstate = &sess->rstate;
+				}
+			}
+		}
+#endif
+		if (!strcmp (rs->method, "POST")) {
+			const char *body = rs->data? (const char *)rs->data: "";
+			char *response = build_mcp_response (ss, body);
+			if (response) {
+				r2mcp_log (ss, ">>>");
+				r2mcp_log (ss, response);
+				r_socket_http_response (rs, 200, response, 0, cors_post_headers);
+				free (response);
+			} else {
+				// notification - no body expected
+				r_socket_http_response (rs, 204, "", 0, cors_post_headers);
+			}
+		} else if (!strcmp (rs->method, "GET")) {
+			const char *info = "{\"name\":\"r2mcp\",\"version\":\"" R2MCP_VERSION "\"}";
+			r_socket_http_response (rs, 200, info, 0, cors_post_headers);
+		} else if (!strcmp (rs->method, "OPTIONS")) {
+			r_socket_http_response (rs, 200, "", 0, cors_options_headers);
+		} else {
+			r_socket_http_response (rs, 405, "Method Not Allowed", 0, NULL);
+		}
+		ss->rstate = prev_rstate;
+		if (sess) {
+			sess->last_used = r_time_now_mono ();
+		}
+		r_socket_http_close (rs);
+		r_socket_http_free (rs);
+	}
+
+	http_server_fd = -1;
+	r_socket_free (server);
+	r2mcp_bind_fini (&bind);
+	r2mcp_log (ss, "HTTP mode loop terminated");
+	return true;
+}

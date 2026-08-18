@@ -1,0 +1,15 @@
+.DS_Store
+r2mcp
+src/r2mcp
+src/config.h
+src/Makefile
+svc/r2mcp-svc
+src/r2mcp
+third_party
+.cache
+***/*.dSYM
+***/*.dylib
+***/*.dll
+***/*.swp
+***/*.so
+***/*.o

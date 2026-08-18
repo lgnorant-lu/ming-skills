@@ -1,0 +1,4 @@
+include README.md
+include LICENSE
+graft src/frida_mcp
+global-exclude *.py[cod] __pycache__ *.so *.dylib .DS_Store 

@@ -1,0 +1,20 @@
+{
+  "name": "ffuf-mcp",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "^5.8.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.8.0",
+    "zod": "^3.24.2"
+  }
+}

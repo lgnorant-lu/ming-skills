@@ -1,0 +1,182 @@
+#pragma once
+#include <stdbool.h>
+#include <r_core.h>
+#include <r_util/r_json.h>
+#include <r_util/r_strbuf.h>
+#include "readbuffer.h"
+
+/* Version fallback if not provided by build */
+#ifndef R2MCP_VERSION
+#define R2MCP_VERSION "1.8.6"
+#endif
+
+/* r_socket_http_header () and generic HTTP request headers are available from
+ * radare2 ABI 91. Older ABIs can still serve HTTP, but cannot route requests
+ * by X-Session-ID. */
+#ifndef R2MCP_HAS_HTTP_HEADERS
+#if defined(R2_ABIVERSION) && R2_ABIVERSION >= 91
+#define R2MCP_HAS_HTTP_HEADERS 1
+#else
+#define R2MCP_HAS_HTTP_HEADERS 0
+#endif
+#endif
+
+/* Pagination limits for tool responses */
+#define R2MCP_DEFAULT_PAGE_SIZE 1000
+#define R2MCP_MAX_PAGE_SIZE 10000
+#define R2MCP_ANALYZE_TIMEOUT_UNSET (-1)
+
+// Content mode: text, json, structured, both (-C flag / R2MCP_CONTENT_MODE)
+typedef enum {
+	R2MCP_CONTENT_TEXT = 0,
+	R2MCP_CONTENT_JSON = 1,
+	R2MCP_CONTENT_STRUCTURED = 2,
+	R2MCP_CONTENT_BOTH = 3,
+	R2MCP_CONTENT_INVALID = -1
+} R2McpContentMode;
+
+static inline R2McpContentMode r2mcp_content_mode_from_string(const char *s) {
+	if (R_STR_ISEMPTY (s)) {
+		return R2MCP_CONTENT_INVALID;
+	}
+	if (!strcmp (s, "text")) {
+		return R2MCP_CONTENT_TEXT;
+	}
+	if (!strcmp (s, "json")) {
+		return R2MCP_CONTENT_JSON;
+	}
+	if (!strcmp (s, "structured")) {
+		return R2MCP_CONTENT_STRUCTURED;
+	}
+	if (!strcmp (s, "both")) {
+		return R2MCP_CONTENT_BOTH;
+	}
+	return R2MCP_CONTENT_INVALID;
+}
+
+static inline bool r2mcp_content_wants_json(R2McpContentMode m) {
+	return m == R2MCP_CONTENT_JSON || m == R2MCP_CONTENT_STRUCTURED || m == R2MCP_CONTENT_BOTH;
+}
+
+static inline bool r2mcp_content_wants_text(R2McpContentMode m) {
+	return m == R2MCP_CONTENT_TEXT || m == R2MCP_CONTENT_BOTH;
+}
+
+typedef struct {
+	const char *name;
+	const char *version;
+} ServerInfo;
+
+typedef struct {
+	bool tools;
+	bool prompts;
+	bool resources;
+} ServerCapabilities;
+
+typedef struct {
+	RCore *core;
+	bool own_core;
+	bool file_opened;
+	char *current_file;
+	ut64 current_baddr;
+	/* Highest analysis level run on the current file. -1 means not analyzed. */
+	int analyze_level;
+} RadareState;
+
+typedef struct {
+	ServerInfo info;
+	ServerCapabilities capabilities;
+	const char *instructions;
+	bool initialized;
+	bool minimode;
+	bool permissive_tools; // allow calling tools not exposed for current mode
+	bool enable_run_command_tool;
+	bool log_enabled;
+	/* When true, enable session management tools (list/open/close sessions) */
+	bool use_sessions;
+	/* When true operate in read-only mode: only expose non-mutating tools */
+	bool readonly_mode;
+	/* When true, operate in HTTP r2pipe client mode and do NOT use r2 C APIs */
+	bool http_mode;
+	/* Base URL of the remote r2 webserver (if http_mode is true) */
+	char *baseurl;
+	/* Base URL of the supervisor control service (if set) */
+	char *svc_baseurl;
+	/* Optional HTTP bearer token required by the HTTP MCP server */
+	char *auth_token;
+	bool auth_token_generated;
+	/* Optional sandbox path. When set, only allow opening files under this dir */
+	char *sandbox;
+	/* Optional radare2 sandbox grain mask; NULL selects a mode-aware default */
+	char *sandbox_grain;
+	/* Optional path to append debug logs when set via -l */
+	char *logfile;
+	bool log_callback_added;
+	/* Optional custom prompts directory path */
+	char *prompts_dir;
+	/* When true, load prompts (false when -N flag is used) */
+	bool load_prompts;
+	/* When true, ignore the analysis level specified in analyze calls */
+	bool ignore_analysis_level;
+	/* When true, operate in Frida mode */
+	bool frida_mode;
+	RList *client_capability_keys;
+	/* Active RadareState pointer. Points either to the default state or to a
+	 * per-request session's state (when sessions are enabled in HTTP mode). */
+	RadareState *rstate;
+	/* Default RadareState used when no session is active (stdio mode, plugin
+	 * mode, or HTTP without sessions). Owned by ServerState. */
+	RadareState default_rstate;
+	/* Optional session registry; non-NULL when -X is used in HTTP mode. */
+	struct r2mcp_sessions_t *sessions;
+	RStrBuf *sb;
+	RList *enabled_tools;
+	RList *disabled_tools;
+	/* Controls which content fields appear in tool responses (text, structured, both) */
+	R2McpContentMode content_mode;
+	void *prompts; // registry of PromptSpec*(RList*), opaque here
+} ServerState;
+
+/* Entry point wrapper implemented in r2mcp.c */
+int r2mcp_main(int argc, const char **argv);
+
+/* Exposed helpers implemented in r2mcp.c */
+void setup_signals(void);
+void r2mcp_eventloop_stdio(ServerState *ss);
+bool r2mcp_eventloop_http(ServerState *ss, const char *port);
+void r2mcp_help(void);
+void r2mcp_version(void);
+void r2mcp_running_set(int value);
+/* Request the active event loop to wake up and exit (signal-safe). */
+void r2mcp_break(void);
+/* Generate a new random bearer token string. Caller owns the result. */
+char *r2mcp_auth_token_random(void);
+
+/* Public wrappers for internal r2 helpers (implemented in r2mcp.c) */
+bool r2mcp_state_init(ServerState *ss);
+bool r2mcp_state_use_core(ServerState *ss, RCore *core);
+void r2mcp_state_fini(ServerState *ss);
+/* Per-RadareState init/fini used by the session manager. */
+bool r2mcp_rstate_init(RadareState *rs);
+void r2mcp_rstate_fini(RadareState *rs);
+char *r2mcp_cmd(ServerState *ss, const char *cmd);
+char *r2mcp_cmd_file(ServerState *ss, const char *file);
+char *r2mcp_cmdf(ServerState *ss, const char *fmt, ...);
+void r2mcp_log_pub(ServerState *ss, const char *msg);
+const char *r2mcp_effective_sandbox_grain(const ServerState *ss);
+
+// Additional public wrappers exposed so other modules (eg. tools.c) can use
+// functionality implemented in r2api.inc.c. These simply forward to the
+// internal static helpers so we keep the original separation.
+bool r2_open_file(ServerState *ss, const char *filepath, ut64 baddr, const char *arch, int bits, const char *cpu);
+char *r2_analyze(ServerState *ss, int level, int timeout_seconds);
+int r2_function_count(ServerState *ss);
+
+// Run a small domain-specific language (DSL) used for testing tools from the
+// command-line. The DSL describes a sequence of tool calls with arguments and
+// prints their results. If core is provided, output goes to r2 console, else stdout.
+// Returns 0 on success, non-zero on failure.
+int r2mcp_run_dsl_tests(ServerState *ss, const char *dsl, RCore *core);
+
+// HTTP POST helper for svc communication
+char *curl_post_capture(const char *url, const char *msg, int *exit_code_out);

@@ -1,0 +1,241 @@
+# Radare2 MCP Server
+
+[![ci](https://github.com/radareorg/radare2-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/radareorg/radare2-mcp/actions/workflows/ci.yml)
+[![radare2](https://img.shields.io/badge/radare2-6.1.8-green)](https://github.com/radareorg/radare2)
+
+<img width="400" alt="r2mcp logo" src="./r2mcp.png" />
+
+An MCP server to use **radare2** with AI agents such as OpenCode, Mai, VSCode, Claude, CLION, ...
+
+## Features
+
+This implementation provides:
+
+- 💻 Fully written in C using the native r2 APIs
+- 🧩 Works from the CLI, as an r2 plugin and as an MCP server
+- 🔍 Seamless binary analysis with radare2
+- 🔗 Connect to any local or remote r2/iaito session via r2pipe
+- 🔒 Supports readonly mode, sandbox lock and restrict tools
+- 🔩 Fine grained tools configuration
+- 🔁 Direct stdin/stdout communication model
+- 🌐 HTTP MCP server mode with optional `X-Session-ID` multiplexing
+- 🛠️ Optional raw access to run r2 commands or r2js scripts
+
+## Installation
+
+<img width="400" alt="Screenshot_2025-03-22_at_5 34 47_PM" src="https://github.com/user-attachments/assets/5322c3fc-fc07-4770-96a3-5a6d82d439c2" />
+<img width="400" alt="Screenshot_2025-03-22_at_5 36 17_PM" src="https://github.com/user-attachments/assets/132a1de0-6978-4202-8dce-aa3d60551b9a" />
+
+### Using r2pm
+
+The simplest way to install the package is by using `r2pm`:
+
+```bash
+$ r2pm -Uci r2mcp
+```
+
+The `r2mcp` executable will be copied into r2pm's bindir in your home directory. However, this binary is not supposed to be executed directly from the shell; it will only work when launched by the MCP service handler of your language model of choice.
+
+```bash
+$ r2pm -r r2mcp
+```
+
+That's the common mcpServer JSON configuration file:
+
+```json
+{
+  "mcpServers": {
+    "radare2": {
+      "command": "r2pm",
+      "args": ["-r", "r2mcp"]
+    }
+  }
+}
+```
+
+### Codex
+
+To install the codex plugin just run the following command:
+
+```bash
+make codex-plugin-install
+```
+
+This will create a personal marketplace in your home and copy the files from dist/codex-plugin inside.
+
+### Using Docker
+
+Alternatively, you can build the Docker image:
+
+```bash
+docker build -t r2mcp .
+```
+
+Update your MCP client configuration file (see below) to use the Docker image to use:
+
+- `"command": "docker"`
+- `"args": ["run", "--rm", "-i", "-v", "/tmp/data:/data", "r2mcp"]`.
+
+## Configuration
+
+### HTTP Server Mode
+
+Use `-H [address:]port` to run r2mcp as an HTTP MCP server instead of using
+stdin/stdout. A bare port binds only to `127.0.0.1`; use `0.0.0.0:port`
+explicitly to make the server reachable from the network:
+
+```bash
+r2mcp -H 8765
+```
+
+```bash
+# Public binding; protect this with -a <token> or -A.
+r2mcp -H 0.0.0.0:8765 -A
+```
+
+Per-session HTTP state is enabled with `-X max[:idle_seconds]` and routed by
+the `X-Session-ID` request header:
+
+```bash
+r2mcp -H 8765 -X 8:600
+```
+
+HTTP bearer authentication is enabled with `-a <token>`. Clients must send
+`Authorization: Bearer <token>` on every `GET` and `POST` request:
+
+```bash
+r2mcp -H 8765 -a my-secret-token
+```
+
+Use `-A` or `-a random` to generate a random token at startup. The generated
+token is printed once on stderr:
+
+```bash
+r2mcp -H 8765 -A
+```
+
+The same token setting can be supplied with `R2MCP_AUTH_TOKEN`; set it to
+`random` to generate one.
+
+`-X` requires radare2 ABI 91 or newer because older radare2 headers do not
+expose the HTTP request header API. With older ABIs, `-H` still works as a
+single shared HTTP server, but `-X` is ignored. Bearer authentication also
+requires this header API.
+
+### r2 Core Plugin Mode
+
+The r2 core plugin exposes the `r2mcp` command inside an existing radare2
+session. Starting HTTP mode from r2 reuses the current `RCore`, so MCP tools
+operate on the file and analysis state already loaded in that session:
+
+```bash
+r2 -e r2mcp.port=8765 -c 'r2mcp start' /bin/ls
+```
+
+Useful subcommands:
+
+- `r2mcp start` or `r2mcp http` starts the HTTP MCP server in the background.
+- `r2mcp stop`, `r2mcp restart`, and `r2mcp status` manage the background server.
+- `r2mcp logs on|off` and `r2mcp logs file <path>` control plugin debug logs.
+- `r2mcp approve on|off` and `r2mcp approve url <url>` control supervisor approvals.
+- `r2mcp yolo on|off` disables approvals and exposes dangerous run tools.
+- `r2mcp config` lists the `r2mcp.*` eval keys.
+
+The plugin registers eval keys for the same server options exposed by the CLI:
+`r2mcp.port`, `r2mcp.log`, `r2mcp.logfile`, `r2mcp.auth`, `r2mcp.approve`, `r2mcp.svc`,
+`r2mcp.yolo`, `r2mcp.mini`, `r2mcp.permissive`, `r2mcp.run`,
+`r2mcp.readonly`, `r2mcp.ignore_analysis`, `r2mcp.prompts`,
+`r2mcp.prompts.dir`, `r2mcp.sandbox`, `r2mcp.sandbox.grain`,
+`r2mcp.content`, `r2mcp.enabled`, `r2mcp.disabled`,
+`r2mcp.session_tools`, `r2mcp.sessions`, `r2mcp.sessions.max`,
+`r2mcp.sessions.timeout`, `r2mcp.decompiler`, and `r2mcp.baseurl`.
+
+When loading the plugin manually with `-i`, set these keys after the plugin is
+loaded, for example with `-c 'e r2mcp.port=8765'`, because radare2 processes
+early `-e` options before ad hoc plugin initialization.
+
+### Claude Desktop Integration
+
+In the Claude Desktop app, press `CMD + ,` to open the Developer settings. Edit the configuration file and restart the client after editing the JSON file as explained below:
+
+1. Locate your Claude Desktop configuration file:
+
+   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+2. Add the following to your configuration file:
+
+```json
+{
+  "mcpServers": {
+    "radare2": {
+      "command": "r2pm",
+      "args": ["-r", "r2mcp"]
+    }
+  }
+}
+```
+
+## VS Code Integration
+
+To use r2mcp with GitHub Copilot Chat in Visual Studio Code by [adding it to your user configuration](https://code.visualstudio.com/docs/copilot/chat/mcp-servers#_add-an-mcp-server-to-your-user-configuration) (see other options [here](https://code.visualstudio.com/docs/copilot/chat/mcp-servers#_add-an-mcp-server)):
+
+1. Open the Command Palette with `CMD + Shift + P` (macOS) or `Ctrl + Shift + P` (Windows/Linux).
+2. Search for and select `Copilot: Open User Configuration` (typically found in `~/Library/Application Support/Code/User/mcp.json` in macOS).
+3. Add the following to your configuration file:
+
+```json
+{
+  "servers": {
+    "radare2": {
+      "type": "stdio",
+      "command": "r2pm",
+      "args": ["-r", "r2mcp"]
+    }
+  },
+  "inputs": []
+}
+```
+
+## Zed Integration
+
+You can use r2mcp with Zed as well by [adding it to your configuration](https://zed.dev/docs/ai/mcp):
+
+1. Open the command palette: `CMD + Shift + P` (macOS) or `Ctrl + Shift + P` (Windows/Linux). 
+2. Search of `agent: open configuration` or search of `settings`.
+3. Add your server as such:
+
+```json
+  "context_servers": {
+    "r2-mcp-server": {
+      "source": "custom",
+      "command": "r2pm",
+      "args": ["-r", "r2mcp"],
+      "env": {}
+    }
+  }
+```
+Note: you will need another LLM agent, such as Claude, Gemini or else to be able to use it.
+
+## For Developers
+
+### Build from Source
+
+#### Linux/macOS
+
+To test the server locally, you can build and install it with make:
+
+```bash
+make install
+```
+
+This will compile the server and place the `r2mcp` binary in `/usr/local/bin` on macOS.
+
+#### Windows
+
+For Windows, just use meson and ninja like it's done in the CI:
+
+```cmd
+meson b
+ninja -C b
+```

@@ -1,0 +1,517 @@
+/* r2mcp - MIT - Copyright 2025-2026 - pancake, dnakov */
+
+#include <string.h>
+
+#include "tools.h"
+#include "prompts.h"
+#include "sessions.h"
+
+#ifndef R_CORE_LOADLIBS_ALL
+#define R_CORE_LOADLIBS_ALL R_LIB_LOAD_ALL
+#endif
+
+#if defined(__wasi__)
+/* WASI has no sigaction; interrupts are handled by the host runtime */
+void setup_signals(void) {
+	/* nothing to do */
+}
+#elif R2__UNIX__
+#include <signal.h>
+/* Signal handling moved from r2mcp.c */
+static void signal_handler(int signum) {
+	const char msg[] = "\nInterrupt received, shutting down...\n";
+	(void)write (STDERR_FILENO, msg, sizeof (msg) - 1);
+	r2mcp_break ();
+	(void)signum;
+}
+void setup_signals(void) {
+	struct sigaction sa = { 0 };
+	/* SA_RESETHAND: a second signal restores the default disposition,
+	 * so a second ^C kills the process even if the first one is mid-shutdown. */
+	sa.sa_flags = SA_RESETHAND;
+	sa.sa_handler = signal_handler;
+	sigemptyset (&sa.sa_mask);
+	sigaction (SIGINT, &sa, NULL);
+	sigaction (SIGTERM, &sa, NULL);
+	sigaction (SIGHUP, &sa, NULL);
+	signal (SIGPIPE, SIG_IGN);
+}
+
+#endif
+/* Help and version moved from r2mcp.c */
+void r2mcp_help(void) {
+	const char help_text[] =
+		"Usage: r2mcp [-flags]\n"
+#ifndef __wasi__
+		" -A         generate and require a random HTTP Bearer auth token\n"
+#endif
+		" -C [mode]  content mode: text (default), json, structured, both\n"
+#ifndef __wasi__
+		" -a [token] require HTTP Authorization: Bearer [token] (use 'random' to generate)\n"
+#endif
+		" -c [cmd]   run those commands before entering the mcp loop\n"
+		" -d [pdc]   select a different decompiler (pdc by default)\n"
+		" -E [tool]  exclude the specified tool (repeatable)\n"
+		" -e [tool]  enable only the specified tool (repeatable)\n"
+		" -g [grain] sandbox grain mask (disk,files,exec,socket,network,environ,all,none)\n"
+		" -h         show this help\n"
+#ifndef __wasi__
+		" -H [addr:]port start an HTTP MCP server (default address: 127.0.0.1)\n"
+#endif
+		" -i         ignore analysis level specified in analyze calls\n"
+		" -l [file]  append debug logs to this file\n"
+		" -L         enable session management tools (list/open/close sessions)\n"
+		" -m         expose minimum amount of tools\n"
+		" -n         do not load any plugin or radare2rc\n"
+		" -N         do not load any prompts\n"
+		" -p         permissive tools: allow calling non-listed tools\n"
+		" -P [dir]   colon-separated list of directories with prompts\n"
+#ifndef __wasi__
+		" -r         enable the dangerous run_* tools\n"
+#endif
+		" -R         enable read-only mode (expose only non-mutating tools)\n"
+		" -s [dir]   enable sandbox mode; only allow files under [dir]\n"
+#ifndef __wasi__
+		" -S [url]   enable supervisor control; connect to svc at [url]\n"
+#endif
+		" -t         list available tools and exit (-ht for mode legend)\n"
+		" -T [tests] run DSL tests and exit\n"
+#ifndef __wasi__
+		" -u [url]   use remote r2 webserver base URL (HTTP r2pipe client mode)\n"
+#endif
+		" -v         show version\n"
+#if defined(__wasi__)
+		"\nUnavailable flags in WASI (require sockets or subprocesses):\n"
+		" -A -a -H -r -S -u -X\n";
+#elif R2MCP_HAS_HTTP_HEADERS
+		" -X [n[:t]] enable HTTP X-Session-ID multiplexing (max n sessions, t s idle timeout; default 8:600)\n";
+#else
+		" -X [n[:t]] enable HTTP X-Session-ID multiplexing (requires radare2 ABI >= 91; disabled in this build)\n";
+#endif
+	printf ("%s", help_text);
+}
+
+void r2mcp_version(void) {
+	printf ("%s\n", R2MCP_VERSION);
+}
+
+/* Program entry point wrapper */
+int main(int argc, const char **argv) {
+	return r2mcp_main (argc, argv);
+}
+
+/* Moved from r2mcp.c to isolate main concerns here */
+int r2mcp_main(int argc, const char **argv) {
+	bool minimode = false;
+	bool enable_run_command_tool = false;
+	bool readonly_mode = false;
+	bool list_tools = false;
+	bool show_help = false;
+	int exit_status = 0;
+	char *sandbox_grain_msg = NULL;
+	RList *cmds = r_list_newf (free);
+	/* Whitelist of enabled tool names (populated via repeated -e flags) */
+	RList *enabled_tools = NULL;
+	bool loadplugins = true;
+	const char *deco = NULL;
+	bool http_mode = false;
+	bool permissive = false;
+	char *baseurl = NULL;
+	char *svc_baseurl = NULL;
+	char *auth_token = NULL;
+	bool auth_token_generated = false;
+	char *http_server_port = NULL;
+	char *sandbox = NULL;
+	char *sandbox_grain = NULL;
+	char *logfile = NULL;
+	char *prompts_dir = NULL;
+	bool load_prompts = true;
+	bool ignore_analysis_level = false;
+	bool use_sessions = false;
+	/* HTTP X-Session-ID multiplexing: -X max[:idle_timeout]. 0/0 = disabled */
+	int http_sessions_max = 0;
+	int http_sessions_timeout = 0;
+	R2McpContentMode content_mode = R2MCP_CONTENT_TEXT;
+	bool content_mode_set = false;
+	const char *dsl_tests = NULL;
+	RList *disabled_tools = NULL;
+	RGetopt opt;
+	r_getopt_init (&opt, argc, argv, "AC:a:E:H:hmvtpd:nc:u:g:l:s:rite:RT:S:P:NLX:");
+	int c;
+	while ((c = r_getopt_next (&opt)) != -1) {
+		switch (c) {
+		case 'A':
+			R_FREE (auth_token);
+			auth_token = r2mcp_auth_token_random ();
+			auth_token_generated = true;
+			if (!auth_token) {
+				R_LOG_ERROR ("Failed to generate HTTP bearer token");
+				return 1;
+			}
+			break;
+		case 'C':
+			content_mode = r2mcp_content_mode_from_string (opt.arg);
+			content_mode_set = true;
+			if (content_mode == R2MCP_CONTENT_INVALID) {
+				R_LOG_ERROR ("Invalid content mode '%s' (use: text, json, structured, both)", opt.arg);
+				return 1;
+			}
+			break;
+		case 'h':
+			show_help = true;
+			break;
+		case 'H':
+			free (http_server_port);
+			http_server_port = strdup (opt.arg);
+			break;
+		case 'a':
+			R_FREE (auth_token);
+			auth_token_generated = false;
+			if (opt.arg && !strcmp (opt.arg, "random")) {
+				auth_token = r2mcp_auth_token_random ();
+				auth_token_generated = true;
+				if (!auth_token) {
+					R_LOG_ERROR ("Failed to generate HTTP bearer token");
+					return 1;
+				}
+			} else {
+				auth_token = strdup (opt.arg);
+			}
+			break;
+		case 'c':
+			r_list_append (cmds, strdup (opt.arg));
+			break;
+		case 'v':
+			r2mcp_version ();
+			return 0;
+		case 'd':
+			deco = opt.arg;
+			break;
+		case 'u':
+			http_mode = true;
+			baseurl = strdup (opt.arg);
+			R_LOG_INFO ("[R2MCP] HTTP r2pipe client mode enabled, baseurl=%s", baseurl);
+			break;
+		case 'g':
+			free (sandbox_grain);
+			sandbox_grain = strdup (opt.arg);
+			break;
+		case 'l':
+			logfile = strdup (opt.arg);
+			break;
+		case 's':
+			sandbox = strdup (opt.arg);
+			break;
+		case 'n':
+			loadplugins = false;
+			break;
+		case 'm':
+			minimode = true;
+			break;
+		case 'p':
+			permissive = true;
+			break;
+		case 'r':
+			enable_run_command_tool = true;
+			break;
+		case 'R':
+			readonly_mode = true;
+			break;
+		case 'i':
+			ignore_analysis_level = true;
+			break;
+		case 't':
+			list_tools = true;
+			break;
+		case 'T':
+			dsl_tests = opt.arg;
+			break;
+		case 'S':
+			if (opt.arg) {
+				if (strspn (opt.arg, "0123456789") == strlen (opt.arg)) {
+					svc_baseurl = r_str_newf ("http://localhost:%s", opt.arg);
+				} else {
+					svc_baseurl = strdup (opt.arg);
+				}
+			}
+			break;
+		case 'e':
+			if (opt.arg) {
+				if (!enabled_tools) {
+					enabled_tools = r_list_newf (free);
+				}
+				r_list_append (enabled_tools, strdup (opt.arg));
+			}
+			break;
+		case 'E':
+			if (opt.arg) {
+				if (!disabled_tools) {
+					disabled_tools = r_list_newf (free);
+				}
+				r_list_append (disabled_tools, strdup (opt.arg));
+			}
+			break;
+		case 'P':
+			prompts_dir = strdup (opt.arg);
+			break;
+		case 'N':
+			load_prompts = false;
+			break;
+		case 'L':
+			use_sessions = true;
+			break;
+		case 'X':
+			if (opt.arg) {
+				char *colon = strchr (opt.arg, ':');
+				if (colon) {
+					*colon = 0;
+					http_sessions_max = atoi (opt.arg);
+					http_sessions_timeout = atoi (colon + 1);
+					*colon = ':';
+				} else {
+					http_sessions_max = atoi (opt.arg);
+				}
+			}
+			if (http_sessions_max <= 0) {
+				http_sessions_max = 8;
+			}
+			if (http_sessions_timeout <= 0) {
+				http_sessions_timeout = 600;
+			}
+			break;
+		default:
+			R_LOG_ERROR ("Invalid flag -%c", c);
+			return 1;
+		}
+	}
+
+	if (show_help) {
+		if (list_tools) {
+			tools_print_mode_help ();
+		} else {
+			r2mcp_help ();
+		}
+		return 0;
+	}
+
+	/* Handle environment variable for prompts directory */
+	if (!prompts_dir) {
+		char *env_prompts_dir = getenv ("R2MCP_PROMPTS_DIR");
+		if (env_prompts_dir) {
+			prompts_dir = strdup (env_prompts_dir);
+		}
+	}
+	/* Handle environment variable for content mode (overridden by -C flag) */
+	if (!content_mode_set) {
+		const char *env_content_mode = getenv ("R2MCP_CONTENT_MODE");
+		if (env_content_mode) {
+			R2McpContentMode m = r2mcp_content_mode_from_string (env_content_mode);
+			if (m == R2MCP_CONTENT_INVALID) {
+				R_LOG_WARN ("Unknown R2MCP_CONTENT_MODE '%s', using 'text'", env_content_mode);
+			} else {
+				content_mode = m;
+			}
+		}
+	}
+	/* Sessions env fallback (overridden by -X flag) */
+	if (http_sessions_max == 0) {
+		const char *env_sessions = getenv ("R2MCP_SESSIONS");
+		if (env_sessions) {
+			char *dup = strdup (env_sessions);
+			char *colon = strchr (dup, ':');
+			if (colon) {
+				*colon++ = 0;
+				http_sessions_timeout = atoi (colon);
+			}
+			http_sessions_max = atoi (dup);
+			free (dup);
+			if (http_sessions_max <= 0) {
+				http_sessions_max = 8;
+			}
+			if (http_sessions_timeout <= 0) {
+				http_sessions_timeout = 600;
+			}
+		}
+	}
+	if (!auth_token) {
+		const char *env_auth = getenv ("R2MCP_AUTH_TOKEN");
+		if (R_STR_ISNOTEMPTY (env_auth)) {
+			if (!strcmp (env_auth, "random")) {
+				auth_token = r2mcp_auth_token_random ();
+				auth_token_generated = true;
+				if (!auth_token) {
+					R_LOG_ERROR ("Failed to generate HTTP bearer token");
+					return 1;
+				}
+			} else {
+				auth_token = strdup (env_auth);
+			}
+		}
+	}
+#if !R2MCP_HAS_HTTP_HEADERS
+	if (http_server_port && R_STR_ISNOTEMPTY (auth_token)) {
+		R_LOG_ERROR ("HTTP bearer auth requires radare2 ABI >= 91");
+		return 1;
+	}
+#endif
+
+	ServerState ss = {
+		.info = {
+			.name = "Radare2 MCP Connector",
+			.version = R2MCP_VERSION },
+		.capabilities = { .tools = true, .prompts = load_prompts, .resources = true },
+		.instructions = "Use this server to analyze binaries with radare2",
+		.initialized = false,
+		.minimode = minimode,
+		.readonly_mode = readonly_mode,
+		.permissive_tools = permissive,
+		.enable_run_command_tool = enable_run_command_tool,
+		.log_enabled = true,
+		.use_sessions = use_sessions,
+		.http_mode = http_mode,
+		.baseurl = baseurl,
+		.svc_baseurl = svc_baseurl,
+		.auth_token = auth_token,
+		.auth_token_generated = auth_token_generated,
+		.sandbox = sandbox,
+		.sandbox_grain = sandbox_grain,
+		.logfile = logfile,
+		.prompts_dir = prompts_dir,
+		.load_prompts = load_prompts,
+		.ignore_analysis_level = ignore_analysis_level,
+		.content_mode = content_mode,
+		.client_capability_keys = NULL,
+		.enabled_tools = enabled_tools,
+		.disabled_tools = disabled_tools,
+		.frida_mode = false,
+		.default_rstate = { .current_baddr = UT64_MAX, .analyze_level = -1 }
+	};
+	ss.rstate = &ss.default_rstate;
+	/* Enable logging */
+	r2mcp_log_pub (&ss, "r2mcp starting");
+	sandbox_grain_msg = r_str_newf ("sandbox grain: %s", r2mcp_effective_sandbox_grain (&ss));
+	r2mcp_log_pub (&ss, sandbox_grain_msg);
+	free (sandbox_grain_msg);
+	if (list_tools) {
+		tools_print_table (&ss);
+		return 0;
+	}
+	if (ss.load_prompts) {
+		prompts_registry_init (&ss);
+	}
+	/* Initialize r2 (unless running in HTTP client mode) */
+	if (!ss.http_mode) {
+		if (!r2mcp_state_init (&ss)) {
+			R_LOG_ERROR ("Failed to initialize radare2");
+			r2mcp_log_pub (&ss, "Failed to initialize radare2");
+			return 1;
+		}
+		if (loadplugins) {
+			r_core_loadlibs (ss.rstate->core, R_CORE_LOADLIBS_ALL, NULL);
+			r_core_parse_radare2rc (ss.rstate->core);
+		}
+		if (deco) {
+			if (!strcmp (deco, "decai")) {
+				deco = "decai -d";
+			}
+			char *pdc = r_str_newf ("e cmd.pdc=%s", deco);
+			R_LOG_INFO ("[R2MCP] Using Decompiler: %s", pdc);
+			r2mcp_cmd (&ss, pdc);
+			free (pdc);
+		}
+	} else {
+		r2mcp_log_pub (&ss, "HTTP r2pipe client mode active - skipping local r2 initialization");
+		char *cmd_result = r2mcp_cmd (&ss, "i~file");
+		if (cmd_result && strstr (cmd_result, "frida://")) {
+			r2mcp_log_pub (&ss, "Frida mode detected");
+			ss.frida_mode = true;
+		}
+		free (cmd_result);
+	}
+	/* If -T was provided, run DSL tests and exit */
+	if (dsl_tests) {
+		int r = r2mcp_run_dsl_tests (&ss, dsl_tests, NULL);
+		/* Cleanup and return */
+		if (ss.load_prompts) {
+			prompts_registry_fini (&ss);
+		}
+		r2mcp_state_fini (&ss);
+		free (ss.baseurl);
+		free (ss.svc_baseurl);
+		free (ss.auth_token);
+		free (ss.sandbox);
+		free (ss.sandbox_grain);
+		free (ss.logfile);
+		free (ss.prompts_dir);
+		free (http_server_port);
+		if (ss.enabled_tools) {
+			r_list_free (ss.enabled_tools);
+		}
+		if (ss.disabled_tools) {
+			r_list_free (ss.disabled_tools);
+		}
+		return r == 0? 0: 2;
+	}
+	RListIter *iter;
+	const char *cmd;
+	r_list_foreach (cmds, iter, cmd) {
+		r2mcp_cmd (&ss, cmd);
+	}
+	r_list_free (cmds);
+	r2mcp_running_set (1);
+#if R2__UNIX__ && !defined(__wasi__)
+	/* Install signals AFTER r_core_new so we override any handlers it may
+	 * have hooked. r2mcp_state_init also calls r_cons_thready to disable
+	 * future cons re-hooking. */
+	setup_signals ();
+#endif
+	if (http_server_port) {
+		if (http_sessions_max > 0) {
+#if R2MCP_HAS_HTTP_HEADERS
+			ss.sessions = r2mcp_sessions_new (http_sessions_max, http_sessions_timeout);
+			R_LOG_INFO ("[R2MCP] X-Session-ID multiplexing: max=%d timeout=%ds",
+				http_sessions_max,
+				http_sessions_timeout);
+#else
+			R_LOG_WARN ("[R2MCP] X-Session-ID multiplexing requires radare2 ABI >= 91; ignoring -X/R2MCP_SESSIONS");
+			r2mcp_log_pub (&ss, "X-Session-ID multiplexing unavailable with radare2 ABI < 91");
+#endif
+		}
+		if (R_STR_ISNOTEMPTY (ss.auth_token)) {
+			R_LOG_INFO ("[R2MCP] HTTP bearer auth enabled");
+			if (ss.auth_token_generated) {
+				fprintf (stderr, "r2mcp HTTP bearer token: %s\n", ss.auth_token);
+			}
+		}
+		if (!r2mcp_eventloop_http (&ss, http_server_port)) {
+			exit_status = 1;
+		}
+	} else {
+		r2mcp_eventloop_stdio (&ss);
+	}
+	if (ss.load_prompts) {
+		prompts_registry_fini (&ss);
+	}
+	if (ss.sessions) {
+		r2mcp_sessions_free (ss.sessions);
+		ss.sessions = NULL;
+	}
+	r2mcp_state_fini (&ss);
+	/* Cleanup */
+	free (ss.baseurl);
+	free (ss.svc_baseurl);
+	free (ss.auth_token);
+	free (ss.sandbox);
+	free (ss.sandbox_grain);
+	free (ss.logfile);
+	free (ss.prompts_dir);
+	free (http_server_port);
+	if (ss.enabled_tools) {
+		r_list_free (ss.enabled_tools);
+	}
+	if (ss.disabled_tools) {
+		r_list_free (ss.disabled_tools);
+	}
+	(void)0;
+	return exit_status;
+}

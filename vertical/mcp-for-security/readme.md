@@ -1,0 +1,151 @@
+# MCP for Security
+
+> [!WARNING]
+> **This repository is no longer actively maintained.**
+>
+> All tools have been migrated to **[Bolt](https://github.com/cyberstrikeus/bolt)** — a fully rewritten, Docker-supported MCP security tool server.
+> Please use Bolt instead: [https://github.com/cyberstrikeus/bolt](https://github.com/cyberstrikeus/bolt)
+
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/cyproxio/mcp-for-security?style=social)](https://github.com/cyproxio/mcp-for-security/stargazers)
+[![Docker](https://img.shields.io/github/release/cyproxio/mcp-for-security?style=social)](https://github.com/cyproxio/mcp-for-security/releases)
+---
+
+<img src="https://avatars.githubusercontent.com/u/89649708?s=48&v=4" width="40" align="left" />
+
+**About Cyprox — The Future of AI-Driven Cybersecurity** <br/></br>
+
+
+**Cyprox** is pioneering the future of cybersecurity by combining artificial intelligence and security tools to empower organizations with next-level threat detection and automated response.  
+
+> *"The Future of Cybersecurity Humans and AI, Working Together..."*
+
+### Cyprox
+
+- 🚀 **AI Driven Solutions:** Cybersecurity solutions using Agentic-AI systems with an AI-driven approach
+- 🌐 **Community-Driven:** Open-source projects fostering collaboration and rapid evolution.
+- ⚡ **Speed & Precision:** Automated threat detection that reduces human latency.
+- 🔒 **Secure & Transparent:** Trustworthy platform built with open standards.
+
+Explore more at [https://cyprox.io](https://cyprox.io)
+
+---
+
+## 🚀 Project Overview
+
+**MCP for Security** repository contains Model Context Protocol (MCP) server implementations for various security testing tools, making them accessible through a standardized interface.
+
+---
+
+## 🌐 Installation 
+
+### Docker
+
+You can use all MCP servers through Docker using the cyprox/mcp-for-security Docker image. It can also be used from any MCP client with Docker support, such as the Cyprox platform.
+Visit [Cyprox](https://cyprox.io) for more information.
+
+### Manuel
+Since each MCP server may require different dependencies, the `start.sh` bash script provides a general setup mechanism. Nonetheless, users should always refer to the installation instructions specific to the corresponding MCP server to ensure proper setup.
+
+---
+
+
+## Available Tools
+
+| Tool | Description | Detailed Documentation |
+|------|-------------|------------------------|
+| Amass | Advanced subdomain enumeration and reconnaissance tool | [Amass MCP Documentation](./amass-mcp) |
+| Alterx | Pattern-based wordlist generator for subdomain discovery | [Alterx MCP Documentation](./alterx-mcp/) |
+| Arjun | Run Arjun to discover hidden HTTP parameters | [Arjun MCP Documentation](./arjun-mcp) |
+| Assetfinder | Passive subdomain discovery tool based on Tomnomnom’s Assetfinder | [Assetfinder MCP Documentation](./assetfinder-mcp) |
+| Cero | Certificate-based subdomain enumeration tool leveraging TLS handshakes to extract domain names from certificate fields like SAN | [Cero MCP Documentation](./cero-mcp) |
+| Certificate Search (crt.sh) | Subdomain discovery tool using SSL certificate logs | [Certificate Search MCP Documentation](./crtsh-mcp/) |
+| FFUF | Web content fuzzing tool for discovering hidden files and directories | [FFUF MCP Documentation](./ffuf-mcp/) |
+| Gowitness | Web screenshot and reconnaissance tool for capturing and analyzing web pages | [Gowitness MCP Documentation](./gowitness-mcp/) |
+| HTTP Headers Security | Analyzer for HTTP security headers against OWASP standards | [HTTP Headers MCP Documentation](./http-headers-security-mcp/) |
+| httpx | Fast and multi-purpose HTTP toolkit for port scanning. | [httpx MCP Documentation](./httpx-mcp) |
+| Katana | Fast and flexible web crawler with JS parsing and hybrid crawling support | [Katana MCP Documentation](./katana-mcp/) |
+| Masscan | Fast port scanner for large-scale network discovery | [Masscan MCP Documentation](./masscan-mcp/) |
+| MobSF | Mobile security framework for analyzing mobile applications | [MobSF MCP Documentation](./mobsf-mcp/) |
+| Nmap | Comprehensive network scanning tool for service and vulnerability discovery | [Nmap MCP Documentation](./nmap-mcp/) |
+| Nuclei | Vulnerability scanner using custom templates | [Nuclei MCP Documentation](./nuclei-mcp/) |
+| Scout Suite | Cloud security auditing tool for assessing configurations across multiple services | [Scout Suite MCP Documentation](./scoutsuite-mcp/) |
+| SSLScan | SSL/TLS configuration analyzer for security assessment | [SSLScan MCP Documentation](./sslscan-mcp/) |
+| shuffledns | High-speed and customizable DNS brute-forcing and resolution tool | [shuffledns MCP Documentation](./shuffledns-mcp) |
+| Smuggler | Advanced tool for detecting HTTP Request Smuggling vulnerabilities | [Smuggler MCP Documentation](./smuggler-mcp) |
+| SQLmap | Advanced SQL injection detection and exploitation tool | [SQLmap MCP Documentation](./sqlmap-mcp/) |
+| Waybackurls | Tool for retrieving historical URLs from the Wayback Machine | [Waybackurls MCP Documentation](./waybackurls-mcp/) |
+| WPScan | WordPress vulnerability scanner for detecting plugins, themes, and configuration issues | [WPScan MCP Documentation](./wpscan-mcp/) |
+
+## Quick Reference
+
+### Alterx MCP  
+Generates custom wordlists for subdomain discovery using pattern-based permutations.
+
+### Amass MCP  
+Advanced reconnaissance tool for subdomain enumeration and intelligence gathering with both passive and active modes.
+
+### arjun MCP  
+Discovers hidden HTTP parameters on web applications by scanning URLs, supporting custom wordlists, multiple methods, and adjustable scanning speeds.
+
+### Assetfinder MCP
+Discovers subdomains related to a given domain using passive enumeration techniques. Integrates Tomnomnom’s Assetfinder into the MCP ecosystem for fast and reliable reconnaissance.
+
+### Cero MCP Server
+Certificate-based subdomain discovery tool that extracts domain names from TLS certificates for reconnaissance and infrastructure mapping.
+
+### Certificate Search (crt.sh) MCP  
+Discovers subdomains by querying SSL certificate transparency logs without active scanning.
+
+### FFUF MCP Server  
+URL-based fuzzing tool with support for all FFUF command line arguments.
+
+### Gowitness MCP Server  
+Web screenshot and reconnaissance tool that captures screenshots of web pages, analyzes HTTP responses, and provides visual reconnaissance capabilities for security assessments and web application testing.
+
+### HTTP Headers Security MCP  
+Analyzes HTTP response headers against OWASP security standards with recommendations.
+
+### httpx MCP  
+Performs high-speed probing of discovered subdomains to validate alive hosts, fetch response details, and enrich reconnaissance data without heavy scanning.
+
+### Katana MCP 
+Performs fast and customizable web crawling to discover endpoints, scripts, and hidden paths. Supports JavaScript parsing, depth control, and hybrid crawling with headless browsers to enrich reconnaissance and automation workflows.
+
+### Masscan MCP Server  
+Fast port scanning tool for target-based port discovery across networks.
+
+### MobSF MCP Server  
+Mobile application security testing framework for Android, iOS, and Windows applications.
+
+### Nmap MCP Server  
+Full-featured network scanner with detailed service fingerprinting and vulnerability detection.
+
+### Nuclei MCP Server  
+Template-based vulnerability scanner with an extensive library of security checks.
+
+### Scout Suite MCP Server 
+Performs a multi-service cloud security audit by analyzing cloud configurations and highlighting potential misconfigurations and risks based on best practices.
+
+### shuffledns MCP  
+High-speed DNS brute-forcing and mass subdomain resolution tool to quickly discover valid subdomains using custom resolvers and wordlists.
+
+### smuggler MCP  
+HTTP Request Smuggling detection tool that identifies desynchronization vulnerabilities between front-end and back-end servers.
+
+### SQLmap MCP Server  
+SQL injection testing tool with comprehensive capabilities for vulnerability discovery.
+
+### SSLScan MCP Server  
+SSL/TLS configuration analyzer for identifying weak ciphers and security misconfigurations.
+
+### Waybackurls MCP  
+Retrieves historical URLs from the Wayback Machine to discover forgotten endpoints.
+
+### WPScan MCP  
+WordPress vulnerability scanner for detecting outdated plugins, themes, and common misconfigurations.
+
+
+---
+> **Note:** The MCP servers in this repository have been integrated into [Bolt](https://github.com/cyberstrikeus/bolt).
+> For new tool development and contributions, please visit: [cyberstrikeus/bolt](https://github.com/cyberstrikeus/bolt)
