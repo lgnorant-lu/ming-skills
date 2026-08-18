@@ -1,0 +1,27 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "HexRaysSA",
+  "version": "2.0.0",
+  "description": "Plugins for working with Hex-Rays IDA Pro for reverse engineering and plugin develop",
+  "owner": {
+    "name": "HexRaysSA",
+    "email": "support@hex-rays.com"
+  },
+  "plugins": [
+    {
+      "name": "ida-plugin-development",
+      "source": "./plugins/ida-plugin-development"
+    },
+    {
+      "name": "reverse-engineering-with-code-eval-and-ida-domain",
+      "source": "./plugins/code-eval-ida-domain"
+    },
+    {
+      "name": "ida-mcp",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/HexRaysSA/ida-codemode.git"
+      }
+    }
+  ]
+}

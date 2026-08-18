@@ -1,0 +1,48 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+.uv/
+# Root uv.lock is ephemeral (no root pyproject.toml); plugin lockfiles are real
+# artifacts and must be committed, or Dependabot can only raise version floors.
+/uv.lock
+!plugins/**/uv.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# `claude plugin eval` run artifacts: per-run scores, prompts, judge verdicts and
+# absolute trace paths from a machine that no longer exists. Regenerated on every
+# run and worth ~220KB per sweep, so they are output, not source.
+plugins/*/evals/results/
+
+# Local plugin cache
+.claude/
+
+# MCP server config (contains API keys)
+.mcp.json
+# Allow plugin-bundled MCP configs (no secrets, just CLI commands)
+!plugins/**/.mcp.json
+
+.env
