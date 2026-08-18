@@ -1,0 +1,32 @@
+{
+  "package": "com.xiaofeng.qbdi",
+  "app_version": "unknown",
+  "target": {
+    "type": "func",
+    "so_name": "libxftest.so",
+    "offset": "0x20adc"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "hook_format": {
+      "args": "cstr",
+      "ret": "hex",
+      "naming_source": 0,
+      "naming_index": 0
+    }
+  },
+  "notes": "converted from 半自动化trace.js; requires frida-server backend for Java trigger; xfinject can arm but cannot invoke MainActivity.triggerAllTests",
+  "frida": {
+    "trigger_xfq_demo": true,
+    "trigger_arg": "hello_svc_test",
+    "trigger_delay_ms": 500
+  }
+}

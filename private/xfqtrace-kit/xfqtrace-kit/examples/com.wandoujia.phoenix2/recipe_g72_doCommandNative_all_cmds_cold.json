@@ -1,0 +1,33 @@
+{
+  "package": "com.wandoujia.phoenix2",
+  "app_version": "8.3.11.2",
+  "target": {
+    "type": "func",
+    "so_name": "libsgmainso-6.6.230906.34042913.so",
+    "offset": "0x2995c"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "sync_flush": false,
+    "stop_condition": {
+      "max_traces": 8
+    },
+    "filter_display": "env,obj,int,jobjarr",
+    "hook_format": {
+      "args": "env,obj,int,jobjarr",
+      "ret": "jobj"
+    },
+    "logging": {
+      "hook_result_level": "I",
+      "trace_event_level": "I",
+      "progress_insn_step": 1000000,
+      "heartbeat_sec": 5
+    }
+  },
+  "notes": "G72 cold/native sweep: trace the first doCommandNative calls without cmd filtering to find initialization writes for the runtime table pointer, len cell, table contents, frame/context, and counter lifecycle before cmd=70102 reads them."
+}

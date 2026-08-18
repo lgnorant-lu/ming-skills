@@ -1,0 +1,23 @@
+{
+  "package": "com.ss.android.ugc.aweme",
+  "app_version": "38.7.0",
+  "target": {
+    "type": "func",
+    "so_name": "libmetasec_ml.so",
+    "offset": "0x2d6038"
+  },
+  "options": {
+    "out_format": "gumtrace",
+    "logging": {
+      "hook_result_level": "E",
+      "trace_event_level": "W",
+      "progress_insn_step": 20000000,
+      "heartbeat_sec": 10,
+      "runtime_diag": false
+    },
+    "stop_condition": {
+      "max_traces": 1
+    }
+  },
+  "notes": "THIS CONFIG CRASHES — field29 entry libmetasec_ml.so+0x2D6038, null pointer write in sub_0x258EB8 kills QBDI ExecBlock"
+}

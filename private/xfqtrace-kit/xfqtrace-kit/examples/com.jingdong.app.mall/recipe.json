@@ -1,0 +1,26 @@
+{
+  "package": "com.jingdong.app.mall",
+  "app_version": "unknown",
+  "target": {
+    "type": "func",
+    "so_name": "libjdg.so",
+    "offset": "0x29ce4"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "xfqtrace",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "anon_trace": false,
+    "hook_format": {
+      "args": "env,_,int,jobj",
+      "ret": "jobj"
+    }
+  },
+  "notes": "converted from 半自动化trace.js; default smoke uses max_traces=1; previous max_traces=3 saved as long_max3.json"
+}

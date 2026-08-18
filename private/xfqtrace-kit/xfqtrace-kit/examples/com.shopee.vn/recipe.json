@@ -1,0 +1,21 @@
+{
+  "package": "com.shopee.vn",
+  "app_version": "3.71.31",
+  "target": {
+    "type": "func",
+    "so_name": "libshpssdk.so",
+    "offset": "0x43e514"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": 1
+    }
+  },
+  "notes": "converted from 半自动化trace.js"
+}

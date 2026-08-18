@@ -1,0 +1,40 @@
+{
+  "package": "com.wandoujia.phoenix2",
+  "app_version": "8.3.11.2",
+  "target": {
+    "type": "func",
+    "so_name": "libsgmainso-6.6.230906.34042913.so",
+    "offset": "0x2995c"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "sync_flush": false,
+    "stop_condition": {
+      "max_traces": 2
+    },
+    "filter": {
+      "arg": 2,
+      "label": "cmd",
+      "type": "int",
+      "op": "eq",
+      "value": 70102
+    },
+    "filter_display": "env,obj,int,jobjarr",
+    "hook_format": {
+      "args": "env,obj,int,jobjarr",
+      "ret": "jobj"
+    },
+    "logging": {
+      "hook_result_level": "I",
+      "trace_event_level": "I",
+      "progress_insn_step": 1000000,
+      "heartbeat_sec": 5
+    }
+  },
+  "notes": "G71 run: collect two cmd=70102 native traces from doCommandNative at libsgmainso-6.6.230906.34042913.so!0x2995c, then compare trace/memory-derived changing values instead of guessing seed state."
+}

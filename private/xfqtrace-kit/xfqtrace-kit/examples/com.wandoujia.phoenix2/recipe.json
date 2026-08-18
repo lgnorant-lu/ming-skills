@@ -1,0 +1,40 @@
+{
+  "package": "com.wandoujia.phoenix2",
+  "app_version": "8.3.11.2",
+  "target": {
+    "type": "func",
+    "so_name": "libsgmainso-6.6.230906.34042913.so",
+    "offset": "0x2995c"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "sync_flush": false,
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "filter": {
+      "arg": 2,
+      "label": "cmd",
+      "type": "int",
+      "op": "eq",
+      "value": 70102
+    },
+    "filter_display": "env,obj,int,jobjarr",
+    "hook_format": {
+      "args": "env,obj,int,jobjarr",
+      "ret": "jmap"
+    },
+    "logging": {
+      "hook_result_level": "I",
+      "trace_event_level": "I",
+      "progress_insn_step": 1000000,
+      "heartbeat_sec": 5
+    }
+  },
+  "notes": "Wandoujia SG doCommandNative cmd=70102 capture for w-api/x-t correlation. Trace evidence shows this app returns a Java HashMap-like object (local ref 0xcd in the 2026-08-09 run), so ret must be jobj; using jstr loses the return even though NewStringUTF output fields are visible in trace.; 本轮修正 ret=jobj 并 max_traces=2，用于直接打印 70102 返回 HashMap。; 验证 ret=jmap 是否能直接展开 70102 返回 HashMap。"
+}

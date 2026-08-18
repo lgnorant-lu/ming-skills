@@ -1,0 +1,21 @@
+{
+  "package": "com.rytong.ceair",
+  "app_version": "unknown",
+  "target": {
+    "type": "func",
+    "so_name": "libtiger_tally.so",
+    "offset": "0x28ccf4"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": 1
+    }
+  },
+  "notes": "China Eastern sample. Target loads from APK; xfinject uses linker hook/dl_iterate arm-before-caller-resumes."
+}

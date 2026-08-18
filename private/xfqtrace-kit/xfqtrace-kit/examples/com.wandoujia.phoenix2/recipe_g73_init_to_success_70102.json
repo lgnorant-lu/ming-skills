@@ -1,0 +1,79 @@
+{
+  "package": "com.wandoujia.phoenix2",
+  "app_version": "8.3.11.2",
+  "target": {
+    "type": "func",
+    "so_name": "libsgmainso-6.6.230906.34042913.so",
+    "offset": "0x2995c"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "sync_flush": false,
+    "stop_condition": {
+      "max_traces": 30
+    },
+    "filter": {
+      "any": [
+        {
+          "arg": 2,
+          "label": "cmd",
+          "type": "int",
+          "op": "eq",
+          "value": 10101
+        },
+        {
+          "arg": 2,
+          "label": "cmd",
+          "type": "int",
+          "op": "eq",
+          "value": 10102
+        },
+        {
+          "arg": 2,
+          "label": "cmd",
+          "type": "int",
+          "op": "eq",
+          "value": 70101
+        },
+        {
+          "arg": 2,
+          "label": "cmd",
+          "type": "int",
+          "op": "eq",
+          "value": 70102
+        },
+        {
+          "arg": 2,
+          "label": "cmd",
+          "type": "int",
+          "op": "eq",
+          "value": 22302
+        },
+        {
+          "arg": 2,
+          "label": "cmd",
+          "type": "int",
+          "op": "eq",
+          "value": 10601
+        }
+      ]
+    },
+    "filter_display": "env,obj,int,jobjarr",
+    "hook_format": {
+      "args": "env,obj,int,jobjarr",
+      "ret": "jobj"
+    },
+    "logging": {
+      "hook_result_level": "I",
+      "trace_event_level": "I",
+      "progress_insn_step": 1000000,
+      "heartbeat_sec": 5
+    }
+  },
+  "notes": "G73 xfinject full native trace: capture cold-start init commands and the first successful 70102 in one run. Excludes high-frequency 12606 noise; keeps 10101/10102/70101/70102/22302/10601 so runtime table/len initialization can be traced to the same data_base as the final seed."
+}

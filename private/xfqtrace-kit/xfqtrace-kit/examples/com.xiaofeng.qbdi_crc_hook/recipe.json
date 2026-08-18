@@ -1,0 +1,32 @@
+{
+  "package": "com.xiaofeng.qbdi",
+  "app_version": "tracedemo-debug",
+  "target": {
+    "type": "func",
+    "so_name": "libxftest.so",
+    "offset": "0x29ed0"
+  },
+  "options": {
+    "inline_hook_backend": 3,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "hook_format": {
+      "args": "none",
+      "ret": "hex",
+      "naming_source": 0,
+      "naming_index": 0
+    }
+  },
+  "notes": "CRC/self-hash hook fixture. inline_hook_backend=3 uses xfQTrace xfqhide_shadow backend -> xfqtrace-hide embedded shadow page.",
+  "frida": {
+    "trigger_static_method": "triggerCrcHookDemo",
+    "trigger_arg": "baseline",
+    "trigger_delay_ms": 500
+  }
+}

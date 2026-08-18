@@ -1,0 +1,43 @@
+{
+  "package": "com.dianping.v1",
+  "app_version": "unknown",
+  "target": {
+    "type": "func",
+    "so_name": "libmtguard.so",
+    "offset": "0xAE494"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": -1
+    },
+    "memory_trace": false,
+    "anon_trace": false,
+    "multi_thread_trace": false,
+    "sync_flush": false,
+    "logging": {
+      "trace_event_level": "W",
+      "progress_insn_step": 1000000,
+      "heartbeat_sec": 5,
+      "flush_on_progress": false
+    },
+    "hook_format": {
+      "args": "ptr,ptr,ptr,int,int,ptr",
+      "ret": "ptr"
+    },
+    "filter": {
+      "arg": 4,
+      "type": "int",
+      "op": "eq",
+      "value": 1
+    },
+    "dlopen_watch_hooks": false,
+    "isolated_trace_process": true
+  },
+  "notes": "fixed repeated-call mode: every matching invocation is traced in a forked snapshot while the app process executes the original call immediately"
+}

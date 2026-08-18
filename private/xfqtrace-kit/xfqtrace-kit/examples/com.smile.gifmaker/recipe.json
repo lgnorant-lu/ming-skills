@@ -1,0 +1,34 @@
+{
+  "package": "com.smile.gifmaker",
+  "app_version": "unknown",
+  "target": {
+    "type": "func",
+    "so_name": "libkwsgmain.so",
+    "offset": "0x41680"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "hook_format": {
+      "args": "env,obj,int,jobjarr",
+      "ret": "jobj",
+      "naming_source": 0,
+      "naming_index": 0
+    },
+    "filter": {
+      "arg": 2,
+      "type": "int",
+      "op": "eq",
+      "value": 10418
+    },
+    "filter_display": "_,_,int,jobjarr"
+  },
+  "notes": "converted from 半自动化trace.js; default smoke uses max_traces=1; previous max_traces=10 saved as long_max10.json"
+}

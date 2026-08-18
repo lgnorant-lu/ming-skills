@@ -1,0 +1,25 @@
+{
+  "package": "com.ximalaya.ting.android",
+  "app_version": "9.4.59.3",
+  "target": {
+    "type": "func",
+    "so_name": "libencrypt.so",
+    "offset": "0x1f460"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "logging": {
+      "hook_result_level": "E",
+      "trace_event_level": "W"
+    },
+    "stop_condition": {
+      "max_traces": 1
+    }
+  },
+  "notes": "Minimal config: Dobby backend, no hook_format until real signature is confirmed."
+}

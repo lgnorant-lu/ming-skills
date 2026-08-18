@@ -1,0 +1,25 @@
+{
+  "package": "ru.moneyman",
+  "app_version": "unknown",
+  "target": {
+    "type": "func",
+    "so_name": "libsdk_bc_lib.so",
+    "offset": "0x9554c"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "hook_format": {
+      "args": "env,obj,jmap.diff,jbarr,jmap.diff",
+      "ret": "void"
+    }
+  },
+  "notes": "converted from 半自动化trace.js; default smoke uses max_traces=1; previous max_traces=3 saved as long_max3.json"
+}

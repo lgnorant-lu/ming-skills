@@ -1,0 +1,28 @@
+{
+  "package": "com.wandoujia.phoenix2",
+  "app_version": "8.3.11.2",
+  "target": {
+    "type": "func",
+    "so_name": "libsgmainso-6.6.230906.34042913.so",
+    "offset": "0x294d8"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "sync_flush": false,
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "logging": {
+      "hook_result_level": "I",
+      "trace_event_level": "I",
+      "progress_insn_step": 1000000,
+      "heartbeat_sec": 5
+    }
+  },
+  "notes": "G81 probe: verify whether xfinject autostart can arm libsgmainso JNI_OnLoad before ART calls it. No hook_format is used to avoid JNI signature assumptions."
+}

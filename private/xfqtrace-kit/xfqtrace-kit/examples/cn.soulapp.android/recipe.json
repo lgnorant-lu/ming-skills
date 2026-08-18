@@ -1,0 +1,25 @@
+{
+  "package": "cn.soulapp.android",
+  "app_version": "unknown",
+  "target": {
+    "type": "func",
+    "so_name": "libsmsdk.so",
+    "offset": "0x998c"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "hook_format": {
+      "args": "env,obj,jobj,jstr,jstr,jstr,jstr,jstr",
+      "ret": "jstr"
+    }
+  },
+  "notes": "converted from 半自动化trace.js"
+}

@@ -1,0 +1,26 @@
+{
+  "package": "com.supercell.clashroyale",
+  "app_version": "unknown",
+  "target": {
+    "type": "func",
+    "so_name": "libg.so",
+    "offset": "0x1236590"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "xfqtrace",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "memory_trace": false,
+    "logging": {
+      "insn_debug": false,
+      "progress_insn_step": 1000000,
+      "heartbeat_sec": 5
+    }
+  }
+}

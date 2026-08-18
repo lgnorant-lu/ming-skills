@@ -1,0 +1,30 @@
+{
+  "package": "com.yuuki.dbi_check",
+  "app_version": "debug build from https://github.com/LunFengChen/dbi_detect-yuuki",
+  "target": {
+    "type": "func",
+    "so_name": "libdbi_check.so",
+    "offset": "0x1ba8"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "hook_format": {
+      "args": "env,jclass,jstr",
+      "ret": "ptr"
+    },
+    "logging": {
+      "heartbeat_sec": 3,
+      "progress_insn_step": 1000000,
+      "flush_on_progress": true
+    }
+  },
+  "notes": "DBI detector sample. JNI target Java_com_yuuki_dbi_1check_MainActivity_getSign @ libdbi_check.so!0x1ba8; UI reports trace detected when getSign != realMD5. Current regression expects xfqtrace-hide signal bridge + JNI exact transfer: w8=0, md5 branch, sha branch not taken, UI matched=true and trace detected=false."
+}

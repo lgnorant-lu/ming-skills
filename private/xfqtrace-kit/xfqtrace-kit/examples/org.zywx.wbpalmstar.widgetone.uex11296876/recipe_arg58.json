@@ -1,0 +1,33 @@
+{
+  "package": "org.zywx.wbpalmstar.widgetone.uex11296876",
+  "app_version": "7.17.0",
+  "target": {
+    "type": "func",
+    "so_name": "libtongdun.so",
+    "offset": "0x9a010"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "hook_format": {
+      "args": "env,obj,int,jobj",
+      "ret": "jobj"
+    },
+    "filter": {
+      "arg": 2,
+      "label": "first_arg",
+      "type": "int",
+      "op": "eq",
+      "value": 58
+    },
+    "filter_display": "env,obj,int,jobj"
+  },
+  "notes": "吉祥航空 7.17.0; source apk: jixiang.apk.1; native registration n0(ILjava/lang/Object;)Ljava/lang/Object; in libtongdun.so; this variant traces only first business arg == 58. Return type is Object; keep ret=jbarr only if runtime confirms byte[]."
+}

@@ -1,0 +1,32 @@
+{
+  "package": "com.ecommerce.xmnair",
+  "app_version": "unknown",
+  "target": {
+    "type": "func",
+    "so_name": "libsmsdk.so",
+    "offset": "0xa10c"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "xfqtrace",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "logging": {
+      "hook_result_level": "D",
+      "trace_event_level": "W",
+      "heartbeat_sec": 10
+    },
+    "hook_format": {
+      "args": "env,_,jobj,jstr,jstr,jstr,jstr,jstr,jstr,jstr,jlong,jstr,jlist",
+      "ret": "jobj"
+    },
+    "memory_trace": false,
+    "sync_flush": false
+  },
+  "notes": "SMSDK.w1 JNI sample. Keep hook_format exact; avoid helper-stack JNI replay."
+}

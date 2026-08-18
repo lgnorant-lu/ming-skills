@@ -1,0 +1,31 @@
+{
+  "package": "com.taobao.taobao",
+  "app_version": "10.59.30",
+  "target": {
+    "type": "func",
+    "so_name": "libsgmainso-6.7.260202.so",
+    "offset": "0x5b4d8"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": false
+    },
+    "sync_flush": false,
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "anon_trace": false,
+    "hook_format": {
+      "args": "ptr,ptr",
+      "ret": "int"
+    },
+    "logging": {
+      "hook_result_level": "E",
+      "trace_event_level": "W"
+    },
+    "multi_thread_trace": true
+  },
+  "notes": "Taobao 10.59.30 JNI_OnLoad sync_flush test: libsgmainso-6.7.260202.so!0x5b4d8."
+}

@@ -1,0 +1,21 @@
+{
+  "package": "com.xingin.xhs",
+  "app_version": "9.32.0",
+  "target": {
+    "type": "func",
+    "so_name": "libtiny.so",
+    "offset": "0x165f14"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "multi_thread_trace": false
+  }
+}

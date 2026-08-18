@@ -1,0 +1,40 @@
+{
+  "package": "com.wandoujia.phoenix2",
+  "app_version": "8.3.11.2",
+  "target": {
+    "type": "func",
+    "so_name": "libsgmainso-6.6.230906.34042913.so",
+    "offset": "0x2995c"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "sync_flush": false,
+    "stop_condition": {
+      "max_traces": 2
+    },
+    "filter": {
+      "arg": 2,
+      "label": "cmd",
+      "type": "int",
+      "op": "eq",
+      "value": 70201
+    },
+    "filter_display": "env,obj,int,jobjarr",
+    "hook_format": {
+      "args": "env,obj,int,jobjarr",
+      "ret": "jobj"
+    },
+    "logging": {
+      "hook_result_level": "I",
+      "trace_event_level": "I",
+      "progress_insn_step": 1000000,
+      "heartbeat_sec": 5
+    }
+  },
+  "notes": "G71 follow-up: the xfinject run hit cmd=70201 twice (x3=Object[2]{\"mwua\", \"sgcipher\"}) while cmd=70102 was skipped, so the next trace pass filters 70201 directly."
+}

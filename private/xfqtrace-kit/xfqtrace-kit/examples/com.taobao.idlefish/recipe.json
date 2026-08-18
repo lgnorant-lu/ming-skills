@@ -1,0 +1,34 @@
+{
+  "package": "com.taobao.idlefish",
+  "app_version": "7.20.60",
+  "target": {
+    "type": "func",
+    "so_name": "libsgmainso-6.6.231201.33656539.so",
+    "offset": "0x280c4"
+  },
+  "options": {
+    "inline_hook_backend": 1,
+    "out_format": "traceui",
+    "lz4_compression": {
+      "enable": true,
+      "level": 0
+    },
+    "stop_condition": {
+      "max_traces": 1
+    },
+    "anon_trace": false,
+    "hook_format": {
+      "args": "env,obj,int,jobjarr",
+      "ret": "jstr"
+    },
+    "filter": {
+      "arg": 2,
+      "label": "cmd",
+      "type": "int",
+      "op": "eq",
+      "value": 70102
+    },
+    "filter_display": "env,obj,_,jobjarr"
+  },
+  "notes": "闲鱼 doCommandNative — 过滤 cmd=70102。anon_trace=false 避免跟踪 LVM JIT 匿名代码段导致 SIGILL。trace 会在 JIT 调用边界处截断，能看到 VM 执行但不会跟入匿名段。; default smoke uses max_traces=1; previous max_traces=3 saved as long_max3.json"
+}
