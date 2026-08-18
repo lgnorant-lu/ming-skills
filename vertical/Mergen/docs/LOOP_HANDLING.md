@@ -1,0 +1,217 @@
+# Loop Handling
+
+This file documents how the lifter currently recognizes loops, how it switches a recognized loop into "generalized" lifting mode, and how the generalized state is consumed by downstream value tracking. It also lists the load-bearing hardcoded addresses, the gating contexts, and the known limitations so the next session can change loop behavior without re-excavating the code.
+
+For build/test workflow use `docs/BUILDING.md` and `docs/REWRITE_BASELINE.md`. For the support matrix use `docs/SCOPE.md`. For the pipeline order around loop lifting use `ARCHITECTURE.md`.
+
+## Phases
+
+Loop handling is a sequence of three phases on the same basic block:
+
+| Phase | What it does | Where |
+|---|---|---|
+| Detect | Recognize that a backward jump target is a real loop header (not an acyclic backward branch) | `isStructuredLoopHeaderShape` + `canGeneralizeStructuredLoopHeader` in `lifter/core/LifterClass.hpp` |
+| Generalize | Switch the lifter from concrete per-path execution to a phi-driven "loop mode" at the header | `branch_backup`, `load_generalized_backup`, `record_generalized_loop_backedge` in `lifter/core/LifterClass_Concolic.hpp` |
+| Consume | Re-route specific load / register reads through canonical/backedge phi values during loop-mode lifting | `retrieve_generalized_loop_*` family in `lifter/core/LifterClass_Concolic.hpp` |
+
+## Detection
+
+`isStructuredLoopHeaderShape(BasicBlock*)` walks the block chain starting at the candidate header and accepts on the first conditional branch it reaches, with these constraints:
+
+- Maximum walk depth: 8 hops.
+- The header itself may have up to 2 predecessors; deeper hops in the chain may have only 1 predecessor each.
+- Each hop must terminate with a `BranchInst`.
+- A non-conditional unconditional `br` with a single successor is allowed (trampoline relaxation), but a multi-successor non-branch terminator rejects.
+- An empty block on any hop rejects.
+- A cycle in the walk rejects.
+
+Trampoline relaxation: when the entry block is a single unconditional `br` and a deeper hop has not yet been fully terminated (mid-lift), the chain is still accepted so the header can be latched. The actual loop-vs-acyclic decision is made by `blockCanReach` and `visitedAddresses` checks downstream.
+
+`canGeneralizeStructuredLoopHeader(addr)` then applies the operational guards in this order:
+
+1. `getControlFlow() == ControlFlow::Unflatten` — feature-gate.
+2. `currentPathSolveAllowsStructuredLoopGeneralization()` (or the resolved-target widening) — see [Path-solve context gating](#path-solve-context-gating).
+3. `addr <= blockInfo.block_address` — only backward targets.
+4. `visitedAddresses.contains(addr)` — header must already have been lifted at least once.
+5. Not already in `pendingLoopGeneralizationAddresses`.
+6. Not already in `generalizedLoopAddresses`.
+7. `addrToBB[addr]` exists and is non-empty.
+8. `isStructuredLoopHeaderShape(it->second)`.
+9. `blockCanReach(header, currentBlock)` — confirms an actual cycle.
+
+All guards must pass; any reject is logged via diagnostic output gated on `liftProgressDiagEnabled` (`MERGEN_DIAG_LIFT_PROGRESS=1`).
+
+### Path-solve context gating
+
+`currentPathSolveContext` distinguishes how the lifter reached the current point:
+
+| Context | Generalization allowed? |
+|---|---|
+| `ConditionalBranch` | yes |
+| `DirectJump` | yes |
+| `IndirectJump` | only via the resolved-target widening (`...ForResolvedTarget`) |
+| `Ret` | no |
+
+The `IndirectJump` widening exists because once `solvePath` has pinned an indirect jump to a concrete address, that target is no longer speculative and a backward edge is a legitimate loop. Ret-path contexts have their own lifecycle and are deliberately excluded from generalization.
+
+## Generalized loop state
+
+When generalization fires, the lifter re-enters the header in "loop mode." The state lives in `lifter/core/LifterClass_Concolic.hpp`:
+
+```cpp
+struct GeneralizedLoopControlFieldState {
+  bool valid = false;
+  llvm::BasicBlock* headerBlock = nullptr;
+  llvm::BasicBlock* canonicalSource = nullptr;
+  // Backedge side is variable-width: a loop header may be reached from
+  // multiple backedges (N>=1). Size 1 is the common 2-way loop case.
+  llvm::SmallVector<llvm::BasicBlock*, 2> backedgeSources;
+  uint64_t canonicalControl = 0;
+  llvm::SmallVector<uint64_t, 2> backedgeControls;
+  llvm::DenseMap<uint64_t, ValueByteReference> canonicalBuffer;
+  llvm::SmallVector<llvm::DenseMap<uint64_t, ValueByteReference>, 2> backedgeBuffers;
+} activeGeneralizedLoopControlFieldState;
+
+llvm::DenseMap<llvm::BasicBlock*, GeneralizedLoopControlFieldState>
+    generalizedLoopControlFieldStates;
+```
+
+`activeGeneralizedLoopControlFieldState` tracks the state for the loop currently being lifted. `generalizedLoopControlFieldStates` is the per-header archive used after promotion so a later re-entry can rebuild the state.
+
+Two related stores hold raw register/flag phi nodes per header:
+
+- `generalizedLoopRegisterPhis: BB -> array<PHINode*, REGISTER_COUNT>`
+- `generalizedLoopFlagPhis: BB -> array<PHINode*, FLAGS_END>`
+
+State transitions:
+
+| Event | What changes |
+|---|---|
+| `branch_backup(bb, generalized=false)` | Snapshots current registers/flags/buffer/cache/assumptions/counter into `BBbackup[bb]`. |
+| `branch_backup(bb, generalized=true)` | Appends the snapshot to `generalizedLoopBackedgeBackup[bb]` (a `SmallVector<backup_point, 2>`), deduplicated by `sourceBlock` so a repeat call from the same source replaces its entry in place. `BBbackup[bb]` only set if absent. |
+| `load_backup(bb)` | Restores `BBbackup[bb]`, clears `activeGeneralizedLoopLocalBuffer`. |
+| `load_generalized_backup(bb)` | Builds `make_generalized_loop_backup(bb)` and restores it; populates `activeGeneralizedLoopControlFieldState` from the canonical/backedge snapshots. |
+| `record_generalized_loop_backedge(bb)` | Promotes the loop: copies `activeGeneralizedLoopControlFieldState` into the per-header archive, marks the address generalized. |
+
+## Phi construction at the header
+
+`make_generalized_loop_backup(bb, canonical, ArrayRef<backup_point> sources)` calls `mergeValue` for every register and flag slot. With one canonical source and N backedge sources, it produces a `(1 + N)`-incoming phi (one incoming per distinct `sources[i].sourceBlock`). Sources duplicating `canonical.sourceBlock` are filtered before phi construction.
+
+```cpp
+auto mergeValue = [&](Value* canonicalValue,
+                      ArrayRef<Value*> backedgeValues,
+                      const char* name, PHINode*& phiOut,
+                      bool widenFirstBackedge) -> Value* {
+  // Require canonical + all backedges present and type-matched. Any
+  // mismatch falls back to backedgeValues.front(), preserving the
+  // pre-N-way single-backedge semantics for the 2-way case.
+  auto* phi = phiBuilder.CreatePHI(canonicalValue->getType(),
+                                   1 + backedgeValues.size(), name);
+  phi->addIncoming(canonicalValue, canonicalSource);
+  for (size_t i = 0; i < backedgeValues.size(); ++i) {
+    phi->addIncoming(widenFirstBackedge
+                         ? UndefValue::get(backedgeValues[i]->getType())
+                         : backedgeValues[i],
+                     sources[i]->sourceBlock);
+  }
+  phiOut = phi;
+  return phi;
+};
+```
+
+`widenFirstBackedge` controls whether the backedge incoming is `Undef` (allowing later folding to refine) or the concrete backedge value:
+
+- Registers: `widenFirstBackedge = !shouldPreserveGeneralizedBackedgeRegisterIndex(i)`. RSP is preserved (passes the actual backedge value), every other GPR widens to `Undef`.
+- Flags: always widen to `Undef`.
+
+Preserving RSP through the first backedge prevents the stack pointer from being treated as "could be anything" inside the loop body.
+
+## Consuming the state during loop-mode lifting
+
+When the lifter is in loop mode (`currentBlockUsesGeneralizedLoopState() == true`) and the active state is valid, several read paths re-route through the state instead of the normal load/register pipeline. All are CRTP-dispatched in `lifter/core/LifterClass.hpp` and implemented in `lifter/core/LifterClass_Concolic.hpp`; symbolic-mode stubs in `lifter/core/LifterClass_Symbolic.hpp` return `nullptr` so symbolic analysis is unchanged.
+
+| Helper | What it returns |
+|---|---|
+| `retrieve_generalized_loop_local_value(addr, bytes)` | Loop-local stack-buffer value if `activeGeneralizedLoopLocalBuffer` has it; else `nullptr` (caller falls back). |
+| `retrieve_generalized_loop_control_field_value(loadOffset, bytes, orgLoad)` | Phi of canonical/backedge values for a load whose offset is `controlSlot + (Trunc/ZExt/SExt of) phi` with a recognized constant displacement. |
+| `retrieve_generalized_loop_control_slot_value(addr, bytes)` | Phi of canonical/backedge control values when `addr == kThemidaControlCursorSlot`. |
+| `retrieve_generalized_loop_target_slot_value(addr, bytes)` | Phi of canonical/backedge values for a recognized target slot. |
+| `retrieve_generalized_loop_phi_address_value(load, bytes, orgLoad)` | Phi of loaded values when the load's address is a phi of two concrete addresses derived from canonical/backedge. |
+| `retrieve_generalized_loop_local_phi_address_value(load, bytes, orgLoad)` | Same as above for loop-local stack-buffer addresses. |
+
+`computePossibleValues` (in `lifter/memory/GEPTracker.ipp`) also has a `PHINode` case that unions every incoming's value set, so callers downstream of these phis get the full possible-value enumeration instead of an empty fallback.
+
+## Hardcoded reference-sample addresses
+
+A handful of constants in `lifter/core/LifterClass_Concolic.hpp` are tied to the reference Themida sample (`testthemida/example2-virt.bin @ 0x140001000`):
+
+```cpp
+static constexpr uint64_t kThemidaControlCursorSlot = 0x14004DD19ULL;
+static constexpr uint64_t kThemidaLoopCarriedSlot   = 0x14004DC67ULL;
+static constexpr std::array<uint64_t, 3> kSupportedGeneralizedControlFieldOffsets = {
+    0x6ULL, 0xAULL, 0xCULL};
+```
+
+The diagnostic prints scattered across `PathSolver.ipp`, `LifterClass.hpp`, `LifterClass_Concolic.hpp`, and `GEPTracker.ipp` that gate on specific Themida addresses (`0x1400237F9ULL`, `0x140023582-0x1400237FFULL`, etc.) only fire under `MERGEN_DIAG_LIFT_PROGRESS=1` and are session scaffolding for that sample. They produce no output for any other binary.
+
+## Indirect-jump revisit threshold
+
+Dispatcher-shaped loops reached through `PathSolveContext::IndirectJump` use a revisit threshold before generalized-loop abstraction kicks in. This is an explicit precision/performance tradeoff, not an arbitrary constant:
+
+- Generalize too early and Themida-style dispatchers lose concrete continuation state before the later guest-import path is surfaced.
+- Generalize too late and the lifter spends too long replaying dispatcher handlers concretely, which increases worklist churn and can hit unrelated budgets on larger samples.
+
+Current operational rule for the reference Themida sample:
+
+- `dispatcherShape ? 128u : 0u` is the last known-good threshold on `example2-virt.bin` for preserving the later console-output path.
+- Lowering it to `80` regresses the sample from the fuller 6-import / 10-call output back down to the older 4-import / 5-call output.
+
+Long term, this should become adaptive rather than staying a magic number forever. The right trigger is novelty of dispatcher state or continuation targets, not raw revisit count alone. Until that adaptive policy exists, treat `128` as the conservative regression-safe default for indirect-jump dispatcher generalization.
+
+## Tests
+
+Loop handling has roughly thirty microtests in `lifter/test/Tester.hpp`. The most relevant groups:
+
+| Group | Coverage |
+|---|---|
+| `structured_loop_header_*` | Acceptance / rejection for conditional, jump-chain, acyclic-backward, non-conditional-terminator, multi-predecessor shapes. |
+| `loop_generalization_*` | Per-context guards: conditional branch allowed, direct jump allowed, indirect jump blocked when unresolved / allowed when resolved, ret blocked. |
+| `pending_generalized_loop_*` | Same guards in the `pendingLoopGeneralizationAddresses` lifecycle. |
+| `generalized_loop_restore_*` | Backedge flag-state and register-state merging across `load_generalized_backup`. |
+| `generalized_loop_*_creates_phi` | Each `retrieve_generalized_loop_*` helper produces the expected phi shape (control slot, control slot displacement, target slot, control field load, local phi address). |
+| `compute_possible_values_*` | The PHI handler unions incomings (also covers cast-width preservation and rolled-arithmetic-chain enumeration). |
+
+When changing loop handling, run at minimum:
+
+```
+python test.py micro
+python test.py baseline
+```
+
+For changes that touch register/flag phi shape, also run the two Themida gates — a coverage gate and a correctness gate. Both must stay green (or at least not regress).
+
+**Coverage gate** — confirms the VM unrolls without crashing:
+
+```
+build_iced\lifter.exe ..\testthemida\example2-virt.bin 0x140001000
+```
+
+Inspect `output_diagnostics.json` for `lift_stats.instructions_lifted == 2544` and `summary.warning == 0`, `summary.error == 0`. This only certifies that the lifter walked the VM's 2544 handler instructions without reporting errors — it does **not** certify that the recovered IR is semantically equivalent to the original function.
+
+**Correctness gate** — confirms the devirtualized IR calls the same external imports as the non-virtualized reference:
+
+```
+python test.py themida
+```
+
+Fails hard if any required import from `scripts/rewrite/themida_samples.json` is missing from the lifted IR. Required imports are pinned against a lift of the non-virt reference binary; regenerate with `python test.py themida --update` when the reference changes (not when the virt output changes). Passing this gate means the VM devirtualization recovered the guest program's external-call semantics, not just the VM's own state-machine activity.
+
+This gate is currently **red** on `example2-virt.bin`: the lifter unrolls the VM but does not surface the guest's `GetStdHandle` / `WriteConsoleA` / `ReadConsoleA` / `CharUpperA` calls. That gap is the active Themida-frontier work item — the coverage gate passing while the correctness gate fails is exactly the failure mode the two-gate split is designed to make visible.
+
+## Known limitations
+
+| Limitation | Status |
+|---|---|
+| `REP`/`REPE`/`REPNE`-prefixed `SCAS` | Rejected as `not_implemented`; needs a model for repeated-scan termination. |
+| `INT 2` continuation under VMP 3.6 | Naive architectural fallthrough is wrong; recovery requires modeling the dispatcher / exception-mediated control flow. See `VMP_TESTING_NOTES.md`. |
+| Loop unrolling / loop-invariant code motion | Not implemented. The lifter relies on LLVM's downstream optimization passes for this once the IR is in shape. |

@@ -1,0 +1,488 @@
+{
+  "schema": "mergen-oracle-seed-v1",
+  "cases": [
+    {
+      "name": "add_rax_rcx_basic",
+      "handler": "add_sub",
+      "instruction_bytes": [72, 1, 200],
+      "initial": {
+        "registers": {
+          "RAX": "0x5",
+          "RCX": "0x7"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "RAX": null
+        },
+        "flags": {
+          "FLAG_CF": null,
+          "FLAG_OF": null,
+          "FLAG_ZF": null,
+          "FLAG_SF": null,
+          "FLAG_PF": null,
+          "FLAG_AF": null
+        }
+      }
+    },
+    {
+      "name": "add_rax_rcx_carry_magic",
+      "handler": "add_sub",
+      "instruction_bytes": [72, 1, 200],
+      "initial": {
+        "registers": {
+          "RAX": "0xffffffffffffffff",
+          "RCX": "0x1"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "RAX": null
+        },
+        "flags": {
+          "FLAG_CF": null,
+          "FLAG_OF": null,
+          "FLAG_ZF": null,
+          "FLAG_SF": null,
+          "FLAG_PF": null,
+          "FLAG_AF": null
+        }
+      }
+    },
+    {
+      "name": "sub_rax_rcx_borrow_magic",
+      "handler": "add_sub",
+      "instruction_bytes": [72, 41, 200],
+      "initial": {
+        "registers": {
+          "RAX": "0x0",
+          "RCX": "0x1"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "RAX": null
+        },
+        "flags": {
+          "FLAG_CF": null,
+          "FLAG_OF": null,
+          "FLAG_ZF": null,
+          "FLAG_SF": null,
+          "FLAG_PF": null,
+          "FLAG_AF": null
+        }
+      }
+    },
+    {
+      "name": "xor_rax_rcx_magic",
+      "handler": "xor",
+      "instruction_bytes": [72, 49, 200],
+      "initial": {
+        "registers": {
+          "RAX": "0xf0f0f0f0f0f0f0f0",
+          "RCX": "0xaaaaaaaaaaaaaaaa"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "RAX": null
+        },
+        "flags": {
+          "FLAG_CF": null,
+          "FLAG_OF": null
+        }
+      }
+    },
+    {
+      "name": "xor_rax_rax_zero",
+      "handler": "xor",
+      "instruction_bytes": [72, 49, 192],
+      "initial": {
+        "registers": {
+          "RAX": "0xdeadbeefcafebabe"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "RAX": null
+        },
+        "flags": {
+          "FLAG_CF": null,
+          "FLAG_OF": null
+        }
+      }
+    },
+    {
+      "name": "rol_rax_1_carry_probe",
+      "handler": "rol",
+      "instruction_bytes": [72, 209, 192],
+      "initial": {
+        "registers": {
+          "RAX": "0x8000000000000001"
+        },
+        "flags": {
+          "FLAG_CF": 0
+        }
+      },
+      "expected": {
+        "registers": {
+          "RAX": null
+        },
+        "flags": {
+          "FLAG_CF": null,
+          "FLAG_OF": null
+        }
+      }
+    },
+    {
+      "name": "loop_rcx_two_taken",
+      "handler": "loopx",
+      "instruction_bytes": [226, 16],
+      "initial": {
+        "registers": {
+          "RCX": "0x2"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "RCX": "0x1"
+        },
+        "flags": {},
+        "branch_taken": true
+      },
+      "oracle": "computed"
+    },
+    {
+      "name": "loop_rcx_one_fallthrough",
+      "handler": "loopx",
+      "instruction_bytes": [226, 16],
+      "initial": {
+        "registers": {
+          "RCX": "0x1"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "RCX": "0x0"
+        },
+        "flags": {},
+        "branch_taken": false
+      },
+      "oracle": "computed"
+    },
+    {
+      "name": "loop_rcx_zero_wraps_taken",
+      "handler": "loopx",
+      "instruction_bytes": [226, 16],
+      "initial": {
+        "registers": {
+          "RCX": "0x0"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "RCX": "0xffffffffffffffff"
+        },
+        "flags": {},
+        "branch_taken": true
+      },
+      "oracle": "computed"
+    },
+    {
+      "name": "loope_zf_taken",
+      "handler": "loopx",
+      "instruction_bytes": [225, 16],
+      "initial": {
+        "registers": {
+          "RCX": "0x2"
+        },
+        "flags": {
+          "FLAG_ZF": 1
+        }
+      },
+      "expected": {
+        "registers": {
+          "RCX": "0x1"
+        },
+        "flags": {},
+        "branch_taken": true
+      },
+      "oracle": "computed"
+    },
+    {
+      "name": "loope_count_zero_fallthrough",
+      "handler": "loopx",
+      "instruction_bytes": [225, 16],
+      "initial": {
+        "registers": {
+          "RCX": "0x1"
+        },
+        "flags": {
+          "FLAG_ZF": 1
+        }
+      },
+      "expected": {
+        "registers": {
+          "RCX": "0x0"
+        },
+        "flags": {},
+        "branch_taken": false
+      },
+      "oracle": "computed"
+    },
+    {
+      "name": "loope_zf_clear_fallthrough",
+      "handler": "loopx",
+      "instruction_bytes": [225, 16],
+      "initial": {
+        "registers": {
+          "RCX": "0x2"
+        },
+        "flags": {
+          "FLAG_ZF": 0
+        }
+      },
+      "expected": {
+        "registers": {
+          "RCX": "0x1"
+        },
+        "flags": {},
+        "branch_taken": false
+      },
+      "oracle": "computed"
+    },
+    {
+      "name": "loopne_zf_clear_taken",
+      "handler": "loopx",
+      "instruction_bytes": [224, 16],
+      "initial": {
+        "registers": {
+          "RCX": "0x2"
+        },
+        "flags": {
+          "FLAG_ZF": 0
+        }
+      },
+      "expected": {
+        "registers": {
+          "RCX": "0x1"
+        },
+        "flags": {},
+        "branch_taken": true
+      },
+      "oracle": "computed"
+    },
+    {
+      "name": "loopne_count_zero_fallthrough",
+      "handler": "loopx",
+      "instruction_bytes": [224, 16],
+      "initial": {
+        "registers": {
+          "RCX": "0x1"
+        },
+        "flags": {
+          "FLAG_ZF": 0
+        }
+      },
+      "expected": {
+        "registers": {
+          "RCX": "0x0"
+        },
+        "flags": {},
+        "branch_taken": false
+      },
+      "oracle": "computed"
+    },
+    {
+      "name": "loopne_zf_set_fallthrough",
+      "handler": "loopx",
+      "instruction_bytes": [224, 16],
+      "initial": {
+        "registers": {
+          "RCX": "0x2"
+        },
+        "flags": {
+          "FLAG_ZF": 1
+        }
+      },
+      "expected": {
+        "registers": {
+          "RCX": "0x1"
+        },
+        "flags": {},
+        "branch_taken": false
+      },
+      "oracle": "computed"
+    },
+    {
+      "name": "movdqa_xmm0_xmm1_basic",
+      "handler": "movdqa",
+      "instruction_bytes": [102, 15, 111, 193],
+      "initial": {
+        "registers": {
+          "XMM0": "0x00112233445566778899aabbccddeeff",
+          "XMM1": "0xffeeddccbbaa99887766554433221100"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "XMM0": null
+        },
+        "flags": {}
+      }
+    },
+    {
+      "name": "movq_xmm0_rcx_zero_upper",
+      "handler": "movq",
+      "instruction_bytes": [102, 72, 15, 110, 193],
+      "initial": {
+        "registers": {
+          "XMM0": "0xffffffffffffffff1111111111111111",
+          "RCX": "0x0123456789abcdef"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "XMM0": null
+        },
+        "flags": {}
+      }
+    },
+    {
+      "name": "movq_rax_xmm1_low64",
+      "handler": "movq",
+      "instruction_bytes": [102, 72, 15, 126, 200],
+      "initial": {
+        "registers": {
+          "RAX": "0xdeadbeefcafebabe",
+          "XMM1": "0x112233445566778899aabbccddeeff00"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "RAX": null
+        },
+        "flags": {}
+      }
+    },
+    {
+      "name": "movq_xmm0_xmm1_zero_upper",
+      "handler": "movq",
+      "instruction_bytes": [243, 15, 126, 193],
+      "initial": {
+        "registers": {
+          "XMM0": "0xaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb",
+          "XMM1": "0x0123456789abcdeffedcba9876543210"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "XMM0": null
+        },
+        "flags": {}
+      }
+    },
+    {
+      "name": "punpcklqdq_xmm0_xmm1_basic",
+      "handler": "punpcklqdq",
+      "instruction_bytes": [102, 15, 108, 193],
+      "initial": {
+        "registers": {
+          "XMM0": "0x00112233445566778899aabbccddeeff",
+          "XMM1": "0xffeeddccbbaa99887766554433221100"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "XMM0": null
+        },
+        "flags": {}
+      }
+    },
+    {
+      "name": "punpcklqdq_xmm0_xmm1_zero_upper_from_zero_source",
+      "handler": "punpcklqdq",
+      "instruction_bytes": [102, 15, 108, 193],
+      "initial": {
+        "registers": {
+          "XMM0": "0xaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb",
+          "XMM1": "0x00000000000000000000000000000000"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "XMM0": null
+        },
+        "flags": {}
+      }
+    },
+    {
+      "name": "pxor_xmm0_xmm1_basic",
+      "handler": "pxor",
+      "instruction_bytes": [102, 15, 239, 193],
+      "initial": {
+        "registers": {
+          "XMM0": "0x00112233445566778899aabbccddeeff",
+          "XMM1": "0xffeeddccbbaa99887766554433221100"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "XMM0": null
+        },
+        "flags": {}
+      }
+    },
+    {
+      "name": "pand_xmm0_xmm1_basic",
+      "handler": "pand",
+      "instruction_bytes": [102, 15, 219, 193],
+      "initial": {
+        "registers": {
+          "XMM0": "0xf0f0f0f0f0f0f0f00f0f0f0f0f0f0f0f",
+          "XMM1": "0x00ff00ff00ff00ffff00ff00ff00ff00"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "XMM0": null
+        },
+        "flags": {}
+      }
+    },
+    {
+      "name": "por_xmm0_xmm1_basic",
+      "handler": "por",
+      "instruction_bytes": [102, 15, 235, 193],
+      "initial": {
+        "registers": {
+          "XMM0": "0xf0f0f0f0f0f0f0f00f0f0f0f0f0f0f0f",
+          "XMM1": "0x00ff00ff00ff00ffff00ff00ff00ff00"
+        },
+        "flags": {}
+      },
+      "expected": {
+        "registers": {
+          "XMM0": null
+        },
+        "flags": {}
+      }
+    }
+  ]
+}

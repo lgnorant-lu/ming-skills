@@ -1,0 +1,113 @@
+#pragma once
+#include "llvm/IR/Value.h"
+#include <functional>
+#include <cstdint>
+#include <linuxpe>
+#include <llvm/Support/raw_ostream.h>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+// #define _NODEV why?
+
+#ifndef UNREACHABLE
+#define UNREACHABLE(msg)                                                       \
+  do {                                                                         \
+                                                                               \
+    /*llvm::outs().flush();*/                                                  \
+    /*std::cout.flush();*/                                                     \
+    llvm::llvm_unreachable_internal(msg, __FILE__, __LINE__);                  \
+  } while (0)
+#endif
+
+#ifndef _NODEV
+#define printvalue(x)                                                          \
+  do {                                                                         \
+    debugging::printLLVMValue(x, #x);                                          \
+  } while (0);
+// outs() << " " #x " : "; x->print(outs());
+// outs() << "\n";  outs().flush();
+#define printvalue2(x)                                                         \
+  do {                                                                         \
+    debugging::printValue(x, #x);                                              \
+  } while (0);
+#else
+#define printvalue(x) ((void)0);
+#define printvalue2(x) ((void)0);
+#endif // _NODEV
+
+#define printvalueforce(x)                                                     \
+  do {                                                                         \
+    outs() << " " #x " : ";                                                    \
+    x->print(outs());                                                          \
+    outs() << "\n";                                                            \
+    outs().flush();                                                            \
+  } while (0);
+
+#define printvalueforce2(x)                                                    \
+  do {                                                                         \
+    llvm::outs() << " " #x " : " << x << " " << __FILE__ << ":" << __LINE__    \
+                 << "\n";                                                      \
+    llvm::outs().flush();                                                      \
+  } while (0);
+
+namespace debugging {
+  int increaseInstCounter();
+  void enableDebug(const std::string& filename);
+  void doIfDebug(const std::function<void(void)>& dothis);
+
+  extern bool shouldDebug;
+  extern llvm::raw_ostream* debugStream;
+
+  template <typename T> void printValue(const T& v, const char* name) {
+    if (!shouldDebug || !debugStream)
+      return;
+
+    if constexpr (std::is_same_v<T, uint8_t> || std::is_same_v<T, int8_t>) {
+      *debugStream << " " << name << " : " << static_cast<int>(v) << "\n";
+      debugStream->flush();
+      return;
+    } else
+      *debugStream << " " << name << " : " << v << "\n";
+    debugStream->flush();
+  }
+  template <typename T>
+  concept Printable = requires(T t, llvm::raw_ostream& os) {
+    { t.print(os) } -> std::same_as<void>;
+  };
+
+  template <Printable T> void printLLVMValue(T* v, const char* name) {
+    if (!shouldDebug || !debugStream)
+      return;
+    *debugStream << " " << name << " : ";
+    v->print(*debugStream);
+    *debugStream << "\n";
+    debugStream->flush();
+  }
+
+} // namespace debugging
+
+namespace argparser {
+  struct ParseResult {
+    std::vector<std::string> positionalArgs;
+    bool showHelp = false;
+    bool enableDebug = false;
+    bool concretizeUnsafeReads = false;
+    std::vector<uint64_t> outlineAddresses;
+    std::vector<std::string> errors;
+
+    [[nodiscard]] bool ok() const { return errors.empty(); }
+  };
+
+  void printHelp();
+  ParseResult parseArguments(const std::vector<std::string>& args,
+                             bool allowUnknownOptions = false);
+} // namespace argparser
+
+namespace timer {
+  void startTimer();
+  double stopTimer();
+  double getTimer();
+  void suspendTimer();
+  void resumeTimer();
+} // namespace timer

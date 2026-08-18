@@ -1,0 +1,11 @@
+src/
+scratch/
+scripts/
+docs/
+.vscode/
+.github/
+tsconfig.json
+.gitignore
+.prettierrc
+
+dist/tsconfig.tsbuildinfo

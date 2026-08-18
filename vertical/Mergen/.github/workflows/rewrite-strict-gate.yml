@@ -1,0 +1,130 @@
+name: Rewrite Strict Gate
+
+on:
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  rewrite-gate:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        gate:
+          - job_name: rewrite-strict-gate
+            timeout_minutes: 120
+            test_command: python test.py all
+            install_python_deps: true
+          - job_name: rewrite-quick-gate
+            timeout_minutes: 90
+            test_command: python test.py quick
+            install_python_deps: false
+    name: ${{ matrix.gate.job_name }}
+    timeout-minutes: ${{ matrix.gate.timeout_minutes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python dependencies
+        if: ${{ matrix.gate.install_python_deps }}
+        run: python -m pip install --upgrade pip capstone unicorn
+
+      - name: Install native dependencies
+        shell: pwsh
+        run: |
+          function Install-ChocoPkg([string]$name) {
+            choco install $name --no-progress -y
+            if ($LASTEXITCODE -ne 0) {
+              throw "choco install failed for '$name' with exit code $LASTEXITCODE"
+            }
+          }
+          Install-ChocoPkg "nasm"
+          Install-ChocoPkg "ninja"
+          Install-ChocoPkg "7zip"
+
+      - name: Upgrade clang-cl to 21.1.8
+        shell: pwsh
+        run: |
+          # The windows-latest preinstalled clang-cl (currently 20.1.8) produces
+          # a lifter binary that segfaults on calc_fib before emitting any IR.
+          # Clang 21.1.8 has been verified locally to compile the lifter into a
+          # binary that lifts both calc_fib and calc_sum_array to their expected
+          # constant returns. Clang 18 cannot be used because the runner image's
+          # MSVC STL (14.44+) hard-requires clang 19.0.0 or newer.
+          choco upgrade llvm --version=21.1.8 --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw "choco upgrade llvm failed with $LASTEXITCODE" }
+          $clangCl = "C:\Program Files\LLVM\bin\clang-cl.exe"
+          if (!(Test-Path $clangCl)) { throw "clang-cl.exe not found at $clangCl after upgrade" }
+          "CMAKE_C_COMPILER=$clangCl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CMAKE_CXX_COMPILER=$clangCl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Resolved clang-cl=$clangCl"
+          & $clangCl --version
+
+      - name: Resolve LLVM_DIR
+        shell: pwsh
+        run: |
+          # The LLVM link-time libraries come from the vovkos package because
+          # the Windows LLVM installer does not ship the cmake config files.
+          $llvmVersion = "18.1.8"
+          $llvmArchiveName = "llvm-$llvmVersion-windows-amd64-msvc17-msvcrt.7z"
+          $llvmUrl = "https://github.com/vovkos/llvm-package-windows/releases/download/llvm-$llvmVersion/$llvmArchiveName"
+          $llvmWork = Join-Path $env:RUNNER_TEMP "llvm-package"
+          $llvmArchive = Join-Path $llvmWork $llvmArchiveName
+          if (Test-Path $llvmWork) { Remove-Item -Recurse -Force $llvmWork }
+          New-Item -ItemType Directory -Path $llvmWork | Out-Null
+          Invoke-WebRequest -Uri $llvmUrl -OutFile $llvmArchive
+          $sevenZip = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
+          if (!(Test-Path $sevenZip)) { throw "7z.exe not found at $sevenZip" }
+          & $sevenZip x -y $llvmArchive "-o$llvmWork" | Out-Null
+          $llvmConfig = (Get-ChildItem -Path $llvmWork -Filter LLVMConfig.cmake -Recurse -File | Select-Object -First 1).FullName
+          if (-not $llvmConfig) { throw "LLVMConfig.cmake not found after extracting $llvmArchiveName" }
+          $llvmDir = Split-Path -Parent $llvmConfig
+          "LLVM_DIR=$llvmDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Resolved LLVM_DIR=$llvmDir"
+
+      - name: Print clang-cl version
+        shell: pwsh
+        run: |
+          & "$env:CMAKE_CXX_COMPILER" --version
+
+      - name: Configure iced build
+        run: cmd /c scripts\dev\configure_iced.cmd
+
+      - name: Build lifter
+        run: cmd /c scripts\dev\build_iced.cmd
+
+      - name: Run rewrite gate
+        run: ${{ matrix.gate.test_command }}
+
+      - name: Collect full-handler coverage summary
+        if: ${{ matrix.gate.job_name == 'rewrite-strict-gate' }}
+        shell: pwsh
+        run: |
+          $coverageJson = "rewrite-full-handler-coverage.json"
+          $json = python scripts/rewrite/collect_instruction_tests.py --vectors-file lifter/test/test_vectors/oracle_vectors_full_handlers.json --json
+          $json | Out-File -FilePath $coverageJson -Encoding utf8
+          $coverage = $json | ConvertFrom-Json
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## Full-handler coverage"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ""
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- Vector kind: $($coverage.summary.vector_kind)"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- Vectors file: $($coverage.summary.vectors_file)"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- Total handlers: $($coverage.summary.total_handlers)"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- Covered handlers: $($coverage.summary.covered_handlers)"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- Skipped handlers: $($coverage.summary.skipped_handlers)"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- Missing handlers: $($coverage.summary.missing_handlers)"
+
+      - name: Upload full-handler coverage artifact
+        if: ${{ matrix.gate.job_name == 'rewrite-strict-gate' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: rewrite-full-handler-coverage
+          path: rewrite-full-handler-coverage.json

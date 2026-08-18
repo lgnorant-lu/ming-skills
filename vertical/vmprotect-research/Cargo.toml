@@ -1,0 +1,33 @@
+[package]
+name = "vmp_devirt"
+version = "0.1.0"
+edition = "2021"
+authors = ["VMP Devirtualizer Team"]
+description = "Generalized VMProtect devirtualizer (VMP 1.0-3.10.5)"
+license = "MIT"
+
+[[bin]]
+name = "vmp_devirt"
+path = "src/bin/cli.rs"
+
+[lib]
+name = "vmp_devirt"
+path = "src/lib.rs"
+
+[dependencies]
+goblin = "0.7"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+byteorder = "1.5"
+clap = { version = "4.4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.dev]
+opt-level = 0
