@@ -1,0 +1,49 @@
+import type {ContentResult, FastMCP} from 'fastmcp';
+import {z} from 'zod';
+
+import {getElementText} from '../../command.js';
+import {elementUUIDScheme} from '../../schema.js';
+import {aiElementWebDriverRejectionIfNeeded} from '../gestures/handlers/ai-element.js';
+import {resolveDriver, textResultWithPrimaryElementId, errorResult, toolErrorMessage} from '../tool-response.js';
+
+export default function getText(server: FastMCP): void {
+  const getTextSchema = z.object({
+    elementUUID: elementUUIDScheme,
+    sessionId: z.string().optional().describe('Session ID to target. If omitted, uses the active session.'),
+  });
+
+  server.addTool({
+    name: 'appium_get_text',
+    description: 'Get text from an element',
+    parameters: getTextSchema,
+    annotations: {
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
+    execute: async (
+      args: z.infer<typeof getTextSchema>,
+      _context: Record<string, unknown> | undefined,
+    ): Promise<ContentResult> => {
+      const resolved = await resolveDriver(args.sessionId);
+      if (!resolved.ok) {
+        return resolved.result;
+      }
+      const {driver} = resolved;
+
+      const aiRejection = aiElementWebDriverRejectionIfNeeded(args.elementUUID);
+      if (aiRejection) {
+        return aiRejection;
+      }
+
+      try {
+        const text = await getElementText(driver, args.elementUUID);
+        return textResultWithPrimaryElementId(
+          args.elementUUID,
+          `Successfully got text ${text} from element ${args.elementUUID}.`,
+        );
+      } catch (err: unknown) {
+        return errorResult(`Failed to get text from element ${args.elementUUID}. err: ${toolErrorMessage(err)}`);
+      }
+    },
+  });
+}

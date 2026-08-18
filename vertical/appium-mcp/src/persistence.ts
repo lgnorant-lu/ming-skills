@@ -1,0 +1,202 @@
+import {createHash} from 'node:crypto';
+import path from 'node:path';
+
+import {fs} from '@appium/support';
+
+import log from './logger.js';
+import type {SessionCapabilities, SessionOwnership} from './session-store.js';
+import {resolveAppiumMcpSessionsDir} from './utils/paths.js';
+
+/**
+ * On-disk representation of a remote Appium session.
+ *
+ * Persistence allows MCP processes that get recycled by their host (for
+ * example, stdio hosts that respawn the server between tool calls) to
+ * reattach to the underlying session without losing it.
+ *
+ * Only sessions that have a `remoteServerUrl` are eligible; local/embedded
+ * sessions cannot be rehydrated because their driver instance dies with the
+ * process.
+ */
+export interface PersistedSession {
+  sessionId: string;
+  remoteServerUrl: string;
+  capabilities: SessionCapabilities;
+  platform: string | null;
+  automationName: string | null;
+  deviceName: string | null;
+  ownership: SessionOwnership;
+}
+
+/**
+ * Return the directory where persisted sessions live, or `null` when the
+ * feature is disabled.
+ *
+ * Configured by the `APPIUM_MCP_PERSIST_REMOTE_SESSIONS_PATH` environment
+ * variable: set the variable to a path to opt in. When unset, persistence is
+ * dormant and no files are read or written.
+ */
+export function getPersistenceDir(): string | null {
+  return resolveAppiumMcpSessionsDir();
+}
+
+/**
+ * Convenience boolean for callers that only need to know whether the feature
+ * is enabled; the actual path lookup is done by `getPersistenceDir`.
+ */
+export function isSessionPersistenceEnabled(): boolean {
+  return getPersistenceDir() !== null;
+}
+
+/**
+ * Read every persisted session from the on-disk directory.
+ *
+ * Returns an empty list when the feature is disabled, when the directory
+ * does not exist, or when reads fail. Files that fail to parse are silently
+ * skipped (logged at warn level) so a single corrupt file cannot wedge the
+ * whole feature.
+ */
+export async function readAllPersistedSessions(): Promise<PersistedSession[]> {
+  const dir = getPersistenceDir();
+  if (!dir) {
+    return [];
+  }
+  if (!(await fs.hasAccess(dir))) {
+    return [];
+  }
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch (err) {
+    log.warn(`Failed to read persisted sessions directory: ${(err as Error).message}`);
+    return [];
+  }
+  const jsonFiles = entries.filter((name) => name.endsWith('.json'));
+  const parsed: PersistedSession[] = [];
+  for (const name of jsonFiles) {
+    const filePath = path.join(dir, name);
+    try {
+      const raw = await fs.readFile(filePath, 'utf8');
+      const entry = JSON.parse(raw) as PersistedSession;
+      const canonicalPath = sessionFilePath(entry.sessionId, dir);
+      const canonicalName = path.basename(canonicalPath);
+      if (name !== canonicalName) {
+        try {
+          await fs.writeFile(canonicalPath, raw, {flag: 'wx'});
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+            await removeDuplicateSessionFile(filePath, name, entry.sessionId);
+            log.warn(
+              `Skipping duplicate persisted session file ${name}: canonical file ${canonicalName} already exists`,
+            );
+            continue;
+          }
+          throw err;
+        }
+        await removeDuplicateSessionFile(filePath, name, entry.sessionId);
+      }
+      parsed.push(entry);
+    } catch (err) {
+      log.warn(`Skipping persisted session file ${name}: ${(err as Error).message}`);
+    }
+  }
+  return parsed;
+}
+
+/**
+ * Write a single persisted session atomically.
+ *
+ * Writes to a sibling `.tmp` file first and renames into place so a partial
+ * write cannot leave the on-disk entry corrupt. Concurrent writes to the
+ * same session id still race on the final rename, but each session lives in
+ * its own file so writes to *different* sessions never collide.
+ */
+export async function writePersistedSession(entry: PersistedSession): Promise<void> {
+  const dir = getPersistenceDir();
+  if (!dir) {
+    return;
+  }
+  const target = sessionFilePath(entry.sessionId, dir);
+  const tmp = `${target}.${process.pid}.tmp`;
+  try {
+    await fs.mkdir(dir, {recursive: true});
+    await migrateLegacySessionFile(entry.sessionId, dir);
+    await fs.writeFile(tmp, JSON.stringify(entry, null, 2), 'utf8');
+    await fs.rename(tmp, target);
+  } catch (err) {
+    log.warn(`Failed to persist session ${entry.sessionId}: ${(err as Error).message}`);
+    // Best-effort cleanup of the tmp file. Ignore if it does not exist.
+    try {
+      await fs.unlink(tmp);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+/**
+ * Remove a single persisted session file.
+ *
+ * No-op when the feature is disabled or the file does not exist.
+ */
+export async function removePersistedSession(sessionId: string): Promise<void> {
+  const dir = getPersistenceDir();
+  if (!dir) {
+    return;
+  }
+  await migrateLegacySessionFile(sessionId, dir);
+  try {
+    await fs.unlink(sessionFilePath(sessionId, dir));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    log.warn(`Failed to remove persisted session ${sessionId}: ${(err as Error).message}`);
+  }
+}
+
+function sessionFilePath(sessionId: string, dir: string): string {
+  const safeName = createHash('sha256').update(sessionId).digest('hex');
+  return path.join(dir, `${safeName}.json`);
+}
+
+async function migrateLegacySessionFile(sessionId: string, dir: string): Promise<void> {
+  const legacy = legacySessionFilePath(sessionId, dir);
+  if (!legacy) {
+    return;
+  }
+  const target = sessionFilePath(sessionId, dir);
+  try {
+    if (legacy === target || !(await fs.hasAccess(legacy))) {
+      return;
+    }
+
+    if (await fs.hasAccess(target)) {
+      await fs.unlink(legacy);
+      return;
+    }
+
+    await fs.rename(legacy, target);
+  } catch (err) {
+    log.warn(`Failed to migrate legacy persisted session file for ${sessionId}: ${(err as Error).message}`);
+  }
+}
+
+async function removeDuplicateSessionFile(filePath: string, name: string, sessionId: string): Promise<void> {
+  try {
+    await fs.unlink(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    log.warn(`Failed to remove duplicate persisted session file ${name} for ${sessionId}: ${(err as Error).message}`);
+  }
+}
+
+function legacySessionFilePath(sessionId: string, dir: string): string | null {
+  const legacyName = `${sessionId}.json`;
+  if (path.basename(legacyName) !== legacyName) {
+    return null;
+  }
+  return path.join(dir, legacyName);
+}
