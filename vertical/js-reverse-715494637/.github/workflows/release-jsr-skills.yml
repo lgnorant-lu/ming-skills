@@ -1,0 +1,103 @@
+name: release-jsr-skills
+
+'on':
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-jsr-skills
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA::7}"
+          release_tag="jsr-skills-${GITHUB_RUN_NUMBER}-${short_sha}"
+          asset_name="${release_tag}.zip"
+          release_title="JSR Skills Build #${GITHUB_RUN_NUMBER} (${short_sha})"
+
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "asset_name=${asset_name}" >> "$GITHUB_OUTPUT"
+          echo "release_title=${release_title}" >> "$GITHUB_OUTPUT"
+
+      - name: Build skills archive
+        env:
+          ASSET_NAME: ${{ steps.meta.outputs.asset_name }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist/jsr-skills
+
+          if [ ! -d "jsr-reverse" ]; then
+            echo "Required skill directory jsr-reverse not found."
+            exit 1
+          fi
+
+          cp -R "jsr-reverse" dist/jsr-skills/
+
+          (
+            cd dist
+            zip -r "${ASSET_NAME}" jsr-skills
+          )
+
+      - name: Write release notes
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+          RELEASE_TITLE: ${{ steps.meta.outputs.release_title }}
+          ASSET_NAME: ${{ steps.meta.outputs.asset_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          cat > dist/release-notes.md <<EOF
+          Automatically published JSR skills bundle.
+
+          - Release: ${RELEASE_TITLE}
+          - Tag: ${RELEASE_TAG}
+          - Commit: ${COMMIT_SHA}
+          - Workflow: ${SERVER_URL}/${REPOSITORY}/actions/runs/${RUN_ID}
+          - Run number: ${RUN_NUMBER}
+          - Included skills:
+            - jsr-reverse
+          - Asset: ${ASSET_NAME}
+          EOF
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+          RELEASE_TITLE: ${{ steps.meta.outputs.release_title }}
+          ASSET_NAME: ${{ steps.meta.outputs.asset_name }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --title "${RELEASE_TITLE}" \
+              --notes-file dist/release-notes.md
+
+            gh release upload "${RELEASE_TAG}" "dist/${ASSET_NAME}" --clobber
+          else
+            gh release create "${RELEASE_TAG}" "dist/${ASSET_NAME}" \
+              --title "${RELEASE_TITLE}" \
+              --notes-file dist/release-notes.md
+          fi

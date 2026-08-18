@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Validate plugin manifests
+        run: python .github/scripts/validate_repo.py
+
+      - name: Validate shell scripts
+        run: |
+          while IFS= read -r -d '' script; do
+            echo "Checking $script"
+            bash -n "$script"
+          done < <(find .github/scripts skills/rust-reverse-engineering/scripts -type f -name '*.sh' -print0)
+
+      - name: Smoke test packaging script
+        run: bash .github/scripts/package_dist.sh "$(git rev-parse HEAD)" "$RUNNER_TEMP/dist"

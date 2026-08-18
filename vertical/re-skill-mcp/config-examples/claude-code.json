@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "reverse-skill": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["/absolute/path/to/reverse-engineering-skill/mcp/server.py"]
+    },
+    "js-reverse": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["js-reverse-mcp"]
+    },
+    "camoufox-reverse": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "camoufox_reverse_mcp", "--headless"]
+    }
+  }
+}

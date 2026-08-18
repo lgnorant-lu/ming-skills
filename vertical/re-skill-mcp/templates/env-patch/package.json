@@ -1,0 +1,12 @@
+{
+  "name": "{PROJECT_NAME}",
+  "version": "0.1.0",
+  "private": true,
+  "description": "env-patch workbench for {TARGET_DOMAIN} — extracted by reverse-engineering-skill",
+  "scripts": {
+    "sign":   "node runner.js",
+    "verify": "node verify.js",
+    "diff":   "node env_diff.js"
+  },
+  "dependencies": {}
+}

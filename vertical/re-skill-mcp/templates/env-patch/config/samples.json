@@ -1,0 +1,17 @@
+[
+  {
+    "id": "sample-1",
+    "input": {
+      "path": "/api/v1/search",
+      "method": "GET",
+      "query": { "q": "hello", "page": 1 },
+      "body": null
+    },
+    "expected": {
+      "headers": {
+        "x-sign": "REPLACE-WITH-BROWSER-CAPTURE",
+        "x-ts":   "REPLACE-WITH-BROWSER-CAPTURE"
+      }
+    }
+  }
+]

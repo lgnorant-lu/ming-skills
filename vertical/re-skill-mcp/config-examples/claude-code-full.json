@@ -1,0 +1,36 @@
+{
+  "_doc": "Claude Code FULL 4-MCP stack for reverse-engineering-skill. Use this for strong-antibot sites (RS/Akamai/CF/DataDome). For lighter targets see claude-code.json (3 MCPs) or claude-code-minimal.json (reverse-skill only).",
+
+  "mcpServers": {
+    "reverse-skill": {
+      "_doc": "本 skill 的核心 MCP (20 工具): 方法论 + 22 签名 + Phase 4 补环境工作台 + 4 MCP 协同决策",
+      "type": "stdio",
+      "command": "python",
+      "args": ["/absolute/path/to/reverse-engineering-skill/mcp/server.py"]
+    },
+
+    "chrome-devtools": {
+      "_doc": "Chrome DevTools MCP: 视觉调试 + Network 面板 + Lighthouse + performance trace. 适用于普通 SPA / 弱反爬站. 强反爬站会被检测,改用 camoufox.",
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest"]
+    },
+
+    "js-reverse": {
+      "_doc": "Chrome 断点 + 暂停态求值 + WebSocket 分析 (21 工具). 用于 JSVMP / 混淆代码追踪.",
+      "type": "stdio",
+      "command": "npx",
+      "args": ["js-reverse-mcp"]
+    },
+
+    "camoufox-reverse": {
+      "_doc": "Camoufox 反指纹浏览器 + 完整 JS 逆向工作台 (36 工具). C++ 引擎层指纹伪造,能过 RS/Akamai/CF/DataDome. 装机: pip install camoufox-reverse-mcp && python -m camoufox fetch (~150MB). 添加 --proxy/--geoip/--humanize 对付更硬的目标.",
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "-m", "camoufox_reverse_mcp",
+        "--headless"
+      ]
+    }
+  }
+}
