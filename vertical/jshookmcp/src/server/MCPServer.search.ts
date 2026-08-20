@@ -1,0 +1,330 @@
+/**
+ * Search and activation meta-tool handlers for progressive tool discovery.
+ *
+ * Provides:
+ *  - search_tools: BM25 search across all tools
+ *  - activate_tools: register specific tools by name
+ *  - deactivate_tools: unregister specific activated tools
+ *  - activate_domain: register all tools in a domain
+ *  - call_tool: proxy to invoke any tool by name (bridges clients lacking tools/list_changed)
+ *
+ * This file is a thin facade that re-exports the public API and wires handlers
+ * via registerSearchMetaTools. Implementation lives in sub-modules:
+ *   MCPServer.search.helpers.ts
+ *   MCPServer.search.validation.ts
+ *   MCPServer.search.handlers.search.ts
+ *   MCPServer.search.handlers.activate.ts
+ *   MCPServer.search.handlers.domain.ts
+ *   MCPServer.search.handlers.route.ts
+ *   MCPServer.search.handlers.extensions.ts
+ */
+import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { logger } from '@utils/logger';
+import { asErrorResponse } from '@server/domains/shared/response';
+import type { MCPServerContext } from '@server/MCPServer.context';
+import { getAllDomains } from '@server/registry/index';
+import { buildZodShape } from '@server/MCPServer.schema';
+import type { z } from 'zod';
+import type { ToolResponse } from '@server/types';
+
+// ── re-exports (public API) ──
+
+export { buildSearchSignature, getSearchEngine } from '@server/MCPServer.search.helpers';
+export { buildDomainDescription } from '@server/MCPServer.search.helpers';
+
+// ── handler imports ──
+
+import { buildDomainDescription } from '@server/MCPServer.search.helpers';
+import { handleSearchTools } from '@server/MCPServer.search.handlers.search';
+import {
+  handleActivateTools,
+  handleDeactivateTools,
+} from '@server/MCPServer.search.handlers.activate';
+import { handleActivateDomain } from '@server/MCPServer.search.handlers.domain';
+import { handleRouteTool, handleDescribeTool } from '@server/MCPServer.search.handlers.route';
+import { handleCallTool } from '@server/MCPServer.search.handlers.call';
+import { getRuntimeState } from '@server/runtime/ServerRuntimeState';
+import { ensureAllDomainsLoaded } from '@server/registry/index';
+import { attachToolRequestMeta } from '@server/runtime/tool-request-meta';
+import {
+  runWithToolRequestContext,
+  type ToolRequestExtra,
+} from '@server/runtime/ToolRequestContext';
+
+// ── single-source meta-tool definitions ──
+
+interface MetaToolDef {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  handler: (ctx: MCPServerContext, args: Record<string, unknown>) => Promise<ToolResponse>;
+}
+
+async function handleCoverageReport(
+  ctx: MCPServerContext,
+  _args: Record<string, unknown>,
+): Promise<ToolResponse> {
+  await ensureAllDomainsLoaded();
+  const runtimeState = getRuntimeState(ctx);
+  const summary = runtimeState?.getCoverageSummary(ctx) ?? {
+    called: {},
+    calledCount: 0,
+    uncataloguedCalls: [],
+    uncataloguedCallCount: 0,
+    totalKnownTools: 0,
+    uncalled: [],
+    uncalledCount: 0,
+  };
+  return {
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify(
+          {
+            success: true,
+            ...summary,
+          },
+          null,
+          2,
+        ),
+      },
+    ],
+  };
+}
+
+function buildMetaToolDefinitions(ctx: MCPServerContext): MetaToolDef[] {
+  return [
+    {
+      name: 'search_tools',
+      description: buildDomainDescription(ctx),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description:
+              'Before calling, distill your intent into 2-5 key concepts: what action, on what target, in which ' +
+              'domain. ' +
+              'Pass only those distilled keywords — not the original user request.',
+          },
+          top_k: { type: 'number', description: 'Max results to return (default: 10, max: 30)' },
+          auto_activate: {
+            type: 'boolean',
+            description:
+              'Auto-activate found tools so they are immediately callable. Set false to only search without activating (default: true)',
+            default: true,
+          },
+        },
+        required: ['query'],
+      },
+      handler: handleSearchTools,
+    },
+    {
+      name: 'route_tool',
+      description:
+        'One-stop tool router: accepts a natural language task description, returns recommended tools and next ' +
+        'actions. ' +
+        'Automatically detects workflow patterns, recommends activation order, and provides example arguments. ' +
+        'Use this instead of search_tools when you want guided tool discovery with actionable next steps.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          task: {
+            type: 'string',
+            description: 'Natural language description of the task you want to accomplish',
+          },
+          context: {
+            type: 'object',
+            description: 'Optional context hints for routing',
+            properties: {
+              preferredDomain: {
+                type: 'string',
+                description: 'Domain preference (e.g., "browser", "network")',
+              },
+              autoActivate: {
+                type: 'boolean',
+                description: 'Whether to auto-activate recommended tools (default: false)',
+              },
+              maxRecommendations: {
+                type: 'number',
+                description: 'Maximum number of recommendations (default: 5)',
+              },
+            },
+          },
+        },
+        required: ['task'],
+      },
+      handler: handleRouteTool,
+    },
+    {
+      name: 'describe_tool',
+      description:
+        'Get detailed information about a specific tool, including its input schema. ' +
+        'Use this to see the exact parameters a tool expects before calling it.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Tool name to describe' },
+        },
+        required: ['name'],
+      },
+      handler: handleDescribeTool,
+    },
+    {
+      name: 'activate_tools',
+      description:
+        'Dynamically register specific tools by name, regardless of current base tier. ' +
+        'Use after search_tools to enable exactly the tools you need. ' +
+        'In search-tier sessions this is usually enough; you do not need boost_profile just to use a few exact ' +
+        'tools. ' +
+        'Activated tools appear in the tool list immediately. ' +
+        'If tools do not appear after activation, use call_tool to invoke them directly.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          names: {
+            anyOf: [
+              { type: 'array', items: { type: 'string' } },
+              {
+                type: 'string',
+                description:
+                  'JSON stringified array for MCP clients that serialize arrays as strings',
+              },
+            ],
+            description:
+              'Array of tool names to activate (from search_tools results). Also accepts a JSON stringified array for clients that serialize arrays as strings.',
+          },
+        },
+        required: ['names'],
+      },
+      handler: handleActivateTools,
+    },
+    {
+      name: 'deactivate_tools',
+      description:
+        'Remove previously activated tools to free context. ' +
+        'Only affects tools added via activate_tools, not base profile tools.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          names: {
+            anyOf: [
+              { type: 'array', items: { type: 'string' } },
+              { type: 'string', description: 'JSON stringified array' },
+            ],
+            description: 'Array of tool names to deactivate',
+          },
+        },
+        required: ['names'],
+      },
+      handler: handleDeactivateTools,
+    },
+    {
+      name: 'activate_domain',
+      description:
+        `Activate all tools in a domain at once. ` +
+        `Domains: ${[...getAllDomains()].join(', ')}. ` +
+        `Use reload_extensions first to include external plugin/workflow domains.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          domain: {
+            type: 'string',
+            description: 'Domain name to activate (e.g. "debugger", "network")',
+          },
+          ttlMinutes: {
+            type: 'number',
+            description: 'Auto-deactivate after N minutes (default: 30, set 0 for no expiry)',
+          },
+        },
+        required: ['domain'],
+      },
+      handler: handleActivateDomain,
+    },
+    {
+      name: 'call_tool',
+      description:
+        'Execute an already-active tool by name. ' +
+        'Use this when activate_tools/activate_domain registered a tool but your client did not refresh its tool ' +
+        'list. ' +
+        'Does not auto-activate inactive tools.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'The tool name to execute (from search_tools or describe_tool results)',
+          },
+          args: {
+            type: 'object',
+            description: 'Arguments object to pass to the tool',
+            additionalProperties: true,
+          },
+          parameters: {
+            type: 'string',
+            description:
+              'Alternative: JSON-serialized arguments string. ' +
+              'Some MCP clients serialize the nested arguments as a single stringified-JSON field.',
+          },
+          arguments: {
+            type: 'string',
+            description:
+              'Another alternative: MCP clients that stringify the entire arguments wrapper. ' +
+              'Carries the same nested {name, args/parameters} payload as a JSON string.',
+          },
+        },
+        required: ['name'],
+      },
+      handler: handleCallTool,
+    },
+    {
+      name: 'coverage_report',
+      description:
+        'Report which tools have been called in the current runtime and which known tools remain uncalled. ' +
+        'Loads all domains first so the uncalled list reflects the full tool catalog, not just currently active tools.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+      handler: handleCoverageReport,
+    },
+  ];
+}
+
+// ── registration ──
+
+export function registerSearchMetaTools(ctx: MCPServerContext): void {
+  const defs = buildMetaToolDefinitions(ctx);
+
+  for (const def of defs) {
+    const shape = buildZodShape(def.inputSchema);
+
+    ctx.server.registerTool(
+      def.name,
+      {
+        description: def.description,
+        inputSchema: shape as Record<string, z.ZodAny>,
+      },
+      async (args: Record<string, unknown>, extra?: ToolRequestExtra) => {
+        return runWithToolRequestContext(extra, async () => {
+          try {
+            const augmentedArgs = attachToolRequestMeta(args, extra);
+            const response = await def.handler(ctx, augmentedArgs);
+            getRuntimeState(ctx)?.recordToolCall(def.name, augmentedArgs);
+            return response;
+          } catch (error) {
+            logger.error(`${def.name} failed`, error);
+            return asErrorResponse(error);
+          }
+        });
+      },
+    );
+
+    // Populate metaToolsByName for describe_tool lookups (single source)
+    ctx.metaToolsByName.set(def.name, {
+      name: def.name,
+      description: def.description.split('\n')[0] || def.description,
+      inputSchema: def.inputSchema as Tool['inputSchema'],
+    });
+  }
+}

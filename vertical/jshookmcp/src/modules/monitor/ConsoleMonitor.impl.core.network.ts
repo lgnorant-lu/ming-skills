@@ -1,0 +1,293 @@
+import { logger } from '@utils/logger';
+import { PrerequisiteError } from '@errors/PrerequisiteError';
+import type {
+  NetworkActivity,
+  NetworkMonitorLike,
+  NetworkRequest,
+  NetworkResponse,
+  NetworkResponseBody,
+  NetworkStats,
+  NetworkStatus,
+} from '@modules/monitor/NetworkMonitor.types';
+
+type NetworkRequestFilter = { url?: string; method?: string; limit?: number };
+type NetworkResponseFilter = { url?: string; status?: number; limit?: number };
+type NetworkRecord = Record<string, unknown>;
+
+interface NetworkCoreContext {
+  contextSwitchPending?: boolean;
+  networkMonitor?: NetworkMonitorLike | null;
+  playwrightNetworkMonitor?: NetworkMonitorLike | null;
+  cdpSession: unknown | null;
+  clearDynamicScriptBuffer(): Promise<{ dynamicScriptsCleared: number }>;
+  resetDynamicScriptMonitoring(): Promise<{ scriptMonitorReset: boolean }>;
+}
+
+function asNetworkCoreContext(ctx: unknown): NetworkCoreContext {
+  return ctx as NetworkCoreContext;
+}
+
+function hasStaleContext(ctx: NetworkCoreContext): boolean {
+  return ctx.contextSwitchPending === true;
+}
+
+export function isNetworkEnabledCore(ctx: unknown): boolean {
+  const coreCtx = asNetworkCoreContext(ctx);
+  if (hasStaleContext(coreCtx)) {
+    return false;
+  }
+  return (
+    (coreCtx.networkMonitor?.isEnabled() ?? false) ||
+    (coreCtx.playwrightNetworkMonitor?.isEnabled() ?? false)
+  );
+}
+
+export function getNetworkStatusCore(ctx: unknown): NetworkStatus {
+  const coreCtx = asNetworkCoreContext(ctx);
+  if (hasStaleContext(coreCtx)) {
+    return {
+      enabled: false,
+      requestCount: 0,
+      responseCount: 0,
+      listenerCount: 0,
+      cdpSessionActive: false,
+    };
+  }
+  if (coreCtx.playwrightNetworkMonitor) {
+    return coreCtx.playwrightNetworkMonitor.getStatus();
+  }
+  if (!coreCtx.networkMonitor) {
+    return {
+      enabled: false,
+      requestCount: 0,
+      responseCount: 0,
+      listenerCount: 0,
+      cdpSessionActive: coreCtx.cdpSession !== null,
+    };
+  }
+  return coreCtx.networkMonitor.getStatus();
+}
+
+export function getNetworkRequestsCore(
+  ctx: unknown,
+  filter?: NetworkRequestFilter,
+): NetworkRequest[] {
+  const coreCtx = asNetworkCoreContext(ctx);
+  if (hasStaleContext(coreCtx)) {
+    return [];
+  }
+  if (coreCtx.playwrightNetworkMonitor) {
+    return coreCtx.playwrightNetworkMonitor.getRequests(filter);
+  }
+  return coreCtx.networkMonitor?.getRequests(filter) ?? [];
+}
+
+export function getNetworkResponsesCore(
+  ctx: unknown,
+  filter?: NetworkResponseFilter,
+): NetworkResponse[] {
+  const coreCtx = asNetworkCoreContext(ctx);
+  if (hasStaleContext(coreCtx)) {
+    return [];
+  }
+  if (coreCtx.playwrightNetworkMonitor) {
+    return coreCtx.playwrightNetworkMonitor.getResponses(filter);
+  }
+  return coreCtx.networkMonitor?.getResponses(filter) ?? [];
+}
+
+export function getNetworkActivityCore(ctx: unknown, requestId: string): NetworkActivity {
+  const coreCtx = asNetworkCoreContext(ctx);
+  if (hasStaleContext(coreCtx)) {
+    return {};
+  }
+  if (coreCtx.playwrightNetworkMonitor) {
+    return coreCtx.playwrightNetworkMonitor.getActivity(requestId);
+  }
+  return coreCtx.networkMonitor?.getActivity(requestId) ?? {};
+}
+
+export async function getResponseBodyCore(
+  ctx: unknown,
+  requestId: string,
+): Promise<NetworkResponseBody | null> {
+  const coreCtx = asNetworkCoreContext(ctx);
+  if (hasStaleContext(coreCtx)) {
+    return null;
+  }
+  if (coreCtx.playwrightNetworkMonitor) {
+    return coreCtx.playwrightNetworkMonitor.getResponseBody(requestId);
+  }
+  if (!coreCtx.networkMonitor) {
+    logger.error(
+      'Network monitoring is not enabled. Call enable() with enableNetwork: true first.',
+    );
+    return null;
+  }
+  return coreCtx.networkMonitor.getResponseBody(requestId);
+}
+
+export async function getAllJavaScriptResponsesCore(ctx: unknown): Promise<NetworkRecord[]> {
+  const coreCtx = asNetworkCoreContext(ctx);
+  if (hasStaleContext(coreCtx)) {
+    return [];
+  }
+  if (coreCtx.playwrightNetworkMonitor) {
+    return coreCtx.playwrightNetworkMonitor.getAllJavaScriptResponses();
+  }
+  if (!coreCtx.networkMonitor) {
+    return [];
+  }
+  return coreCtx.networkMonitor.getAllJavaScriptResponses();
+}
+
+export function clearNetworkRecordsCore(ctx: unknown): void {
+  const coreCtx = asNetworkCoreContext(ctx);
+  coreCtx.networkMonitor?.clearRecords();
+  coreCtx.playwrightNetworkMonitor?.clearRecords();
+}
+
+export async function clearInjectedBuffersCore(ctx: unknown): Promise<{
+  xhrCleared: number;
+  fetchCleared: number;
+  dynamicScriptsCleared: number;
+}> {
+  const coreCtx = asNetworkCoreContext(ctx);
+  if (coreCtx.playwrightNetworkMonitor) {
+    const result = await coreCtx.playwrightNetworkMonitor.clearInjectedBuffers();
+    return {
+      ...result,
+      dynamicScriptsCleared: 0,
+    };
+  }
+
+  const networkResult = coreCtx.networkMonitor
+    ? await coreCtx.networkMonitor.clearInjectedBuffers()
+    : { xhrCleared: 0, fetchCleared: 0 };
+  const dynamicResult = await coreCtx.clearDynamicScriptBuffer();
+
+  return {
+    ...networkResult,
+    ...dynamicResult,
+  };
+}
+
+export async function resetInjectedInterceptorsCore(ctx: unknown): Promise<{
+  xhrReset: boolean;
+  fetchReset: boolean;
+  scriptMonitorReset: boolean;
+}> {
+  const coreCtx = asNetworkCoreContext(ctx);
+  if (coreCtx.playwrightNetworkMonitor) {
+    const result = await coreCtx.playwrightNetworkMonitor.resetInjectedInterceptors();
+    return {
+      ...result,
+      scriptMonitorReset: false,
+    };
+  }
+
+  const networkResult = coreCtx.networkMonitor
+    ? await coreCtx.networkMonitor.resetInjectedInterceptors()
+    : { xhrReset: false, fetchReset: false };
+  const scriptResult = await coreCtx.resetDynamicScriptMonitoring();
+
+  return {
+    ...networkResult,
+    ...scriptResult,
+  };
+}
+
+export function getNetworkStatsCore(ctx: unknown): NetworkStats {
+  const coreCtx = asNetworkCoreContext(ctx);
+  if (hasStaleContext(coreCtx)) {
+    return {
+      totalRequests: 0,
+      totalResponses: 0,
+      byMethod: {},
+      byStatus: {},
+      byType: {},
+    };
+  }
+  if (coreCtx.playwrightNetworkMonitor) {
+    return coreCtx.playwrightNetworkMonitor.getStats();
+  }
+  return (
+    coreCtx.networkMonitor?.getStats() ?? {
+      totalRequests: 0,
+      totalResponses: 0,
+      byMethod: {},
+      byStatus: {},
+      byType: {},
+    }
+  );
+}
+
+export async function injectXHRInterceptorCore(
+  ctx: unknown,
+  options?: { persistent?: boolean },
+): Promise<void> {
+  const coreCtx = asNetworkCoreContext(ctx);
+  if (hasStaleContext(coreCtx)) {
+    throw new PrerequisiteError(
+      'Network monitoring is not enabled. Call enable() with enableNetwork: true first.',
+    );
+  }
+  if (coreCtx.playwrightNetworkMonitor) {
+    return coreCtx.playwrightNetworkMonitor.injectXHRInterceptor(options);
+  }
+  if (!coreCtx.networkMonitor) {
+    throw new PrerequisiteError(
+      'Network monitoring is not enabled. Call enable() with enableNetwork: true first.',
+    );
+  }
+  return coreCtx.networkMonitor.injectXHRInterceptor(options);
+}
+
+export async function injectFetchInterceptorCore(
+  ctx: unknown,
+  options?: { persistent?: boolean },
+): Promise<void> {
+  const coreCtx = asNetworkCoreContext(ctx);
+  if (hasStaleContext(coreCtx)) {
+    throw new PrerequisiteError(
+      'Network monitoring is not enabled. Call enable() with enableNetwork: true first.',
+    );
+  }
+  if (coreCtx.playwrightNetworkMonitor) {
+    return coreCtx.playwrightNetworkMonitor.injectFetchInterceptor(options);
+  }
+  if (!coreCtx.networkMonitor) {
+    throw new PrerequisiteError(
+      'Network monitoring is not enabled. Call enable() with enableNetwork: true first.',
+    );
+  }
+  return coreCtx.networkMonitor.injectFetchInterceptor(options);
+}
+
+export async function getXHRRequestsCore(ctx: unknown): Promise<NetworkRecord[]> {
+  const coreCtx = asNetworkCoreContext(ctx);
+  if (hasStaleContext(coreCtx)) {
+    return [];
+  }
+  if (coreCtx.playwrightNetworkMonitor) {
+    return coreCtx.playwrightNetworkMonitor.getXHRRequests();
+  }
+  if (!coreCtx.networkMonitor) {
+    return [];
+  }
+  return coreCtx.networkMonitor.getXHRRequests();
+}
+
+export async function getFetchRequestsCore(ctx: unknown): Promise<NetworkRecord[]> {
+  const coreCtx = asNetworkCoreContext(ctx);
+  if (hasStaleContext(coreCtx)) {
+    return [];
+  }
+  if (coreCtx.playwrightNetworkMonitor) {
+    return coreCtx.playwrightNetworkMonitor.getFetchRequests();
+  }
+  if (!coreCtx.networkMonitor) {
+    return [];
+  }
+  return coreCtx.networkMonitor.getFetchRequests();
+}

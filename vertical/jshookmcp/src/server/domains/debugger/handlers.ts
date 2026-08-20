@@ -1,0 +1,460 @@
+/**
+ * Debugger tool handlers.
+ *
+ * This file serves as the main entry point for debugger tool handlers.
+ * Handlers are organized into atomic modules by functional domain:
+ * - debugger-control: Debugger lifecycle (enable/disable, pause/resume)
+ * - debugger-stepping: Step into/over/out
+ * - debugger-evaluate: Expression evaluation
+ * - debugger-state: Paused state and call stack
+ * - session-management: Save/load/export sessions
+ * - breakpoint-basic: Basic breakpoint operations
+ * - breakpoint-exception: Exception breakpoints
+ * - xhr-breakpoint: XHR/Fetch breakpoints
+ * - event-breakpoint: Event listener breakpoints
+ * - watch-expressions: Watch expression management
+ * - scope-inspection: Scope variable inspection
+ * - blackbox-handlers: Script blackboxing
+ */
+
+import type { DebuggerManager } from '@server/domains/shared/modules';
+import type { RuntimeInspector } from '@server/domains/shared/modules';
+import type { EventBus, ServerEventMap } from '@server/EventBus';
+
+import { DebuggerControlHandlers } from '@server/domains/debugger/handlers/debugger-control';
+import { DebuggerSteppingHandlers } from '@server/domains/debugger/handlers/debugger-stepping';
+import { DebuggerEvaluateHandlers } from '@server/domains/debugger/handlers/debugger-evaluate';
+import { DebuggerStateHandlers } from '@server/domains/debugger/handlers/debugger-state';
+import { SessionManagementHandlers } from '@server/domains/debugger/handlers/session-management';
+import { BreakpointBasicHandlers } from '@server/domains/debugger/handlers/breakpoint-basic';
+import { BreakpointExceptionHandlers } from '@server/domains/debugger/handlers/breakpoint-exception';
+import { XHRBreakpointHandlers } from '@server/domains/debugger/handlers/xhr-breakpoint';
+import { EventBreakpointHandlers } from '@server/domains/debugger/handlers/event-breakpoint';
+import { WatchExpressionsHandlers } from '@server/domains/debugger/handlers/watch-expressions';
+import { ScopeInspectionHandlers } from '@server/domains/debugger/handlers/scope-inspection';
+import { BlackboxHandlers } from '@server/domains/debugger/handlers/blackbox-handlers';
+import { DisassembleHandlers } from '@server/domains/debugger/handlers/disassemble-handlers';
+
+export class DebuggerToolHandlers {
+  private debuggerManager: DebuggerManager;
+  private runtimeInspector: RuntimeInspector;
+
+  private debuggerControl: DebuggerControlHandlers;
+  private debuggerStepping: DebuggerSteppingHandlers;
+  private debuggerEvaluate: DebuggerEvaluateHandlers;
+  private debuggerState: DebuggerStateHandlers;
+  private sessionManagement: SessionManagementHandlers;
+  private breakpointBasic: BreakpointBasicHandlers;
+  private breakpointException: BreakpointExceptionHandlers;
+  private xhrBreakpoint: XHRBreakpointHandlers;
+  private eventBreakpoint: EventBreakpointHandlers;
+  private watchExpressions: WatchExpressionsHandlers;
+  private scopeInspection: ScopeInspectionHandlers;
+  private blackbox: BlackboxHandlers;
+  private disassemble: DisassembleHandlers;
+  private getPage?: () => Promise<unknown>;
+
+  constructor(
+    debuggerManager: DebuggerManager,
+    runtimeInspector: RuntimeInspector,
+    eventBus?: EventBus<ServerEventMap>,
+    getPage?: () => Promise<unknown>,
+  ) {
+    this.debuggerManager = debuggerManager;
+    this.runtimeInspector = runtimeInspector;
+    this.getPage = getPage;
+
+    const commonDeps = {
+      debuggerManager: this.debuggerManager,
+      runtimeInspector: this.runtimeInspector,
+    };
+
+    this.debuggerControl = new DebuggerControlHandlers(commonDeps);
+    this.debuggerStepping = new DebuggerSteppingHandlers({
+      debuggerManager: this.debuggerManager,
+    });
+    this.debuggerEvaluate = new DebuggerEvaluateHandlers({
+      runtimeInspector: this.runtimeInspector,
+    });
+    this.debuggerState = new DebuggerStateHandlers(commonDeps);
+    this.sessionManagement = new SessionManagementHandlers({
+      debuggerManager: this.debuggerManager,
+    });
+    this.breakpointBasic = new BreakpointBasicHandlers({
+      debuggerManager: this.debuggerManager,
+      eventBus,
+    });
+    this.breakpointException = new BreakpointExceptionHandlers({
+      debuggerManager: this.debuggerManager,
+    });
+    this.xhrBreakpoint = new XHRBreakpointHandlers({
+      debuggerManager: this.debuggerManager,
+    });
+    this.eventBreakpoint = new EventBreakpointHandlers({
+      debuggerManager: this.debuggerManager,
+    });
+    this.watchExpressions = new WatchExpressionsHandlers({
+      debuggerManager: this.debuggerManager,
+    });
+    this.scopeInspection = new ScopeInspectionHandlers(commonDeps);
+    this.blackbox = new BlackboxHandlers({
+      debuggerManager: this.debuggerManager,
+    });
+    this.disassemble = new DisassembleHandlers({
+      debuggerManager: this.debuggerManager,
+      getPage: this.getPage,
+    });
+  }
+
+  // ── Debugger Control ──
+  async handleDebuggerLifecycle(args: Record<string, unknown>) {
+    return this.debuggerControl.handleDebuggerLifecycle(args);
+  }
+
+  async handleDebuggerPause(args: Record<string, unknown>) {
+    return this.debuggerControl.handleDebuggerPause(args);
+  }
+
+  async handleDebuggerResume(args: Record<string, unknown>) {
+    return this.debuggerControl.handleDebuggerResume(args);
+  }
+
+  async handleDebuggerRunToLocation(args: Record<string, unknown>) {
+    return this.debuggerControl.handleDebuggerRunToLocation(args);
+  }
+
+  // ── Debugger Stepping ──
+  async handleDebuggerStepInto(args: Record<string, unknown>) {
+    return this.debuggerStepping.handleDebuggerStepInto(args);
+  }
+
+  async handleDebuggerStepOver(args: Record<string, unknown>) {
+    return this.debuggerStepping.handleDebuggerStepOver(args);
+  }
+
+  async handleDebuggerStepOut(args: Record<string, unknown>) {
+    return this.debuggerStepping.handleDebuggerStepOut(args);
+  }
+
+  // ── Debugger Evaluate ──
+  async handleDebuggerEvaluate(args: Record<string, unknown>) {
+    return this.debuggerEvaluate.handleDebuggerEvaluate(args);
+  }
+
+  async handleDebuggerEvaluateGlobal(args: Record<string, unknown>) {
+    return this.debuggerEvaluate.handleDebuggerEvaluateGlobal(args);
+  }
+
+  // ── Debugger State ──
+  async handleDebuggerWaitForPaused(args: Record<string, unknown>) {
+    return this.debuggerState.handleDebuggerWaitForPaused(args);
+  }
+
+  async handleDebuggerCaptureHit(args: Record<string, unknown>) {
+    return this.debuggerState.handleDebuggerCaptureHit(args);
+  }
+
+  async handleDebuggerGetPausedState(args: Record<string, unknown>) {
+    return this.debuggerState.handleDebuggerGetPausedState(args);
+  }
+
+  async handleGetCallStack(args: Record<string, unknown>) {
+    return this.debuggerState.handleGetCallStack(args);
+  }
+
+  // ── Disassembly ──
+  async handleDebuggerDisassemble(args: Record<string, unknown>) {
+    return this.disassemble.handleDebuggerDisassemble(args);
+  }
+
+  // ── Session Management ──
+  async handleSaveSession(args: Record<string, unknown>) {
+    return this.sessionManagement.handleSaveSession(args);
+  }
+
+  async handleLoadSession(args: Record<string, unknown>) {
+    return this.sessionManagement.handleLoadSession(args);
+  }
+
+  async handleExportSession(args: Record<string, unknown>) {
+    return this.sessionManagement.handleExportSession(args);
+  }
+
+  async handleListSessions(args: Record<string, unknown>) {
+    return this.sessionManagement.handleListSessions(args);
+  }
+
+  // ── Basic Breakpoints ──
+  async handleBreakpointSet(args: Record<string, unknown>) {
+    return this.breakpointBasic.handleBreakpointSet(args);
+  }
+
+  async handleBreakpointRemove(args: Record<string, unknown>) {
+    return this.breakpointBasic.handleBreakpointRemove(args);
+  }
+
+  async handleBreakpointList(args: Record<string, unknown>) {
+    return this.breakpointBasic.handleBreakpointList(args);
+  }
+
+  // ── Exception Breakpoints ──
+  async handleBreakpointSetOnException(args: Record<string, unknown>) {
+    return this.breakpointException.handleBreakpointSetOnException(args);
+  }
+
+  // ── XHR Breakpoints ──
+  async handleXHRBreakpointSet(args: Record<string, unknown>) {
+    return this.xhrBreakpoint.handleXHRBreakpointSet(args);
+  }
+
+  async handleXHRBreakpointRemove(args: Record<string, unknown>) {
+    return this.xhrBreakpoint.handleXHRBreakpointRemove(args);
+  }
+
+  async handleXHRBreakpointList(args: Record<string, unknown>) {
+    return this.xhrBreakpoint.handleXHRBreakpointList(args);
+  }
+
+  // ── Event Breakpoints ──
+  async handleEventBreakpointSet(args: Record<string, unknown>) {
+    return this.eventBreakpoint.handleEventBreakpointSet(args);
+  }
+
+  async handleEventBreakpointSetCategory(args: Record<string, unknown>) {
+    return this.eventBreakpoint.handleEventBreakpointSetCategory(args);
+  }
+
+  async handleEventBreakpointRemove(args: Record<string, unknown>) {
+    return this.eventBreakpoint.handleEventBreakpointRemove(args);
+  }
+
+  async handleEventBreakpointList(args: Record<string, unknown>) {
+    return this.eventBreakpoint.handleEventBreakpointList(args);
+  }
+
+  // ── Watch Expressions ──
+  async handleWatchAdd(args: Record<string, unknown>) {
+    return this.watchExpressions.handleWatchAdd(args);
+  }
+
+  async handleWatchRemove(args: Record<string, unknown>) {
+    return this.watchExpressions.handleWatchRemove(args);
+  }
+
+  async handleWatchList(args: Record<string, unknown>) {
+    return this.watchExpressions.handleWatchList(args);
+  }
+
+  async handleWatchEvaluateAll(args: Record<string, unknown>) {
+    return this.watchExpressions.handleWatchEvaluateAll(args);
+  }
+
+  async handleWatchClearAll(args: Record<string, unknown>) {
+    return this.watchExpressions.handleWatchClearAll(args);
+  }
+
+  // ── Scope Inspection ──
+  async handleGetScopeVariablesEnhanced(args: Record<string, unknown>) {
+    return this.scopeInspection.handleGetScopeVariablesEnhanced(args);
+  }
+
+  async handleGetObjectProperties(args: Record<string, unknown>) {
+    return this.scopeInspection.handleGetObjectProperties(args);
+  }
+
+  // ── Blackbox ──
+  async handleBlackboxAdd(args: Record<string, unknown>) {
+    return this.blackbox.handleBlackboxAdd(args);
+  }
+
+  async handleBlackboxAddCommon(args: Record<string, unknown>) {
+    return this.blackbox.handleBlackboxAddCommon(args);
+  }
+
+  async handleBlackboxList(args: Record<string, unknown>) {
+    return this.blackbox.handleBlackboxList(args);
+  }
+
+  // ── Consolidated Dispatchers (Wave-2 merges) ──
+
+  /** breakpoint(action, type, ...) — unified breakpoint management */
+  async handleBreakpoint(args: Record<string, unknown>) {
+    const action = String(args['action'] ?? '');
+    const type = String(args['type'] ?? 'code');
+
+    switch (type) {
+      case 'code': {
+        switch (action) {
+          case 'set':
+            return this.breakpointBasic.handleBreakpointSet(args);
+          case 'remove':
+            return this.breakpointBasic.handleBreakpointRemove(args);
+          case 'list':
+            return this.breakpointBasic.handleBreakpointList(args);
+        }
+        break;
+      }
+      case 'xhr': {
+        switch (action) {
+          case 'set':
+            return this.xhrBreakpoint.handleXHRBreakpointSet(args);
+          case 'remove':
+            return this.xhrBreakpoint.handleXHRBreakpointRemove(args);
+          case 'list':
+            return this.xhrBreakpoint.handleXHRBreakpointList(args);
+        }
+        break;
+      }
+      case 'event': {
+        switch (action) {
+          case 'set':
+            return this.eventBreakpoint.handleEventBreakpointSet(args);
+          case 'remove':
+            return this.eventBreakpoint.handleEventBreakpointRemove(args);
+          case 'list':
+            return this.eventBreakpoint.handleEventBreakpointList(args);
+        }
+        break;
+      }
+      case 'event_category': {
+        if (action === 'set') return this.eventBreakpoint.handleEventBreakpointSetCategory(args);
+        break;
+      }
+      case 'exception': {
+        if (action === 'set') return this.breakpointException.handleBreakpointSetOnException(args);
+        break;
+      }
+      case 'function': {
+        switch (action) {
+          case 'set':
+            return this.breakpointBasic.handleBreakpointSetOnFunction(args);
+          case 'remove':
+            return this.breakpointBasic.handleBreakpointRemove(args);
+          case 'list':
+            return this.breakpointBasic.handleBreakpointList(args);
+        }
+        break;
+      }
+    }
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            success: false,
+            error:
+              `Invalid breakpoint action/type: ${action}/${type}. Valid types: code, xhr, event, ` +
+              `event_category, exception, function. Valid actions: set, remove, list.`,
+          }),
+        },
+      ],
+    };
+  }
+
+  /** watch(action) — unified watch expression management */
+  async handleWatch(args: Record<string, unknown>) {
+    const action = String(args['action'] ?? '');
+    switch (action) {
+      case 'add':
+        return this.watchExpressions.handleWatchAdd(args);
+      case 'remove':
+        return this.watchExpressions.handleWatchRemove(args);
+      case 'list':
+        return this.watchExpressions.handleWatchList(args);
+      case 'evaluate_all':
+        return this.watchExpressions.handleWatchEvaluateAll(args);
+      case 'clear_all':
+        return this.watchExpressions.handleWatchClearAll(args);
+      default:
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                success: false,
+                error: `Unknown watch action: ${action}. Valid: add, remove, list, evaluate_all, clear_all`,
+              }),
+            },
+          ],
+        };
+    }
+  }
+
+  /** debugger_step(direction: 'into'|'over'|'out') */
+  async handleDebuggerStep(args: Record<string, unknown>) {
+    const direction = String(args['direction'] ?? 'over');
+    switch (direction) {
+      case 'into':
+        return this.debuggerStepping.handleDebuggerStepInto(args);
+      case 'over':
+        return this.debuggerStepping.handleDebuggerStepOver(args);
+      case 'out':
+        return this.debuggerStepping.handleDebuggerStepOut(args);
+      default:
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                success: false,
+                error: `Unknown direction: ${direction}. Valid: into, over, out`,
+              }),
+            },
+          ],
+        };
+    }
+  }
+
+  /** debugger_evaluate(context: 'frame'|'global') */
+  async handleDebuggerEvaluateDispatch(args: Record<string, unknown>) {
+    const context = String(args['context'] ?? 'frame');
+    if (context === 'global') {
+      return this.debuggerEvaluate.handleDebuggerEvaluateGlobal(args);
+    }
+    return this.debuggerEvaluate.handleDebuggerEvaluate(args);
+  }
+
+  /** debugger_session(action: 'save'|'load'|'export'|'list') */
+  async handleDebuggerSession(args: Record<string, unknown>) {
+    const action = String(args['action'] ?? '');
+    switch (action) {
+      case 'save':
+        return this.sessionManagement.handleSaveSession(args);
+      case 'load':
+        return this.sessionManagement.handleLoadSession(args);
+      case 'export':
+        return this.sessionManagement.handleExportSession(args);
+      case 'list':
+        return this.sessionManagement.handleListSessions(args);
+      default:
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                success: false,
+                error: `Unknown action: ${action}. Valid actions: save, load, export, list`,
+              }),
+            },
+          ],
+        };
+    }
+  }
+}
+
+// Re-export for direct access
+export {
+  DebuggerControlHandlers,
+  DebuggerSteppingHandlers,
+  DebuggerEvaluateHandlers,
+  DebuggerStateHandlers,
+  SessionManagementHandlers,
+  BreakpointBasicHandlers,
+  BreakpointExceptionHandlers,
+  XHRBreakpointHandlers,
+  EventBreakpointHandlers,
+  WatchExpressionsHandlers,
+  ScopeInspectionHandlers,
+  BlackboxHandlers,
+  DisassembleHandlers,
+};

@@ -1,0 +1,938 @@
+// Browser tool facade: composes handler modules and routes calls.
+
+import type { CodeCollector } from '@server/domains/shared/modules/collector';
+import type { PageController } from '@server/domains/shared/modules/collector';
+
+import type { ScriptManager } from '@server/domains/shared/modules';
+import type { ConsoleMonitor } from '@server/domains/shared/modules/collector';
+import { AICaptchaDetector } from '@server/domains/shared/modules';
+import { argString } from '@server/domains/shared/parse-args';
+import { asErrorResponse } from '@server/domains/shared/response';
+import { ToolError } from '@errors/ToolError';
+import { DetailedDataManager } from '@utils/DetailedDataManager';
+import { getConfig } from '@utils/config';
+import { resolveOutputDirectory } from '@utils/outputPaths';
+import { logger } from '@utils/logger';
+import { type CamoufoxBrowserManager } from '@server/domains/shared/modules';
+import type { EventBus, ServerEventMap } from '@server/EventBus';
+
+import { BrowserControlHandlers } from '@server/domains/browser/handlers/browser-control';
+import { CamoufoxBrowserHandlers } from '@server/domains/browser/handlers/camoufox-browser';
+import { PageNavigationHandlers } from '@server/domains/browser/handlers/page-navigation';
+import { PageInteractionHandlers } from '@server/domains/browser/handlers/page-interaction';
+import { PageEvaluationHandlers } from '@server/domains/browser/handlers/page-evaluation';
+import { PageDataHandlers } from '@server/domains/browser/handlers/page-data';
+
+import { ConsoleHandlers } from '@server/domains/browser/handlers/console-handlers';
+import { ScriptManagementHandlers } from '@server/domains/browser/handlers/script-management';
+import { CaptchaHandlers } from '@server/domains/browser/handlers/captcha-handlers';
+import { StealthInjectionHandlers } from '@server/domains/browser/handlers/stealth-injection';
+import { FrameworkStateHandlers } from '@server/domains/browser/handlers/framework-state';
+import { IndexedDBDumpHandlers } from '@server/domains/browser/handlers/indexeddb-dump';
+import { DetailedDataHandlers } from '@server/domains/browser/handlers/detailed-data';
+import { TargetEvaluationHandlers } from '@server/domains/browser/handlers/target-evaluation';
+import { TargetControlHandlers } from '@server/domains/browser/handlers/target-control';
+import { PageDialogHandlers } from '@server/domains/browser/handlers/page-dialog';
+import { type JSHeapSearchHandlers } from '@server/domains/browser/handlers/js-heap';
+import { type TabWorkflowHandlers } from '@server/domains/browser/handlers/tab-workflow';
+import { type JsdomHandlers } from '@server/domains/browser/handlers/jsdom-tools';
+import { initializeBrowserHandlerModules } from '@server/domains/browser/handlers/facade-initializer';
+import type { TabRegistry } from '@modules/browser/TabRegistry';
+import type { BrowserAttachRuntimeSnapshot } from '@server/runtime/ServerRuntimeState';
+import { BrowserSessionCoordinator } from '@server/runtime/BrowserSessionCoordinator';
+import type { BrowserFleetRouter } from '@server/runtime/BrowserFleetRouter';
+import {
+  handleHumanMouse,
+  handleHumanScroll,
+  handleHumanTyping,
+} from '@server/domains/browser/handlers/human-behavior';
+import {
+  handleCaptchaVisionSolve,
+  handleWidgetChallengeSolve,
+} from '@server/domains/browser/handlers/captcha-solver';
+import { handleCaptchaSolverCapabilities } from '@server/domains/browser/handlers/captcha-capabilities';
+import {
+  type CamoufoxPage,
+  handleCamoufoxLaunchFlow,
+  handleCamoufoxNavigateFlow,
+} from '@server/domains/browser/handlers/camoufox-flow';
+import type { ToolArgs } from '@server/types';
+
+interface BrowserCodegenStep {
+  tool: string;
+  args: ToolArgs;
+  timestamp: string;
+}
+
+interface BrowserCodegenOutputStep {
+  tool: string;
+  args: ToolArgs;
+  timestamp: string;
+}
+
+const CODEGEN_RECORDABLE_TOOLS = new Set([
+  'page_navigate',
+  'page_click',
+  'page_type',
+  'page_hover',
+  'page_scroll',
+  'page_press_key',
+  'page_select',
+  'page_upload_files',
+  'page_wait_for_selector',
+]);
+
+export class BrowserToolHandlers {
+  protected collector: CodeCollector;
+  protected pageController: PageController;
+
+  protected scriptManager: ScriptManager;
+  protected consoleMonitor: ConsoleMonitor;
+  protected captchaDetector: AICaptchaDetector;
+  protected detailedDataManager: DetailedDataManager;
+  protected camoufoxManager: CamoufoxBrowserManager | null = null;
+
+  protected activeDriver: 'chrome' | 'camoufox' = 'chrome';
+  protected camoufoxPage: CamoufoxPage | null = null;
+  private autoDetectCaptcha: boolean = true;
+  private autoSwitchHeadless: boolean = true;
+  private captchaTimeout: number = 300000;
+
+  private browserControl: BrowserControlHandlers;
+  private targetControl: TargetControlHandlers;
+  private camoufoxBrowser: CamoufoxBrowserHandlers;
+  private pageNavigation: PageNavigationHandlers;
+  private pageInteraction: PageInteractionHandlers;
+  private pageEvaluation: PageEvaluationHandlers;
+  private targetEvaluation: TargetEvaluationHandlers;
+  private pageDialog: PageDialogHandlers;
+  private pageData: PageDataHandlers;
+
+  private consoleHandlers: ConsoleHandlers;
+  private scriptManagement: ScriptManagementHandlers;
+  private captchaHandlers: CaptchaHandlers;
+  private stealthInjection: StealthInjectionHandlers;
+  private frameworkState: FrameworkStateHandlers;
+  private indexedDBDump: IndexedDBDumpHandlers;
+  private jsHeapSearch: JSHeapSearchHandlers;
+  private tabWorkflow: TabWorkflowHandlers;
+  private detailedData: DetailedDataHandlers;
+  private jsdomHandlers: JsdomHandlers;
+  private tabRegistry: TabRegistry;
+  private readonly eventBus?: EventBus<ServerEventMap>;
+  private readonly getCurrentSessionId?: () => string | null;
+  private readonly sessionCoordinator?: BrowserSessionCoordinator;
+  private readonly fleetRouter?: BrowserFleetRouter;
+  private readonly onBrowserAttachStateChanged?: (
+    snapshot: Partial<BrowserAttachRuntimeSnapshot>,
+  ) => void;
+  private codegenStopListening?: () => void;
+  private readonly codegenStepsBySession = new Map<string, BrowserCodegenStep[]>();
+
+  constructor(
+    collector: CodeCollector,
+    pageController: PageController,
+
+    scriptManager: ScriptManager,
+    consoleMonitor: ConsoleMonitor,
+    eventBus?: EventBus<ServerEventMap>,
+    getCurrentSessionId?: () => string | null,
+    sessionCoordinator?: BrowserSessionCoordinator,
+    onBrowserAttachStateChanged?: (snapshot: Partial<BrowserAttachRuntimeSnapshot>) => void,
+    fleetRouter?: BrowserFleetRouter,
+  ) {
+    this.collector = collector;
+    this.pageController = pageController;
+
+    this.scriptManager = scriptManager;
+    this.consoleMonitor = consoleMonitor;
+    this.eventBus = eventBus;
+    this.getCurrentSessionId = getCurrentSessionId;
+    this.sessionCoordinator = sessionCoordinator;
+    this.fleetRouter = fleetRouter;
+    this.onBrowserAttachStateChanged = onBrowserAttachStateChanged;
+
+    const screenshotDir = resolveOutputDirectory(
+      getConfig().paths.captchaScreenshotDir,
+      'screenshots/captcha',
+    );
+    this.captchaDetector = new AICaptchaDetector(screenshotDir);
+    this.detailedDataManager = DetailedDataManager.getInstance();
+
+    const modules = initializeBrowserHandlerModules({
+      collector: this.collector,
+      pageController: this.pageController,
+
+      scriptManager: this.scriptManager,
+      consoleMonitor: this.consoleMonitor,
+      eventBus,
+      captchaDetector: this.captchaDetector,
+      detailedDataManager: this.detailedDataManager,
+      getActiveDriver: () => this.activeDriver,
+      getCamoufoxPage: () => this.getCamoufoxPage(),
+      getCamoufoxManager: () => this.camoufoxManager,
+      setCamoufoxManager: (manager) => {
+        this.camoufoxManager = manager;
+      },
+      closeCamoufox: () => this.closeCamoufox(),
+      getAutoDetectCaptcha: () => this.autoDetectCaptcha,
+      getAutoSwitchHeadless: () => this.autoSwitchHeadless,
+      getCaptchaTimeout: () => this.captchaTimeout,
+      setAutoDetectCaptcha: (value) => {
+        this.autoDetectCaptcha = value;
+      },
+      setAutoSwitchHeadless: (value) => {
+        this.autoSwitchHeadless = value;
+      },
+      setCaptchaTimeout: (value) => {
+        this.captchaTimeout = value;
+      },
+      getTabRegistry: () => this.getCurrentTabRegistry(),
+      sessionCoordinator: this.sessionCoordinator,
+      fleetRouter: this.fleetRouter,
+      onBrowserAttachStateChanged: this.onBrowserAttachStateChanged,
+    });
+
+    this.browserControl = modules.browserControl;
+    this.targetControl = modules.targetControl;
+    this.camoufoxBrowser = modules.camoufoxBrowser;
+    this.pageNavigation = modules.pageNavigation;
+    this.pageInteraction = modules.pageInteraction;
+    this.pageEvaluation = modules.pageEvaluation;
+    this.targetEvaluation = modules.targetEvaluation;
+    this.pageDialog = modules.pageDialog;
+    this.pageData = modules.pageData;
+
+    this.consoleHandlers = modules.consoleHandlers;
+    this.scriptManagement = modules.scriptManagement;
+    this.captchaHandlers = modules.captchaHandlers;
+    this.stealthInjection = modules.stealthInjection;
+    this.frameworkState = modules.frameworkState;
+    this.indexedDBDump = modules.indexedDBDump;
+    this.jsHeapSearch = modules.jsHeapSearch;
+    this.tabWorkflow = modules.tabWorkflow;
+    this.detailedData = modules.detailedData;
+    this.jsdomHandlers = modules.jsdomHandlers;
+    this.tabRegistry = modules.tabRegistry;
+  }
+
+  private makeJsonResponse(payload: unknown) {
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }],
+    };
+  }
+
+  private sanitizeCodegenArgs(args: ToolArgs): ToolArgs {
+    const sanitized = { ...args };
+    delete sanitized['_meta'];
+    for (const key of ['delay', 'timeout']) {
+      if (sanitized[key] === undefined) {
+        delete sanitized[key];
+      }
+    }
+    return sanitized;
+  }
+
+  private getCurrentTabRegistry(): TabRegistry {
+    const sessionId = this.getCurrentSessionId?.() ?? null;
+    return this.sessionCoordinator?.getTabRegistry(sessionId) ?? this.tabRegistry;
+  }
+
+  private normalizeSessionId(sessionId: string | null | undefined): string {
+    return typeof sessionId === 'string' && sessionId.trim().length > 0
+      ? sessionId.trim()
+      : 'default';
+  }
+
+  private getCurrentCodegenSessionId(): string {
+    return this.normalizeSessionId(this.getCurrentSessionId?.());
+  }
+
+  private ensureCodegenListener(): void {
+    if (!this.eventBus || this.codegenStopListening) return;
+    this.codegenStopListening = this.eventBus.on('tool:called', (payload) => {
+      if (payload.domain !== 'browser' || !payload.success || payload.result?.success === false)
+        return;
+      if (!CODEGEN_RECORDABLE_TOOLS.has(payload.toolName)) return;
+      const metaSessionId = (payload.args?.['_meta'] as { sessionId?: unknown } | undefined)
+        ?.sessionId;
+      const sessionId = this.normalizeSessionId(
+        payload.sessionId ?? (typeof metaSessionId === 'string' ? metaSessionId : null),
+      );
+      const steps = this.codegenStepsBySession.get(sessionId);
+      if (!steps) return;
+      steps.push({
+        tool: payload.toolName,
+        args: { ...payload.args },
+        timestamp: payload.timestamp,
+      });
+    });
+  }
+
+  dropSessionState(sessionId: string): void {
+    this.codegenStepsBySession.delete(this.normalizeSessionId(sessionId));
+    if (this.codegenStepsBySession.size === 0) {
+      this.codegenStopListening?.();
+      this.codegenStopListening = undefined;
+    }
+  }
+
+  private isSameFrameArgs(left: ToolArgs, right: ToolArgs): boolean {
+    return (
+      (left.frameUrl ?? null) === (right.frameUrl ?? null) &&
+      (left.frameSelector ?? null) === (right.frameSelector ?? null)
+    );
+  }
+
+  private compactCodegenSteps(steps: BrowserCodegenStep[]): BrowserCodegenOutputStep[] {
+    const compacted: BrowserCodegenOutputStep[] = [];
+
+    for (const step of steps) {
+      const current: BrowserCodegenOutputStep = {
+        tool: step.tool,
+        args: this.sanitizeCodegenArgs(step.args),
+        timestamp: step.timestamp,
+      };
+      const previous = compacted.at(-1);
+
+      if (!previous) {
+        compacted.push(current);
+        continue;
+      }
+
+      if (
+        current.tool === 'page_wait_for_selector' &&
+        previous.tool === 'page_wait_for_selector' &&
+        current.args.selector === previous.args.selector &&
+        this.isSameFrameArgs(current.args, previous.args)
+      ) {
+        previous.timestamp = current.timestamp;
+        continue;
+      }
+
+      if (
+        current.tool === 'page_wait_for_selector' &&
+        (previous.tool === 'page_click' || previous.tool === 'page_type') &&
+        current.args.selector === previous.args.selector &&
+        this.isSameFrameArgs(current.args, previous.args)
+      ) {
+        continue;
+      }
+
+      if (
+        current.tool === previous.tool &&
+        JSON.stringify(current.args) === JSON.stringify(previous.args)
+      ) {
+        previous.timestamp = current.timestamp;
+        continue;
+      }
+
+      compacted.push(current);
+    }
+
+    return compacted;
+  }
+
+  private formatCodegenScript(steps: BrowserCodegenOutputStep[]): string {
+    const lines = [
+      'const steps = [',
+      ...steps.map((step) => `  ${JSON.stringify({ tool: step.tool, args: step.args }, null, 0)},`),
+      '];',
+      '',
+      'for (const step of steps) {',
+      '  await callTool(step.tool, step.args);',
+      '}',
+    ];
+    return lines.join('\n');
+  }
+
+  /** Get the shared TabRegistry for context enrichment. */
+  getTabRegistry(): TabRegistry {
+    return this.getCurrentTabRegistry();
+  }
+
+  /** Get or create camoufox page (Playwright Page). */
+  private async getCamoufoxPage(): Promise<CamoufoxPage> {
+    if (!this.camoufoxManager) {
+      throw new Error(
+        'Camoufox browser not launched. Call browser_launch(driver="camoufox") first.',
+      );
+    }
+    if (!this.camoufoxPage) {
+      this.camoufoxPage = (await this.camoufoxManager.newPage()) as CamoufoxPage;
+    }
+    return this.camoufoxPage;
+  }
+
+  private async closeCamoufox(): Promise<void> {
+    try {
+      await this.consoleMonitor.disable();
+    } catch (error) {
+      logger.warn(`Failed to reset console monitor before closing Camoufox: ${String(error)}`);
+    }
+    this.consoleMonitor.clearPlaywrightPage();
+
+    if (this.camoufoxManager) {
+      await this.camoufoxManager.close();
+      this.camoufoxManager = null;
+      this.camoufoxPage = null;
+    }
+  }
+
+  // ── Browser Control ──
+  async handleBrowserLaunch(args: Record<string, unknown>) {
+    const driver = argString(args, 'driver', 'chrome');
+
+    if (driver === 'camoufox') {
+      return this.handleCamoufoxLaunch(args);
+    }
+
+    if (this.activeDriver === 'camoufox' && this.camoufoxManager) {
+      await this.closeCamoufox();
+    }
+    this.activeDriver = 'chrome';
+
+    return this.browserControl.handleBrowserLaunch(args);
+  }
+
+  async handleBrowserClose(args: Record<string, unknown>) {
+    if (this.activeDriver === 'camoufox' && this.camoufoxManager) {
+      await this.closeCamoufox();
+      await this.browserControl.handleBrowserClose(args);
+      this.activeDriver = 'chrome';
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ success: true, message: 'Camoufox browser closed' }, null, 2),
+          },
+        ],
+      };
+    }
+    return this.browserControl.handleBrowserClose(args);
+  }
+
+  async handleBrowserStatus(args: Record<string, unknown>) {
+    if (this.activeDriver === 'camoufox') {
+      const running = !!this.camoufoxManager?.getBrowser();
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                success: true,
+                driver: 'camoufox',
+                running,
+                hasActivePage: !!this.camoufoxPage,
+                scheduler: this.sessionCoordinator?.getQueueStats(),
+                fleet: this.fleetRouter?.getStats(),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    }
+    return this.browserControl.handleBrowserStatus(args);
+  }
+
+  async handleBrowserListTabs(args: Record<string, unknown>) {
+    return this.browserControl.handleBrowserListTabs(args);
+  }
+
+  async handleBrowserListCdpTargets(args: Record<string, unknown>) {
+    return this.targetControl.handleBrowserListCdpTargets(args);
+  }
+
+  async handleBrowserSelectTab(args: Record<string, unknown>) {
+    return this.browserControl.handleBrowserSelectTab(args);
+  }
+
+  async handleBrowserAttachCdpTarget(args: Record<string, unknown>) {
+    return this.targetControl.handleBrowserAttachCdpTarget(args);
+  }
+
+  async handleBrowserDetachCdpTarget(args: Record<string, unknown>) {
+    return this.targetControl.handleBrowserDetachCdpTarget(args);
+  }
+
+  async handleBrowserEvaluateCdpTarget(args: Record<string, unknown>) {
+    return this.targetEvaluation.handleBrowserEvaluateCdpTarget(args);
+  }
+
+  // ── Worker inspection (Service / Shared / dedicated Web Workers) ──
+  async handleBrowserListWorkers(args: Record<string, unknown>) {
+    return this.targetControl.handleBrowserListWorkers(args);
+  }
+
+  async handleBrowserWorkerScripts(args: Record<string, unknown>) {
+    return this.targetControl.handleBrowserWorkerScripts(args);
+  }
+
+  async handleServiceWorkerDeliverPush(args: Record<string, unknown>) {
+    return this.targetControl.handleServiceWorkerDeliverPush(args);
+  }
+
+  async handleServiceWorkerDispatchSync(args: Record<string, unknown>) {
+    return this.targetControl.handleServiceWorkerDispatchSync(args);
+  }
+
+  async handleBrowserAttach(args: Record<string, unknown>) {
+    if (this.activeDriver === 'camoufox' && this.camoufoxManager) {
+      await this.closeCamoufox();
+    }
+    this.activeDriver = 'chrome';
+    return this.browserControl.handleBrowserAttach(args);
+  }
+
+  // ── Camoufox Server ──
+  async handleCamoufoxServerDispatch(args: Record<string, unknown>) {
+    const action = String(args['action'] ?? '');
+    switch (action) {
+      case 'close':
+        return this.camoufoxBrowser.handleCamoufoxServerClose(args);
+      case 'status':
+        return this.camoufoxBrowser.handleCamoufoxServerStatus(args);
+      default:
+        return this.camoufoxBrowser.handleCamoufoxServerLaunch(args);
+    }
+  }
+  async handleCamoufoxServerLaunch(args: Record<string, unknown>) {
+    return this.camoufoxBrowser.handleCamoufoxServerLaunch(args);
+  }
+
+  async handleCamoufoxServerClose(args: Record<string, unknown>) {
+    return this.camoufoxBrowser.handleCamoufoxServerClose(args);
+  }
+
+  async handleCamoufoxServerStatus(args: Record<string, unknown>) {
+    return this.camoufoxBrowser.handleCamoufoxServerStatus(args);
+  }
+
+  // ── Page Navigation ──
+  async handlePageNavigate(args: Record<string, unknown>) {
+    if (this.activeDriver === 'camoufox') {
+      return this.handleCamoufoxNavigate(args);
+    }
+    return this.pageNavigation.handlePageNavigate(args);
+  }
+
+  async handlePageReload(args: Record<string, unknown>) {
+    return this.pageNavigation.handlePageReload(args);
+  }
+
+  async handlePageBack(args: Record<string, unknown>) {
+    return this.pageNavigation.handlePageBack(args);
+  }
+
+  async handlePageForward(args: Record<string, unknown>) {
+    return this.pageNavigation.handlePageForward(args);
+  }
+
+  async handlePageListFrames(args: Record<string, unknown>) {
+    return this.pageData.handlePageListFrames(args);
+  }
+
+  // ── Page Interaction ──
+  async handlePageClick(args: Record<string, unknown>) {
+    return this.pageInteraction.handlePageClick(args);
+  }
+
+  async handlePageType(args: Record<string, unknown>) {
+    return this.pageInteraction.handlePageType(args);
+  }
+
+  async handlePageUploadFiles(args: Record<string, unknown>) {
+    return this.pageInteraction.handlePageUploadFiles(args);
+  }
+  async handlePageSelect(args: Record<string, unknown>) {
+    return this.pageInteraction.handlePageSelect(args);
+  }
+
+  async handlePageHover(args: Record<string, unknown>) {
+    return this.pageInteraction.handlePageHover(args);
+  }
+
+  async handlePageScroll(args: Record<string, unknown>) {
+    return this.pageInteraction.handlePageScroll(args);
+  }
+
+  async handlePagePressKey(args: Record<string, unknown>) {
+    return this.pageInteraction.handlePagePressKey(args);
+  }
+
+  async handlePageHandleDialog(args: Record<string, unknown>) {
+    return this.pageDialog.handlePageHandleDialog(args);
+  }
+
+  // ── Page Evaluation ──
+  async handlePageEvaluate(args: Record<string, unknown>) {
+    return this.pageEvaluation.handlePageEvaluate(args);
+  }
+
+  async handlePageScreenshot(args: Record<string, unknown>) {
+    return this.pageEvaluation.handlePageScreenshot(args);
+  }
+
+  async handlePageInjectScript(args: Record<string, unknown>) {
+    return this.pageEvaluation.handlePageInjectScript(args);
+  }
+
+  async handlePageWaitForSelector(args: Record<string, unknown>) {
+    return this.pageEvaluation.handlePageWaitForSelector(args);
+  }
+
+  // ── Page Data ──
+
+  async handlePageCookiesDispatch(args: Record<string, unknown>) {
+    const action = String(args['action'] ?? '');
+    switch (action) {
+      case 'get':
+        return this.pageData.handlePageGetCookies(args);
+      case 'set':
+        return this.pageData.handlePageSetCookies(args);
+      case 'clear': {
+        const expectedCount = args['expectedCount'];
+        if (typeof expectedCount !== 'number' || expectedCount < 0) {
+          return asErrorResponse(
+            new ToolError(
+              'VALIDATION',
+              'action=clear requires expectedCount (number). Call action=get first to obtain the current cookie count.',
+              { toolName: 'page_cookies' },
+            ),
+          );
+        }
+        const current = await this.pageData.getPageCookieCount();
+        if (current !== expectedCount) {
+          return asErrorResponse(
+            new ToolError(
+              'VALIDATION',
+              `Cookie count mismatch: expected ${expectedCount} but found ${current}. Call action=get to refresh, then retry with the correct count.`,
+              { toolName: 'page_cookies', details: { expected: expectedCount, actual: current } },
+            ),
+          );
+        }
+        return this.pageData.handlePageClearCookies(args);
+      }
+      default:
+        return asErrorResponse(
+          new ToolError(
+            'VALIDATION',
+            `Invalid action: "${action}". Expected one of: get, set, clear`,
+            { toolName: 'page_cookies' },
+          ),
+        );
+    }
+  }
+
+  async handlePageSetViewport(args: Record<string, unknown>) {
+    return this.pageData.handlePageSetViewport(args);
+  }
+
+  async handlePageEmulateDevice(args: Record<string, unknown>) {
+    return this.pageData.handlePageEmulateDevice(args);
+  }
+
+  async handlePageLocalStorageDispatch(args: Record<string, unknown>) {
+    const action = String(args['action'] ?? '');
+    switch (action) {
+      case 'get':
+        return this.pageData.handlePageGetLocalStorage(args);
+      case 'set':
+        return this.pageData.handlePageSetLocalStorage(args);
+      case 'delete':
+        return this.pageData.handlePageDeleteLocalStorage(args);
+      case 'clear':
+        return this.pageData.handlePageClearLocalStorage();
+      default:
+        return asErrorResponse(
+          new ToolError(
+            'VALIDATION',
+            `Invalid action: "${action}". Expected one of: get, set, delete, clear`,
+            {
+              toolName: 'page_local_storage',
+            },
+          ),
+        );
+    }
+  }
+
+  async handlePageSessionStorageDispatch(args: Record<string, unknown>) {
+    const action = String(args['action'] ?? '');
+    switch (action) {
+      case 'get':
+        return this.pageData.handlePageGetSessionStorage(args);
+      case 'set':
+        return this.pageData.handlePageSetSessionStorage(args);
+      case 'delete':
+        return this.pageData.handlePageDeleteSessionStorage(args);
+      case 'clear':
+        return this.pageData.handlePageClearSessionStorage();
+      default:
+        return asErrorResponse(
+          new ToolError(
+            'VALIDATION',
+            `Invalid action: "${action}". Expected one of: get, set, delete, clear`,
+            {
+              toolName: 'page_session_storage',
+            },
+          ),
+        );
+    }
+  }
+
+  async handlePageStorageInfo(args: Record<string, unknown>) {
+    return this.pageData.handlePageStorageInfo(args);
+  }
+
+  async handleBrowserPasskeySeed(args: Record<string, unknown>) {
+    return this.pageData.handleBrowserPasskeySeed(args);
+  }
+
+  // ── Console ──
+  async handleConsoleMonitor(args: Record<string, unknown>) {
+    return this.consoleHandlers.handleConsoleMonitor(args);
+  }
+
+  async handleConsoleGetLogs(args: Record<string, unknown>) {
+    return this.consoleHandlers.handleConsoleGetLogs(args);
+  }
+
+  async handleConsoleExecute(args: Record<string, unknown>) {
+    return this.consoleHandlers.handleConsoleExecute(args);
+  }
+
+  // ── Script Management ──
+  async handleGetAllScripts(args: Record<string, unknown>) {
+    return this.scriptManagement.handleGetAllScripts(args);
+  }
+
+  async handleGetScriptSource(args: Record<string, unknown>) {
+    return this.scriptManagement.handleGetScriptSource(args);
+  }
+
+  // ── CAPTCHA ──
+  async handleCaptchaDetect(args: Record<string, unknown>) {
+    return this.captchaHandlers.handleCaptchaDetect(args);
+  }
+
+  async handleCaptchaWait(args: Record<string, unknown>) {
+    return this.captchaHandlers.handleCaptchaWait(args);
+  }
+
+  async handleCaptchaConfig(args: Record<string, unknown>) {
+    return this.captchaHandlers.handleCaptchaConfig(args);
+  }
+
+  // ── Stealth ──
+  async handleStealthInject(args: Record<string, unknown>) {
+    return this.stealthInjection.handleStealthInject(args);
+  }
+
+  async handleStealthSetUserAgent(args: Record<string, unknown>) {
+    return this.stealthInjection.handleStealthSetUserAgent(args);
+  }
+
+  async handleStealthConfigureJitter(args: Record<string, unknown>) {
+    return this.stealthInjection.handleStealthConfigureJitter(args);
+  }
+
+  async handleStealthGenerateFingerprint(args: Record<string, unknown>) {
+    return this.stealthInjection.handleStealthGenerateFingerprint(args);
+  }
+
+  async handleStealthVerify(args: Record<string, unknown>) {
+    return this.stealthInjection.handleStealthVerify(args);
+  }
+
+  async handleBrowserFontFingerprint(args: Record<string, unknown>) {
+    return this.stealthInjection.handleBrowserFontFingerprint(args);
+  }
+
+  async handleCamoufoxGeolocation(args: Record<string, unknown>) {
+    return this.stealthInjection.handleCamoufoxGeolocation(args);
+  }
+
+  // ── Framework State ──
+  async handleFrameworkStateExtract(args: Record<string, unknown>) {
+    return this.frameworkState.handleFrameworkStateExtract(args);
+  }
+
+  // ── IndexedDB ──
+  async handleIndexedDBDump(args: Record<string, unknown>) {
+    return this.indexedDBDump.handleIndexedDBDump(args);
+  }
+
+  // ── JS Heap Search ──
+  async handleJSHeapSearch(args: Record<string, unknown>) {
+    return this.jsHeapSearch.handleJSHeapSearch(args);
+  }
+
+  // ── Tab Workflow ──
+  async handleTabWorkflow(args: Record<string, unknown>) {
+    return this.tabWorkflow.handleTabWorkflow(args);
+  }
+
+  async handleBrowserCodegenStart() {
+    if (!this.eventBus) {
+      return this.makeJsonResponse({
+        success: false,
+        message: 'Event bus unavailable for browser codegen recording.',
+      });
+    }
+
+    const sessionId = this.getCurrentCodegenSessionId();
+    this.codegenStepsBySession.set(sessionId, []);
+    this.ensureCodegenListener();
+
+    return this.makeJsonResponse({
+      success: true,
+      recording: true,
+      sessionId,
+      message: 'Browser action recording started.',
+    });
+  }
+
+  async handleBrowserCodegenStop() {
+    const sessionId = this.getCurrentCodegenSessionId();
+    const rawSteps = [...(this.codegenStepsBySession.get(sessionId) ?? [])];
+    const steps = this.compactCodegenSteps(rawSteps);
+    this.codegenStepsBySession.delete(sessionId);
+    if (this.codegenStepsBySession.size === 0) {
+      this.codegenStopListening?.();
+      this.codegenStopListening = undefined;
+    }
+
+    return this.makeJsonResponse({
+      success: true,
+      recording: false,
+      sessionId,
+      stepCount: steps.length,
+      rawStepCount: rawSteps.length,
+      steps,
+      script: this.formatCodegenScript(steps),
+    });
+  }
+
+  // ── Detailed Data ──
+  async handleGetDetailedData(args: Record<string, unknown>) {
+    return this.detailedData.handleGetDetailedData(args);
+  }
+
+  async handleGetOffloadedData(args: Record<string, unknown>) {
+    return this.detailedData.handleGetOffloadedData(args);
+  }
+
+  // ── Coverage & Script Blocking (P2) ──
+  async handlePageCoverageStart(args: Record<string, unknown>) {
+    const { handlePageCoverageStart } = await import('./handlers/coverage-and-block');
+    return handlePageCoverageStart({ collector: this.collector }, args);
+  }
+
+  async handlePageCoverageStop(args: Record<string, unknown>) {
+    const { handlePageCoverageStop } = await import('./handlers/coverage-and-block');
+    return handlePageCoverageStop({ collector: this.collector }, args);
+  }
+
+  async handlePageBlockScript(args: Record<string, unknown>) {
+    const { handlePageBlockScript } = await import('./handlers/coverage-and-block');
+    return handlePageBlockScript(args);
+  }
+
+  // ── Camoufox Helpers ──
+  private async handleCamoufoxLaunch(args: Record<string, unknown>) {
+    return handleCamoufoxLaunchFlow(
+      {
+        setCamoufoxManager: (manager) => {
+          this.camoufoxManager = manager;
+        },
+        setActiveDriver: (driver) => {
+          this.activeDriver = driver;
+        },
+        clearCamoufoxPage: () => {
+          this.camoufoxPage = null;
+        },
+      },
+      args,
+    );
+  }
+
+  private async handleCamoufoxNavigate(args: Record<string, unknown>) {
+    return handleCamoufoxNavigateFlow(
+      {
+        getCamoufoxPage: () => this.getCamoufoxPage(),
+        setConsoleMonitorPage: (page) => {
+          this.consoleMonitor.setPlaywrightPage(page);
+        },
+      },
+      args,
+    );
+  }
+
+  // ── Human Behavior ──
+  async handleHumanMouse(args: Record<string, unknown>) {
+    return handleHumanMouse(args, this.collector, this.pageController);
+  }
+
+  async handleHumanScroll(args: Record<string, unknown>) {
+    return handleHumanScroll(args, this.collector);
+  }
+
+  async handleHumanTyping(args: Record<string, unknown>) {
+    return handleHumanTyping(args, this.collector, this.pageController);
+  }
+
+  // ── CAPTCHA Solving ──
+  async handleCaptchaVisionSolve(args: Record<string, unknown>) {
+    return handleCaptchaVisionSolve(args, this.collector);
+  }
+
+  async handleWidgetChallengeSolve(args: Record<string, unknown>) {
+    return handleWidgetChallengeSolve(args, this.collector);
+  }
+
+  async handleCaptchaSolverCapabilities() {
+    return handleCaptchaSolverCapabilities(this.collector);
+  }
+
+  // ── JSDOM (headless DOM, no browser) ──
+  async handleJsdomParse(args: Record<string, unknown>) {
+    return this.jsdomHandlers.handleJsdomParse(args);
+  }
+
+  async handleJsdomQuery(args: Record<string, unknown>) {
+    return this.jsdomHandlers.handleJsdomQuery(args);
+  }
+
+  async handleJsdomExecute(args: Record<string, unknown>) {
+    return this.jsdomHandlers.handleJsdomExecute(args);
+  }
+
+  async handleJsdomSerialize(args: Record<string, unknown>) {
+    return this.jsdomHandlers.handleJsdomSerialize(args);
+  }
+
+  async handleJsdomCookies(args: Record<string, unknown>) {
+    return this.jsdomHandlers.handleJsdomCookies(args);
+  }
+}
+
+// Re-export for direct access
+export {
+  BrowserControlHandlers,
+  CamoufoxBrowserHandlers,
+  PageNavigationHandlers,
+  PageInteractionHandlers,
+  PageEvaluationHandlers,
+  PageDialogHandlers,
+  PageDataHandlers,
+  ConsoleHandlers,
+  ScriptManagementHandlers,
+  CaptchaHandlers,
+  StealthInjectionHandlers,
+  FrameworkStateHandlers,
+  IndexedDBDumpHandlers,
+  DetailedDataHandlers,
+};

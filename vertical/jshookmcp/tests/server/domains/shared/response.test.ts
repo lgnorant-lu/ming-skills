@@ -1,0 +1,66 @@
+import { describe, expect, it } from 'vitest';
+import {
+  asErrorResponse,
+  asJsonResponse,
+  asToolResponse,
+  asTextResponse,
+  isToolResponse,
+  serializeError,
+} from '@server/domains/shared/response';
+
+describe('shared response helpers', () => {
+  it('asTextResponse returns MCP text payload', async () => {
+    const res = asTextResponse('ok');
+    expect(res).toEqual({
+      content: [{ type: 'text', text: 'ok' }],
+    });
+  });
+
+  it('asTextResponse marks error responses when requested', async () => {
+    const res = asTextResponse('bad', true);
+    expect((res as any).isError).toBe(true);
+    expect((res.content[0] as any)?.text).toBe('bad');
+  });
+
+  it('asJsonResponse formats JSON content', async () => {
+    const res = asJsonResponse({ a: 1, b: 'x' });
+    expect((res.content[0] as any)?.text).toBe('{\n  "a": 1,\n  "b": "x"\n}');
+  });
+
+  it('isToolResponse detects MCP envelopes', async () => {
+    expect(isToolResponse({ content: [{ type: 'text', text: 'ok' }] })).toBe(true);
+    expect(isToolResponse({ text: 'nope' })).toBe(false);
+  });
+
+  it('asToolResponse preserves existing MCP envelopes', async () => {
+    const existing = { content: [{ type: 'text' as const, text: 'ok' }] };
+    expect(asToolResponse(existing)).toBe(existing);
+  });
+
+  it('asToolResponse wraps plain payloads once', async () => {
+    const res = asToolResponse({ success: true });
+    expect((res.content[0] as any)?.text).toBe('{\n  "success": true\n}');
+  });
+
+  it('asErrorResponse uses message from Error instances', async () => {
+    const res = asErrorResponse(new Error('boom'));
+    expect((res as any).isError).toBe(true);
+    expect((res.content[0] as any)?.text).toBe('Error: boom');
+  });
+
+  it('asErrorResponse stringifies non-Error values', async () => {
+    const res = asErrorResponse({ code: 500 });
+    expect((res.content[0] as any)?.text).toContain('Error: [object Object]');
+  });
+
+  it('serializeError returns normalized error object', async () => {
+    expect(serializeError(new Error('fail'))).toEqual({
+      success: false,
+      error: 'fail',
+    });
+    expect(serializeError(404)).toEqual({
+      success: false,
+      error: '404',
+    });
+  });
+});

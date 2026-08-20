@@ -1,0 +1,47 @@
+# Lefthook — local CI gates
+# pre-commit: auto-format with oxfmt + fast oxlint on staged files
+# pre-push:   parallel checks — all run regardless of individual failures,
+#             so you see every issue in one shot instead of one-at-a-time.
+#
+# NOTE: test/coverage moved to pre-push to avoid 4-minute waits per commit.
+# Run `corepack pnpm test` manually before pushing if you want early feedback.
+
+pre-commit:
+  commands:
+    block-planning:
+      glob: ".planning/**"
+      run: "echo '❌ .planning/ files must not be committed' && exit 1"
+    block-ccg:
+      glob: ".ccg/**"
+      run: "echo '❌ .ccg/ files must not be committed (covered by .gitignore L120)' && exit 1"
+    docs-generate:
+      run: corepack pnpm docs:generate
+      stage_fixed: true
+    sync-lockfile:
+      glob: "package.json"
+      run: corepack pnpm install --no-frozen-lockfile && git add pnpm-lock.yaml
+    oxfmt:
+      glob: "*.{ts,tsx,js,mjs,json}"
+      run: npx oxfmt {staged_files} --write
+      stage_fixed: true
+    oxlint:
+      glob: "*.{ts,tsx,js,mjs}"
+      run: npx oxlint {staged_files}
+
+pre-push:
+  commands:
+    refresh-git-noise:
+      run: corepack pnpm run git:refresh-noise
+    oxlint:
+      run: corepack pnpm run lint
+    oxfmt-check:
+      run: corepack pnpm run format:check
+    markdownlint:
+      run: corepack pnpm run lint:md
+    typecheck:
+      run: corepack pnpm run typecheck
+    coverage-gate:
+      run: corepack pnpm run test:coverage
+    audit-tools:
+      run: corepack pnpm run audit:tools
+

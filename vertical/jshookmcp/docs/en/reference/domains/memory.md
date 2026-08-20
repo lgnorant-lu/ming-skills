@@ -1,0 +1,60 @@
+# Memory
+
+Domain: `memory`
+
+Memory analysis domain for native scans, pointer-chain discovery, structure inference, and breakpoint-based observation.
+
+## Profiles
+
+- full
+
+## Typical scenarios
+
+- Run first/next scans to narrow target values
+- Analyze pointer chains and in-memory structures
+- Manage scan sessions and memory breakpoints
+
+## Common combinations
+
+- memory + process
+- memory + debugger
+- memory + workflow
+
+## Full tool list (34)
+
+| Tool | Description |
+| --- | --- |
+| `memory_first_scan` | Start a new memory scan session. |
+| `memory_next_scan` | Narrow an existing scan session. |
+| `memory_unknown_scan` | Start an unknown initial value scan. |
+| `memory_pointer_scan` | Find pointers to a target address. |
+| `memory_group_scan` | Search for multiple values at known offsets simultaneously. |
+| `memory_scan_session` | Manage scan sessions. Actions: list (all sessions), delete (by sessionId), export (as JSON). |
+| `memory_pointer_chain` | Pointer chain operations: scan (find chains to target), validate, resolve, or export as JSON. |
+| `memory_structure_analyze` | Analyze memory at an address to infer data structure layout. |
+| `memory_vtable_parse` | Parse a vtable to enumerate virtual function pointers and resolve them to module+offset. Also attempts RTTI parsing for class name and inheritance hierarchy. |
+| `memory_structure_export_c` | Export an inferred structure as a C-style struct definition with offset comments and type annotations. |
+| `memory_structure_compare` | Compare two structure instances to identify which fields differ (dynamic values like health/position) vs which are constant (vtable, type flags). Useful for finding important fields. |
+| `memory_breakpoint` | Hardware breakpoint via x64 debug registers (DR0-DR3). Actions: set, remove, list, trace. |
+| `memory_patch_bytes` | Write bytes to target process at address. Saves original bytes for undo. Use for runtime code patching. |
+| `memory_patch_nop` | NOP out instructions at address (replace with 0x90). Useful for disabling checks or jumps. |
+| `memory_patch_undo` | Undo a previous patch by restoring the original bytes. |
+| `memory_code_caves` | Find code caves (runs of 0x00 or 0xCC) in executable sections of loaded modules. Returns largest caves first. |
+| `memory_write_value` | Write a typed value to a memory address. Supports undo/redo via memory_write_history(action=undo\|redo). |
+| `memory_freeze` | Freeze or unfreeze a memory address. Freeze continuously writes a value to prevent changes; unfreeze stops it. |
+| `memory_dump` | Dump memory region as hex with ASCII column. Outputs a formatted hex dump similar to xxd. |
+| `memory_speedhack` | Hook time APIs (GetTickCount64/GetTickCount/QueryPerformanceCounter) to scale process time via an in-process SSE2 trampoline. Actions: apply (hook + set speed), set (adjust speed without re-hooking), restore (unhook and restore original functions). Speed range 0.01–100x; values outside this range are rejected to avoid destabilising the target. |
+| `memory_write_history` | Undo or redo the last memory write operation. Pass pid to scope the operation to a specific process — per-PID undo prevents reverting an unrelated process's write when multiple processes are being edited concurrently. |
+| `memory_heap_enumerate` | Enumerate all heaps and heap blocks in a process via Toolhelp32 snapshot. Returns heap list with block counts, sizes, and overall statistics. |
+| `memory_heap_stats` | Get detailed heap statistics with size distribution buckets (0-64B, 64B-1KB, 1-64KB, 64KB-1MB, &gt;1MB), fragmentation ratio, and aggregate metrics. |
+| `memory_heap_anomalies` | Detect heap anomalies: heap spray patterns (many same-size blocks), possible use-after-free (non-zero free blocks), and suspicious block sizes (0 or &gt;100MB). |
+| `memory_pe_headers` | Parse PE headers (DOS, NT, File, Optional) from a module base address in process memory. Returns machine type, entry point, image base, section count, and data directory info. |
+| `memory_pe_imports_exports` | Parse import and/or export tables from a PE module in process memory. Returns DLL names, function names, ordinals, hints, and forwarded exports. Cross-platform: parses ELF .dynsym / Mach-O LC_SYMTAB from disk when moduleName is given on Linux/macOS. |
+| `memory_inline_hook_detect` | Detect hooks in process modules. scanMode "inline" (default) compares the first 16 bytes of each exported function disk-vs-memory and recognises 8 hook patterns (JMP/CALL/short-jmp/MOV+JMP/MOV+CALL/PUSH+RET/INT3/padding). scanMode "iat" detects Import Address Table hooks (entries redirected outside their source module — evades inline detection, used by EasyHook/MinHook/Detours). scanMode "both" runs both scans. |
+| `memory_anticheat_detect` | Scan process imports for anti-debug/anti-cheat mechanisms: IsDebuggerPresent, NtQueryInformationProcess, timing checks (QPC, GetTickCount), thread hiding, heap flag checks, and DR register inspection. Each detection includes a bypass suggestion. |
+| `memory_guard_pages` | Find all memory regions with PAGE_GUARD protection in a process. Guard pages are often used as anti-tampering mechanisms or stack overflow detection. |
+| `memory_integrity_check` | Check executable memory regions against their corresponding on-disk PE files (.text sections) to detect modifications like inline hooks or code patches. |
+| `memory_region_enumerate` | Enumerate memory regions in a target process. Cross-platform: Windows (VirtualQueryEx), macOS (mach_vm_region), Linux (/proc/pid/maps). Returns base address, size, protection (r/w/x/rw/rx/rwx), state, type (image/mapped/private), and module name (if module-backed). |
+| `memory_aob_scan` | Array-of-Bytes scan with wildcard support. Search for byte patterns like "48 8B ?? ?? 00 00" across readable memory. Accepts hex bytes (00-FF, optional 0x prefix) and "??" wildcards. Case insensitive. |
+| `memory_find_accesses` | Find what writes to or accesses a memory address (Cheat Engine MWT workflow). Sets a hardware breakpoint on the target address, auto-rearms after each hit, captures the faulting instruction address + context + timestamp, and optionally disassembles the instruction. Returns aggregated hits with per-hit instruction details. |
+| `memory_parse_dump` | Parse a Windows Minidump (.dmp) file and extract forensic information: loaded modules (base/size/name/timestamp), threads (ID/stack/context), memory ranges (64-bit or 32-bit), system info (OS/CPU), and exception records. Optionally resolve a list of addresses against the dump contents. Pure TS — cross-platform (can analyze Windows dumps on Linux/macOS). |

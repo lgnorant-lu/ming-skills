@@ -1,0 +1,338 @@
+import { describe, it, expect, vi } from 'vitest';
+import {
+  parseWorkflowStringArray,
+  parseWorkflowNetworkPolicy,
+  authorizeWorkflowUrl,
+} from '@server/domains/workflow/handlers/network-policy';
+import type { WorkflowNetworkPolicy } from '@server/domains/workflow/handlers/network-policy';
+import {
+  TEST_FTP_URLS,
+  TEST_HOSTS,
+  TEST_HTTP_URLS,
+  TEST_URLS,
+  buildTestUrl,
+  withPath,
+} from '@tests/shared/test-urls';
+
+vi.mock('@utils/network/ssrf-policy', () => ({
+  isLoopbackHost: (host: string) => host === 'localhost' || host === '127.0.0.1',
+  isPrivateHost: (host: string) =>
+    host === '10.0.0.1' || host === '192.168.1.1' || host === 'localhost' || host === '127.0.0.1',
+}));
+
+vi.mock('node:dns/promises', () => ({
+  lookup: vi.fn((hostname: string) => {
+    if (hostname === TEST_HOSTS.root)
+      return Promise.resolve({ address: '93.184.216.34', family: 4 });
+    if (hostname === buildTestUrl('private', { suffix: 'local' }).replace(/^https?:\/\//, ''))
+      return Promise.resolve({ address: '10.0.0.1', family: 4 });
+    if (hostname === 'localhost') return Promise.resolve({ address: '127.0.0.1', family: 4 });
+    return Promise.reject(new Error(`ENOTFOUND ${hostname}`));
+  }),
+}));
+
+const defaultPolicy: WorkflowNetworkPolicy = {
+  allowPrivateNetwork: false,
+  allowInsecureHttp: false,
+  allowedHosts: [],
+  allowedRedirectHosts: [],
+  allowedCidrs: [],
+  allowedCidrBlockList: (() => {
+    const bl = new (require('node:net').BlockList)();
+    return bl;
+  })(),
+};
+
+describe('network-policy', () => {
+  describe('parseWorkflowStringArray', () => {
+    it('returns empty array for undefined', async () => {
+      expect(parseWorkflowStringArray(undefined)).toEqual([]);
+    });
+
+    it('parses JSON string array', async () => {
+      expect(parseWorkflowStringArray('["a","b"]')).toEqual(['a', 'b']);
+    });
+
+    it('returns null for invalid JSON string', async () => {
+      expect(parseWorkflowStringArray('not json')).toBeNull();
+    });
+
+    it('returns null for non-array', async () => {
+      expect(parseWorkflowStringArray(42)).toBeNull();
+    });
+
+    it('returns null for mixed array', async () => {
+      expect(parseWorkflowStringArray(['a', 1])).toBeNull();
+    });
+
+    it('trims entries and filters empty', async () => {
+      expect(parseWorkflowStringArray([' a ', '', 'b '])).toEqual(['a', 'b']);
+    });
+  });
+
+  describe('parseWorkflowNetworkPolicy', () => {
+    it('returns default policy when no networkPolicy arg', async () => {
+      const result = parseWorkflowNetworkPolicy({});
+      expect(result.policy).toBeDefined();
+      expect(result.policy!.allowPrivateNetwork).toBe(false);
+      expect(result.policy!.allowedHosts).toEqual([]);
+    });
+
+    it('parses networkPolicy from object', async () => {
+      const result = parseWorkflowNetworkPolicy({
+        networkPolicy: {
+          allowPrivateNetwork: true,
+          allowInsecureHttp: true,
+          allowedHosts: [TEST_HOSTS.root],
+          allowedRedirectHosts: ['redirect.com'],
+          allowedCidrs: [],
+        },
+      });
+      expect(result.policy).toBeDefined();
+      expect(result.policy!.allowPrivateNetwork).toBe(true);
+      expect(result.policy!.allowInsecureHttp).toBe(true);
+    });
+
+    it('parses networkPolicy from JSON string', async () => {
+      const result = parseWorkflowNetworkPolicy({
+        networkPolicy: JSON.stringify({
+          allowPrivateNetwork: false,
+          allowInsecureHttp: false,
+          allowedHosts: [TEST_HOSTS.root],
+          allowedCidrs: [],
+        }),
+      });
+      expect(result.policy).toBeDefined();
+    });
+
+    it('returns error for invalid JSON string', async () => {
+      const result = parseWorkflowNetworkPolicy({ networkPolicy: 'not json' });
+      expect(result.error).toBeDefined();
+    });
+
+    it('returns error for non-object networkPolicy', async () => {
+      const result = parseWorkflowNetworkPolicy({ networkPolicy: 42 });
+      expect(result.error).toContain('must be an object');
+    });
+
+    it('returns error for array networkPolicy', async () => {
+      const result = parseWorkflowNetworkPolicy({ networkPolicy: [] });
+      expect(result.error).toContain('must be an object');
+    });
+
+    it('returns error for non-boolean allowPrivateNetwork', async () => {
+      const result = parseWorkflowNetworkPolicy({
+        networkPolicy: { allowPrivateNetwork: 'yes' },
+      });
+      expect(result.error).toContain('must be a boolean');
+    });
+
+    it('returns error for non-boolean allowInsecureHttp', async () => {
+      const result = parseWorkflowNetworkPolicy({
+        networkPolicy: { allowInsecureHttp: 1 },
+      });
+      expect(result.error).toContain('must be a boolean');
+    });
+
+    it('returns error for non-string allowedHosts', async () => {
+      const result = parseWorkflowNetworkPolicy({
+        networkPolicy: { allowedHosts: [123] },
+      });
+      expect(result.error).toContain('allowedHosts');
+    });
+
+    it('returns error for invalid CIDR format', async () => {
+      const result = parseWorkflowNetworkPolicy({
+        networkPolicy: { allowedCidrs: ['not-a-cidr'] },
+      });
+      expect(result.error).toContain('Invalid CIDR');
+    });
+
+    it('returns error for non-IP CIDR address', async () => {
+      const result = parseWorkflowNetworkPolicy({
+        networkPolicy: { allowedCidrs: [`${TEST_HOSTS.root}/24`] },
+      });
+      expect(result.error).toContain('Invalid CIDR base address');
+    });
+
+    it('returns error for invalid CIDR prefix', async () => {
+      const result = parseWorkflowNetworkPolicy({
+        networkPolicy: { allowedCidrs: ['10.0.0.0/33'] },
+      });
+      expect(result.error).toContain('Invalid CIDR prefix');
+    });
+
+    it('parses valid CIDR', async () => {
+      const result = parseWorkflowNetworkPolicy({
+        networkPolicy: { allowedCidrs: ['10.0.0.0/8'] },
+      });
+      expect(result.policy).toBeDefined();
+      expect(result.policy!.allowedCidrs).toEqual(['10.0.0.0/8']);
+    });
+
+    it('normalizes host patterns with port', async () => {
+      const result = parseWorkflowNetworkPolicy({
+        networkPolicy: { allowedHosts: [`${TEST_HOSTS.root}:8080`] },
+      });
+      expect(result.policy!.allowedHosts[0]).toEqual({
+        scope: 'host',
+        value: `${TEST_HOSTS.root}:8080`,
+      });
+    });
+
+    it('normalizes host patterns without port', async () => {
+      const result = parseWorkflowNetworkPolicy({
+        networkPolicy: { allowedHosts: [TEST_HOSTS.root] },
+      });
+      expect(result.policy!.allowedHosts[0]).toEqual({
+        scope: 'hostname',
+        value: TEST_HOSTS.root,
+      });
+    });
+
+    it('handles IPv6 CIDR', async () => {
+      const result = parseWorkflowNetworkPolicy({
+        networkPolicy: { allowedCidrs: ['::1/128'] },
+      });
+      expect(result.policy).toBeDefined();
+      expect(result.policy!.allowedCidrs).toEqual(['::1/128']);
+    });
+  });
+
+  describe('authorizeWorkflowUrl', () => {
+    it('authorizes HTTPS to public host', async () => {
+      const result = await authorizeWorkflowUrl(withPath(TEST_URLS.root, 'path'), defaultPolicy, {
+        label: 'fetch',
+      });
+      expect(result.parsedUrl.hostname).toBe(TEST_HOSTS.root);
+      expect(result.resolvedIp).toBe('93.184.216.34');
+    });
+
+    it('rejects invalid URL', async () => {
+      await expect(
+        authorizeWorkflowUrl('not-a-url', defaultPolicy, { label: 'fetch' }),
+      ).rejects.toThrow('Invalid fetch');
+    });
+
+    it('rejects unsupported protocol', async () => {
+      await expect(
+        authorizeWorkflowUrl(`${TEST_FTP_URLS.root}/`, defaultPolicy, { label: 'fetch' }),
+      ).rejects.toThrow('Unsupported protocol');
+    });
+
+    it('rejects private host by default', async () => {
+      await expect(
+        authorizeWorkflowUrl(
+          buildTestUrl('private', { suffix: 'local', path: '/' }),
+          defaultPolicy,
+          { label: 'fetch' },
+        ),
+      ).rejects.toThrow('private');
+    });
+
+    it('rejects HTTP to non-loopback by default', async () => {
+      await expect(
+        authorizeWorkflowUrl(`${TEST_HTTP_URLS.root}/`, defaultPolicy, { label: 'fetch' }),
+      ).rejects.toThrow('insecure HTTP');
+    });
+
+    it('allows HTTP to loopback when allowed', async () => {
+      const { BlockList } = require('node:net');
+      const policy: WorkflowNetworkPolicy = {
+        allowPrivateNetwork: true,
+        allowInsecureHttp: true,
+        allowedHosts: [{ scope: 'hostname', value: '127.0.0.1' }],
+        allowedRedirectHosts: [],
+        allowedCidrs: [],
+        allowedCidrBlockList: new BlockList(),
+      };
+      const result = await authorizeWorkflowUrl('http://127.0.0.1/', policy, { label: 'fetch' });
+      expect(result.parsedUrl.hostname).toBe('127.0.0.1');
+    });
+
+    it('allows HTTP to localhost when allowed', async () => {
+      const { BlockList } = require('node:net');
+      const policy: WorkflowNetworkPolicy = {
+        allowPrivateNetwork: true,
+        allowInsecureHttp: true,
+        allowedHosts: [{ scope: 'hostname', value: 'localhost' }],
+        allowedRedirectHosts: [],
+        allowedCidrs: [],
+        allowedCidrBlockList: new BlockList(),
+      };
+      const result = await authorizeWorkflowUrl('http://localhost/', policy, { label: 'fetch' });
+      expect(result.parsedUrl.hostname).toBe('localhost');
+    });
+
+    it('rejects unauthorized host when host allowlist exists', async () => {
+      const { BlockList } = require('node:net');
+      const policy: WorkflowNetworkPolicy = {
+        ...defaultPolicy,
+        allowedHosts: [{ scope: 'hostname', value: 'allowed.com' }],
+        allowedCidrBlockList: new BlockList(),
+      };
+      await expect(
+        authorizeWorkflowUrl(`${TEST_URLS.root}/`, policy, { label: 'fetch' }),
+      ).rejects.toThrow('not authorized');
+    });
+
+    it('allows authorized host from allowlist', async () => {
+      const { BlockList } = require('node:net');
+      const policy: WorkflowNetworkPolicy = {
+        ...defaultPolicy,
+        allowedHosts: [{ scope: 'hostname', value: TEST_HOSTS.root }],
+        allowedCidrBlockList: new BlockList(),
+      };
+      const result = await authorizeWorkflowUrl(`${TEST_URLS.root}/`, policy, { label: 'fetch' });
+      expect(result.resolvedIp).toBe('93.184.216.34');
+    });
+
+    it('uses redirect hosts when allowRedirectHosts option is set', async () => {
+      const { BlockList } = require('node:net');
+      const policy: WorkflowNetworkPolicy = {
+        ...defaultPolicy,
+        allowedHosts: [{ scope: 'hostname', value: 'other.com' }],
+        allowedRedirectHosts: [{ scope: 'hostname', value: TEST_HOSTS.root }],
+        allowedCidrBlockList: new BlockList(),
+      };
+      const result = await authorizeWorkflowUrl(`${TEST_URLS.root}/`, policy, {
+        label: 'redirect',
+        allowRedirectHosts: true,
+      });
+      expect(result.resolvedIp).toBe('93.184.216.34');
+    });
+
+    it('rewrites HTTP host to resolved IP when option set', async () => {
+      const { BlockList } = require('node:net');
+      const policy: WorkflowNetworkPolicy = {
+        ...defaultPolicy,
+        allowInsecureHttp: true,
+        allowedHosts: [{ scope: 'hostname', value: TEST_HOSTS.root }],
+        allowedCidrBlockList: new BlockList(),
+      };
+      const result = await authorizeWorkflowUrl(`${TEST_HTTP_URLS.root}/`, policy, {
+        label: 'fetch',
+        rewriteHttpHostToResolvedIp: true,
+      });
+      expect(result.fetchUrl).toContain('93.184.216.34');
+      expect(result.headers.Host).toBe(TEST_HOSTS.root);
+    });
+
+    it('handles DNS failure', async () => {
+      await expect(
+        authorizeWorkflowUrl(
+          buildTestUrl('nonexistent', { suffix: 'invalid', path: '/' }),
+          defaultPolicy,
+          { label: 'fetch' },
+        ),
+      ).rejects.toThrow('DNS resolution failed');
+    });
+
+    it('handles direct IP URL', async () => {
+      const result = await authorizeWorkflowUrl('https://93.184.216.34/', defaultPolicy, {
+        label: 'fetch',
+      });
+      expect(result.resolvedIp).toBe('93.184.216.34');
+    });
+  });
+});

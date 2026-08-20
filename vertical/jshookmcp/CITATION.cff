@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+authors:
+  - name: "vmoranv"
+title: "jshookmcp"
+version: "0.3.5"
+date-released: "2026-06-06"
+repository-code: "https://github.com/vmoranv/jshookmcp"
+url: "https://vmoranv.github.io/jshookmcp/"
+license: AGPL-3.0-only
+abstract: >
+  MCP server with 34 domains and 600+ tools for AI-assisted
+  JavaScript analysis and security research — browser automation,
+  CDP debugging, network monitoring, JS hooks, deobfuscation,
+  symbolic execution, and workflow orchestration.
+keywords:
+  - mcp
+  - javascript
+  - security-analysis
+  - reverse-engineering
+  - deobfuscation
+  - browser-automation
+  - chrome-devtools
+  - hooking
+  - code-analysis
+  - model-context-protocol

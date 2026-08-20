@@ -1,0 +1,211 @@
+import type { CodeCollector } from '@server/domains/shared/modules/collector';
+import type { PageController } from '@server/domains/shared/modules/collector';
+
+import type { ScriptManager } from '@server/domains/shared/modules';
+import type { ConsoleMonitor } from '@server/domains/shared/modules/collector';
+import type { EventBus, ServerEventMap } from '@server/EventBus';
+import { type AICaptchaDetector } from '@server/domains/shared/modules';
+import { type DetailedDataManager } from '@utils/DetailedDataManager';
+import { type CamoufoxBrowserManager } from '@server/domains/shared/modules';
+import { BrowserControlHandlers } from '@server/domains/browser/handlers/browser-control';
+import { CamoufoxBrowserHandlers } from '@server/domains/browser/handlers/camoufox-browser';
+import { PageNavigationHandlers } from '@server/domains/browser/handlers/page-navigation';
+import { PageInteractionHandlers } from '@server/domains/browser/handlers/page-interaction';
+import { PageEvaluationHandlers } from '@server/domains/browser/handlers/page-evaluation';
+import { PageDataHandlers } from '@server/domains/browser/handlers/page-data';
+
+import { ConsoleHandlers } from '@server/domains/browser/handlers/console-handlers';
+import { ScriptManagementHandlers } from '@server/domains/browser/handlers/script-management';
+import { CaptchaHandlers } from '@server/domains/browser/handlers/captcha-handlers';
+import { StealthInjectionHandlers } from '@server/domains/browser/handlers/stealth-injection';
+import { FrameworkStateHandlers } from '@server/domains/browser/handlers/framework-state';
+import { IndexedDBDumpHandlers } from '@server/domains/browser/handlers/indexeddb-dump';
+import { JSHeapSearchHandlers } from '@server/domains/browser/handlers/js-heap';
+import { TabWorkflowHandlers } from '@server/domains/browser/handlers/tab-workflow';
+import { DetailedDataHandlers } from '@server/domains/browser/handlers/detailed-data';
+import { TargetEvaluationHandlers } from '@server/domains/browser/handlers/target-evaluation';
+import { TargetControlHandlers } from '@server/domains/browser/handlers/target-control';
+import { PageDialogHandlers } from '@server/domains/browser/handlers/page-dialog';
+import { JsdomHandlers } from '@server/domains/browser/handlers/jsdom-tools';
+import { TabRegistry } from '@modules/browser/TabRegistry';
+import type { BrowserAttachRuntimeSnapshot } from '@server/runtime/ServerRuntimeState';
+import type { BrowserSessionCoordinator } from '@server/runtime/BrowserSessionCoordinator';
+import type { BrowserFleetRouter } from '@server/runtime/BrowserFleetRouter';
+
+export interface BrowserHandlerModuleInitDeps {
+  collector: CodeCollector;
+  pageController: PageController;
+
+  scriptManager: ScriptManager;
+  consoleMonitor: ConsoleMonitor;
+  captchaDetector: AICaptchaDetector;
+  detailedDataManager: DetailedDataManager;
+  getActiveDriver: () => 'chrome' | 'camoufox';
+  getCamoufoxPage: () => Promise<unknown>;
+  getCamoufoxManager: () => CamoufoxBrowserManager | null;
+  setCamoufoxManager: (manager: CamoufoxBrowserManager | null) => void;
+  closeCamoufox: () => Promise<void>;
+  getAutoDetectCaptcha: () => boolean;
+  getAutoSwitchHeadless: () => boolean;
+  getCaptchaTimeout: () => number;
+  setAutoDetectCaptcha: (value: boolean) => void;
+  setAutoSwitchHeadless: (value: boolean) => void;
+  setCaptchaTimeout: (value: number) => void;
+  getTabRegistry?: () => TabRegistry;
+  sessionCoordinator?: BrowserSessionCoordinator;
+  fleetRouter?: BrowserFleetRouter;
+  eventBus?: EventBus<ServerEventMap>;
+  onBrowserAttachStateChanged?: (snapshot: Partial<BrowserAttachRuntimeSnapshot>) => void;
+}
+
+export interface BrowserHandlerModules {
+  tabRegistry: TabRegistry;
+  browserControl: BrowserControlHandlers;
+  targetControl: TargetControlHandlers;
+  camoufoxBrowser: CamoufoxBrowserHandlers;
+  pageNavigation: PageNavigationHandlers;
+  pageInteraction: PageInteractionHandlers;
+  pageEvaluation: PageEvaluationHandlers;
+  targetEvaluation: TargetEvaluationHandlers;
+  pageDialog: PageDialogHandlers;
+  pageData: PageDataHandlers;
+
+  consoleHandlers: ConsoleHandlers;
+  scriptManagement: ScriptManagementHandlers;
+  captchaHandlers: CaptchaHandlers;
+  stealthInjection: StealthInjectionHandlers;
+  frameworkState: FrameworkStateHandlers;
+  indexedDBDump: IndexedDBDumpHandlers;
+  jsHeapSearch: JSHeapSearchHandlers;
+  tabWorkflow: TabWorkflowHandlers;
+  detailedData: DetailedDataHandlers;
+  jsdomHandlers: JsdomHandlers;
+}
+
+export function initializeBrowserHandlerModules(
+  deps: BrowserHandlerModuleInitDeps,
+): BrowserHandlerModules {
+  const commonDeps = {
+    getActiveDriver: deps.getActiveDriver,
+    getCamoufoxPage: deps.getCamoufoxPage,
+  };
+
+  const tabRegistry = new TabRegistry();
+  const getTabRegistry = deps.getTabRegistry ?? (() => tabRegistry);
+  const targetControl = new TargetControlHandlers({
+    collector: deps.collector,
+    consoleMonitor: deps.consoleMonitor,
+    getTabRegistry,
+  });
+
+  return {
+    tabRegistry,
+    targetControl,
+
+    browserControl: new BrowserControlHandlers({
+      collector: deps.collector,
+      pageController: deps.pageController,
+      consoleMonitor: deps.consoleMonitor,
+      getActiveDriver: deps.getActiveDriver,
+      getCamoufoxManager: deps.getCamoufoxManager,
+      getCamoufoxPage: deps.getCamoufoxPage,
+      getTabRegistry,
+      sessionCoordinator: deps.sessionCoordinator,
+      fleetRouter: deps.fleetRouter,
+      clearAttachedTargetContext: (context) => targetControl.clearAttachedTargetContext(context),
+      onBrowserAttachStateChanged: deps.onBrowserAttachStateChanged,
+    }),
+
+    camoufoxBrowser: new CamoufoxBrowserHandlers({
+      getCamoufoxManager: deps.getCamoufoxManager,
+      setCamoufoxManager: deps.setCamoufoxManager,
+      closeCamoufox: deps.closeCamoufox,
+    }),
+
+    pageNavigation: new PageNavigationHandlers({
+      pageController: deps.pageController,
+      consoleMonitor: deps.consoleMonitor,
+      getTabRegistry,
+      eventBus: deps.eventBus,
+      onBrowserAttachStateChanged: deps.onBrowserAttachStateChanged,
+      ...commonDeps,
+    }),
+
+    pageInteraction: new PageInteractionHandlers({
+      pageController: deps.pageController,
+      ...commonDeps,
+    }),
+
+    pageEvaluation: new PageEvaluationHandlers({
+      pageController: deps.pageController,
+      detailedDataManager: deps.detailedDataManager,
+      ...commonDeps,
+    }),
+
+    targetEvaluation: new TargetEvaluationHandlers({
+      pageController: deps.pageController,
+      detailedDataManager: deps.detailedDataManager,
+    }),
+
+    pageData: new PageDataHandlers({
+      pageController: deps.pageController,
+      ...commonDeps,
+    }),
+
+    pageDialog: new PageDialogHandlers({
+      pageController: deps.pageController,
+    }),
+
+    consoleHandlers: new ConsoleHandlers({
+      consoleMonitor: deps.consoleMonitor,
+      detailedDataManager: deps.detailedDataManager,
+    }),
+
+    scriptManagement: new ScriptManagementHandlers({
+      scriptManager: deps.scriptManager,
+      detailedDataManager: deps.detailedDataManager,
+    }),
+
+    captchaHandlers: new CaptchaHandlers({
+      pageController: deps.pageController,
+      captchaDetector: deps.captchaDetector,
+      autoDetectCaptcha: deps.getAutoDetectCaptcha(),
+      autoSwitchHeadless: deps.getAutoSwitchHeadless(),
+      captchaTimeout: deps.getCaptchaTimeout(),
+      setAutoDetectCaptcha: deps.setAutoDetectCaptcha,
+      setAutoSwitchHeadless: deps.setAutoSwitchHeadless,
+      setCaptchaTimeout: deps.setCaptchaTimeout,
+    }),
+
+    stealthInjection: new StealthInjectionHandlers({
+      pageController: deps.pageController,
+      ...commonDeps,
+    }),
+
+    frameworkState: new FrameworkStateHandlers({
+      getActivePage: () => deps.collector.getActivePage(),
+    }),
+
+    indexedDBDump: new IndexedDBDumpHandlers({
+      getActivePage: () => deps.collector.getActivePage(),
+    }),
+
+    jsHeapSearch: new JSHeapSearchHandlers({
+      getActivePage: () => deps.collector.getActivePage(),
+      getActiveDriver: deps.getActiveDriver,
+    }),
+
+    tabWorkflow: new TabWorkflowHandlers({
+      getActiveDriver: deps.getActiveDriver,
+      getCamoufoxPage: deps.getCamoufoxPage,
+      getPageController: () => deps.pageController,
+      getTabRegistry,
+    }),
+
+    detailedData: new DetailedDataHandlers({
+      detailedDataManager: deps.detailedDataManager,
+    }),
+
+    jsdomHandlers: new JsdomHandlers(),
+  };
+}

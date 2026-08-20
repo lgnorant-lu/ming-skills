@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "paths": {
+      "@extension-sdk/plugin": ["./src/plugin.ts"],
+      "@extension-sdk/workflow": ["./src/workflow.ts"],
+      "@extension-sdk/bridges/index": ["./src/bridges/index.ts"],
+      "@extension-sdk/bridges/shared": ["./src/bridges/shared.ts"],
+      "@extension-sdk/*": ["./src/*"]
+    },
+    "lib": ["ES2023", "DOM"],
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "types": ["node"],
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": false,
+    "sourceMap": false,
+    "rootDir": "./src",
+    "outDir": "./dist"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["dist", "node_modules"]
+}

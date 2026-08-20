@@ -1,0 +1,426 @@
+import type { CDPSession } from 'rebrowser-puppeteer-core';
+import type { CodeCollector } from '@modules/collector/CodeCollector';
+import type { DebuggerManager, CallFrame, Scope } from '@modules/debugger/DebuggerManager';
+import { logger } from '@utils/logger';
+import { PrerequisiteError } from '@errors/PrerequisiteError';
+
+interface RuntimeRemoteObjectLike {
+  type?: string;
+  subtype?: string;
+  value?: unknown;
+  objectId?: string;
+  className?: string;
+  description?: string;
+}
+
+interface RuntimePropertyDescriptorLike {
+  name: string;
+  value?: RuntimeRemoteObjectLike;
+}
+
+interface RuntimeGetPropertiesResponse {
+  result: RuntimePropertyDescriptorLike[];
+}
+
+interface RuntimeEvaluateResponse {
+  result: RuntimeRemoteObjectLike;
+}
+
+export interface VariableInfo {
+  name: string;
+  value: unknown;
+  type: string;
+  objectId?: string;
+  className?: string;
+  description?: string;
+}
+
+export interface ScopeVariables {
+  scopeType: string;
+  scopeName?: string;
+  variables: VariableInfo[];
+}
+
+export interface CallStackInfo {
+  callFrames: Array<{
+    callFrameId: string;
+    functionName: string;
+    location: {
+      scriptId: string;
+      url: string;
+      lineNumber: number;
+      columnNumber: number;
+    };
+    scopeChain: Array<{
+      type: string;
+      name?: string;
+    }>;
+  }>;
+  reason: string;
+  timestamp: number;
+}
+
+export class RuntimeInspector {
+  private cdpSession: CDPSession | null = null;
+  private enabled = false;
+  private initPromise?: Promise<void>;
+
+  constructor(
+    private collector: CodeCollector,
+    private debuggerManager: DebuggerManager,
+  ) {}
+
+  async init(): Promise<void> {
+    if (this.enabled) {
+      return;
+    }
+
+    if (this.initPromise) {
+      return this.initPromise;
+    }
+
+    this.initPromise = this.doInit();
+    try {
+      return await this.initPromise;
+    } finally {
+      this.initPromise = undefined;
+    }
+  }
+
+  private async doInit(): Promise<void> {
+    try {
+      const page = await this.collector.getActivePage();
+      this.cdpSession = await page.createCDPSession();
+
+      await this.cdpSession.send('Runtime.enable');
+      this.enabled = true;
+
+      logger.info('Runtime inspector enabled');
+    } catch (error) {
+      logger.error('Failed to enable runtime inspector:', error);
+      throw error;
+    }
+  }
+
+  async enable(): Promise<void> {
+    return this.init();
+  }
+
+  async enableAsyncStackTraces(maxDepth: number = 32): Promise<void> {
+    if (!this.enabled || !this.cdpSession) {
+      throw new PrerequisiteError('Runtime inspector not enabled. Call init() or enable() first.');
+    }
+
+    try {
+      await this.cdpSession.send('Debugger.setAsyncCallStackDepth', {
+        maxDepth,
+      });
+
+      logger.info(`Async stack traces enabled with max depth: ${maxDepth}`);
+    } catch (error) {
+      logger.error('Failed to enable async stack traces:', error);
+      throw error;
+    }
+  }
+
+  async disableAsyncStackTraces(): Promise<void> {
+    if (!this.enabled || !this.cdpSession) {
+      throw new PrerequisiteError('Runtime inspector not enabled');
+    }
+
+    try {
+      await this.cdpSession.send('Debugger.setAsyncCallStackDepth', {
+        maxDepth: 0,
+      });
+
+      logger.info('Async stack traces disabled');
+    } catch (error) {
+      logger.error('Failed to disable async stack traces:', error);
+      throw error;
+    }
+  }
+
+  async disable(): Promise<void> {
+    if (!this.enabled || !this.cdpSession) {
+      return;
+    }
+
+    try {
+      await this.cdpSession.send('Runtime.disable');
+      this.enabled = false;
+
+      await this.cdpSession.detach();
+      this.cdpSession = null;
+
+      logger.info('Runtime inspector disabled and cleaned up');
+    } catch (error) {
+      logger.error('Failed to disable runtime inspector:', error);
+      throw error;
+    } finally {
+      this.initPromise = undefined;
+    }
+  }
+
+  async getCallStack(): Promise<CallStackInfo | null> {
+    const pausedState = this.debuggerManager.getPausedState();
+
+    if (!pausedState) {
+      logger.warn('Not in paused state, cannot get call stack');
+      return null;
+    }
+
+    try {
+      const callStackInfo: CallStackInfo = {
+        callFrames: pausedState.callFrames.map((frame: CallFrame) => ({
+          callFrameId: frame.callFrameId,
+          functionName: frame.functionName || '(anonymous)',
+          location: {
+            scriptId: frame.location.scriptId,
+            url: frame.url,
+            lineNumber: frame.location.lineNumber,
+            columnNumber: frame.location.columnNumber,
+          },
+          scopeChain: frame.scopeChain.map((scope: Scope) => ({
+            type: scope.type,
+            name: scope.name,
+          })),
+        })),
+        reason: pausedState.reason,
+        timestamp: pausedState.timestamp,
+      };
+
+      logger.info('Call stack retrieved', {
+        frameCount: callStackInfo.callFrames.length,
+        topFrame: callStackInfo.callFrames[0]?.functionName,
+      });
+
+      return callStackInfo;
+    } catch (error) {
+      logger.error('Failed to get call stack:', error);
+      throw error;
+    }
+  }
+
+  async getScopeVariables(callFrameId: string): Promise<ScopeVariables[]> {
+    if (!this.enabled || !this.cdpSession) {
+      throw new PrerequisiteError(
+        'Runtime inspector is not enabled. Call init() or enable() first.',
+      );
+    }
+
+    if (!callFrameId) {
+      throw new Error('callFrameId parameter is required');
+    }
+
+    const pausedState = this.debuggerManager.getPausedState();
+    if (!pausedState) {
+      throw new PrerequisiteError(
+        'Not in paused state. Debugger must be paused to get scope variables.',
+      );
+    }
+
+    const callFrame = pausedState.callFrames.find(
+      (frame: CallFrame) => frame.callFrameId === callFrameId,
+    );
+
+    if (!callFrame) {
+      throw new Error(
+        `Call frame not found: ${callFrameId}. Use getCallStack() to see available frames.`,
+      );
+    }
+
+    try {
+      const scopeVariablesList: ScopeVariables[] = [];
+
+      for (const scope of callFrame.scopeChain) {
+        if (!scope.object.objectId) {
+          continue;
+        }
+
+        const properties = await this.getObjectProperties(scope.object.objectId);
+
+        scopeVariablesList.push({
+          scopeType: scope.type,
+          scopeName: scope.name,
+          variables: properties,
+        });
+      }
+
+      logger.info(`Scope variables retrieved for call frame ${callFrameId}`, {
+        scopeCount: scopeVariablesList.length,
+      });
+
+      return scopeVariablesList;
+    } catch (error) {
+      logger.error('Failed to get scope variables:', error);
+      throw error;
+    }
+  }
+
+  async getCurrentScopeVariables(): Promise<ScopeVariables[]> {
+    const pausedState = this.debuggerManager.getPausedState();
+
+    if (!pausedState || pausedState.callFrames.length === 0) {
+      throw new PrerequisiteError('Not in paused state or no call frames');
+    }
+
+    const topFrame = pausedState.callFrames[0];
+    if (!topFrame) {
+      throw new PrerequisiteError('No top frame available');
+    }
+
+    return await this.getScopeVariables(topFrame.callFrameId);
+  }
+
+  async getObjectProperties(objectId: string): Promise<VariableInfo[]> {
+    if (!this.enabled || !this.cdpSession) {
+      throw new PrerequisiteError(
+        'Runtime inspector is not enabled. Call init() or enable() first.',
+      );
+    }
+
+    if (!objectId) {
+      throw new Error('objectId parameter is required');
+    }
+
+    try {
+      const result = (await this.cdpSession.send('Runtime.getProperties', {
+        objectId,
+        ownProperties: true,
+        accessorPropertiesOnly: false,
+        generatePreview: true,
+      })) as RuntimeGetPropertiesResponse;
+
+      const variables: VariableInfo[] = [];
+
+      for (const prop of result.result) {
+        if (!prop.value) {
+          continue;
+        }
+
+        variables.push({
+          name: prop.name,
+          value: this.formatValue(prop.value),
+          type: prop.value.type || 'unknown',
+          objectId: prop.value.objectId,
+          className: prop.value.className,
+          description: prop.value.description,
+        });
+      }
+
+      logger.info(`Object properties retrieved: ${objectId}`, {
+        propertyCount: variables.length,
+      });
+
+      return variables;
+    } catch (error) {
+      logger.error('Failed to get object properties:', error);
+      throw error;
+    }
+  }
+
+  async evaluate(expression: string, callFrameId?: string): Promise<unknown> {
+    if (!expression || expression.trim() === '') {
+      throw new Error('expression parameter is required and cannot be empty');
+    }
+
+    const pausedState = this.debuggerManager.getPausedState();
+
+    if (!pausedState) {
+      throw new PrerequisiteError(
+        'Not in paused state. Use evaluateGlobal() for global context evaluation.',
+      );
+    }
+
+    const targetCallFrameId = callFrameId || pausedState.callFrames[0]?.callFrameId;
+
+    if (!targetCallFrameId) {
+      throw new PrerequisiteError('No call frame available for evaluation');
+    }
+
+    try {
+      const result = await this.debuggerManager.evaluateOnCallFrame({
+        callFrameId: targetCallFrameId,
+        expression,
+        returnByValue: true,
+      });
+
+      logger.info(`Expression evaluated: ${expression}`, {
+        result: result.value,
+      });
+
+      return this.formatValue(result);
+    } catch (error) {
+      logger.error('Failed to evaluate expression:', error);
+      throw error;
+    }
+  }
+
+  async evaluateGlobal(expression: string): Promise<unknown> {
+    if (!this.enabled || !this.cdpSession) {
+      throw new PrerequisiteError(
+        'Runtime inspector is not enabled. Call init() or enable() first.',
+      );
+    }
+
+    if (!expression || expression.trim() === '') {
+      throw new Error('expression parameter is required and cannot be empty');
+    }
+
+    try {
+      const result = (await this.cdpSession.send('Runtime.evaluate', {
+        expression,
+        returnByValue: true,
+      })) as RuntimeEvaluateResponse;
+
+      logger.info(`Global expression evaluated: ${expression}`, {
+        result: result.result.value,
+      });
+
+      return this.formatValue(result.result);
+    } catch (error) {
+      logger.error('Failed to evaluate global expression:', error);
+      throw error;
+    }
+  }
+
+  private formatValue(remoteObject: unknown): unknown {
+    if (!remoteObject || typeof remoteObject !== 'object') {
+      return remoteObject;
+    }
+
+    const candidate = remoteObject as RuntimeRemoteObjectLike;
+
+    if (candidate.type === 'undefined') {
+      return undefined;
+    }
+
+    if (candidate.type === 'object' && candidate.subtype === 'null') {
+      return null;
+    }
+
+    if (candidate.value !== undefined) {
+      return candidate.value;
+    }
+
+    if (candidate.description) {
+      return candidate.description;
+    }
+
+    return `[${candidate.type || 'unknown'}]`;
+  }
+
+  async close(): Promise<void> {
+    this.initPromise = undefined;
+    if (this.enabled) {
+      await this.disable();
+    }
+
+    if (this.cdpSession) {
+      await this.cdpSession.detach();
+      this.cdpSession = null;
+    }
+
+    logger.info('Runtime inspector closed');
+  }
+}

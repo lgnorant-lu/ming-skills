@@ -1,0 +1,114 @@
+# @jshookmcp/jshook
+
+[![License: AGPLv3](https://img.shields.io/badge/License-AGPLv3-red.svg)](LICENSE)
+[![Node.js 22.12+](https://img.shields.io/badge/node-22.12%2B-brightgreen.svg)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6.svg)](https://www.typescriptlang.org/)
+[![MCP](https://img.shields.io/badge/MCP-current-8A2BE2.svg)](https://modelcontextprotocol.io/)
+[![pnpm](https://img.shields.io/badge/pnpm-10.x-F69220.svg)](https://pnpm.io/)
+
+[English](./README.md) | 中文
+
+为 AI 赋予 **34 个技术域、600+ 个原子工具** 的 JavaScript 分析与安全研究 MCP 服务器——浏览器自动化、CDP 调试、网络拦截、JS Hook、LLM 代码分析、进程/内存取证、WASM 逆向、Source Map 重建、AST 变换与复合工作流，一应俱全。
+
+## 快速导航
+
+- **[📖 官方文档](https://vmoranv.github.io/jshookmcp/)** · **[🚀 快速开始](https://vmoranv.github.io/jshookmcp/guide/getting-started.html)** · **[⚙️ 配置指南](https://vmoranv.github.io/jshookmcp/guide/configuration.html)** · **[📚 工具参考](https://vmoranv.github.io/jshookmcp/reference/)**
+
+## 🚀 快速接入
+
+无需全局安装，添加到 MCP 客户端配置即可使用：
+
+**Claude Desktop / Cursor (`claude_desktop_config.json`)**：
+
+```json
+{
+  "mcpServers": {
+    "jshook": {
+      "command": "npx",
+      "args": ["-y", "@jshookmcp/jshook@latest"],
+      "env": {
+        "MCP_TOOL_PROFILE": "search",
+        "npm_config_omit": "optional"
+      }
+    }
+  }
+}
+```
+
+*(Windows 用户：若找不到 `npx`，请使用 `npx.cmd` 绝对路径)*
+
+该轻量配置会跳过可选的 ONNX、Z3、Binaryen、Camoufox 和 Playwright 包；需要这些完整档
+运行时时，移除 `npm_config_omit`。
+
+### 多个 Agent 共用一个本地进程
+
+默认 stdio 配置会让每个 MCP 宿主启动一份完整的 jshook。若要共享 embedding 模型、
+浏览器运行时和缓存，可以启动一个本地 Streamable HTTP daemon：
+
+```bash
+pnpm build
+pnpm daemon
+```
+
+每客户端 stdio 进程默认关闭向量搜索；共享 HTTP daemon 默认按需开启。只需词法搜索时可
+设置 `SEARCH_VECTOR_ENABLED=false`。
+
+然后在各 MCP 客户端的 HTTP/URL server 配置中统一指向
+`http://127.0.0.1:3000/mcp`。每个客户端拥有独立的 MCP 会话和响应路由，重量级运行时
+资源只保留一份。建议保持默认的本机回环监听；如需对外暴露，必须先设置
+`MCP_AUTH_TOKEN`。
+
+## 🌟 核心亮点
+
+- 🤖 **AI 智能分析** — LLM 驱动的 JS 反混淆、加密识别、AST 深度理解
+- ⚡ **搜索优先** — `search` 档 ≈ 3K tokens vs `full` 档 ≈ 40K+ tokens，按需加载
+- 🎯 **渐进分层** — `search` → `workflow` → `full`，按需激活
+- 🌐 **全栈浏览器自动化** — Chromium/Camoufox + CDP + 反检测 + CAPTCHA 处理
+- 🔁 **运行时恢复与会话隔离** — HTTP 会话支持恢复已激活域、浏览器 attach 状态、coverage 状态，并为每个客户端隔离浏览器侧会话状态
+- 🧭 **Schema 优先元工具** — `describe_tool`、带参数校验的 `call_tool`、以及 `coverage_report` 降低参数错误并暴露工具覆盖率
+- 📡 **网络拦截** — HTTP/2 帧构造、MiTM 捕获、GraphQL、Burp Suite 桥接
+- 🛠️ **全能逆向工具链** — WASM 反编译、二进制分析、Frida、Ghidra/IDA 桥接
+- 🧰 **进程与内存取证** — 原生 FFI 扫描、硬件断点、PE 内省
+- 🧩 **动态热插拔** — 热重载插件、声明式工作流、自发现域
+
+## 最近运行时变更
+
+- HTTP 传输现在支持多路复用独立 MCP 会话，并在重连后恢复运行时状态。
+- `proxy_start` 在需要时会自动生成本地 HTTPS 拦截 CA。
+- Browser 域的 CAPTCHA 求解已改为显式参数驱动：按需传入 `taskKind`、`siteKey`、`imageBase64`、`callbackName`、`responseSelector`。不会再内置页面/组件特征探测。
+
+## 架构
+
+- **运行时注册表** — 域通过 `manifest.ts` 自发现；新增域只需创建一个文件
+- **延迟初始化** — Handler 在首次调用时实例化，而非启动时预加载
+- **BM25 + 向量搜索** — `search_tools` 混合排序 + 自适应权重
+- **MCP ToolAnnotations** — 每个工具携带 `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`
+
+## 注册表快照
+
+下面的内置能力快照由运行时 registry 动态生成，并在 CI 中校验。
+
+<!-- metadata-sync:start -->
+- 包版本：`0.3.5`
+- 内置工具数：`668`
+- 域列表：`adb-bridge`, `binary-instrument`, `boringssl-inspector`, `browser`, `canvas`, `coordination`, `core`, `cross-domain`, `dart-inspector`, `debugger`, `encoding`, `exploit-dev`, `extension-registry`, `graphql`, `instrumentation`, `maintenance`, `memory`, `mojo-ipc`, `native-bridge`, `native-emulator`, `network`, `platform`, `process`, `protocol-analysis`, `proxy`, `sourcemap`, `streaming`, `syscall-hook`, `trace`, `transform`, `v8-inspector`, `wasm`, `webgpu`, `workflow`
+- 说明：以上数据由运行时 registry 动态生成，不要手改计数。
+<!-- metadata-sync:end -->
+
+> **[查看完整工具参考 ↗](https://vmoranv.github.io/jshookmcp/reference/)**
+
+## 项目统计
+
+<div align="center">
+
+<a href="https://www.star-history.com/?repos=vmoranv%2Fjshookmcp&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=vmoranv/jshookmcp&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=vmoranv/jshookmcp&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=vmoranv/jshookmcp&type=date&legend=top-left" />
+ </picture>
+</a>
+
+![Activity](https://repobeats.axiom.co/api/embed/83c000c790b1c665ff2686d2d02605412a0b8805.svg 'Repobeats analytics image')
+
+</div>

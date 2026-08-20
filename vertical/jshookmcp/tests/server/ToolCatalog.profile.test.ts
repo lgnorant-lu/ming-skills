@@ -1,0 +1,128 @@
+import { beforeAll, describe, expect, it } from 'vitest';
+import { initRegistry } from '@server/registry/index';
+import {
+  TIER_ORDER,
+  getTierIndex,
+  getToolsForProfile,
+  getToolMinimalTier,
+  getProfileDomains,
+} from '@server/ToolCatalog';
+
+// Initialize registry once before tests
+beforeAll(async () => {
+  await initRegistry();
+});
+
+describe('Profile Restructuring (PROF-01~04)', () => {
+  describe('TIER_ORDER', () => {
+    it('includes full at the end', () => {
+      const idx = TIER_ORDER.indexOf('full');
+      expect(idx).toBeGreaterThan(-1);
+      expect(TIER_ORDER[idx - 1]).toBe('workflow');
+    });
+
+    it('getTierIndex(workflow) returns correct position (1) and includes search', () => {
+      const idx = TIER_ORDER.indexOf('workflow');
+      expect(idx).not.toBe(-1);
+
+      // Workflow includes search tier
+      expect(getTierIndex('search')).toBe(0);
+      expect(getTierIndex('workflow')).toBe(1);
+
+      const searchToolNames = new Set(getToolsForProfile('search').map((t) => t.name));
+      const workflowToolNames = new Set(getToolsForProfile('workflow').map((t) => t.name));
+
+      for (const t of searchToolNames) {
+        expect(workflowToolNames.has(t)).toBe(true);
+      }
+      expect(workflowToolNames.size).toBeGreaterThanOrEqual(searchToolNames.size);
+    });
+  });
+
+  describe('Profile tool sets', () => {
+    it('getToolsForProfile(workflow) is superset of getToolsForProfile(search)', () => {
+      const searchToolNames = getToolsForProfile('search').map((t) => t.name);
+      const workflowToolNames = new Set(getToolsForProfile('workflow').map((t) => t.name));
+      for (const name of searchToolNames) {
+        expect(workflowToolNames.has(name), `'${name}' in search but not in workflow`).toBe(true);
+      }
+      expect(workflowToolNames.size).toBeGreaterThanOrEqual(searchToolNames.length);
+    });
+
+    it('getToolsForProfile(full) is superset of getToolsForProfile(workflow)', () => {
+      const workflowToolNames = getToolsForProfile('workflow').map((t) => t.name);
+      const fullToolNames = new Set(getToolsForProfile('full').map((t) => t.name));
+      for (const name of workflowToolNames) {
+        expect(fullToolNames.has(name), `'${name}' in workflow but not in full`).toBe(true);
+      }
+      expect(fullToolNames.size).toBeGreaterThanOrEqual(workflowToolNames.length);
+    });
+  });
+
+  describe('hooks domain visibility (PROF-02)', () => {
+    it('hooks tools are visible in full profile', () => {
+      const fullTools = getToolsForProfile('full').map((t) => t.name);
+      expect(fullTools).toContain('ai_hook');
+      expect(fullTools).toContain('hook_preset');
+    });
+
+    it('getToolMinimalTier returns full for hooks tools after downgrade', () => {
+      expect(getToolMinimalTier('hook_preset')).toBe('full');
+    });
+  });
+
+  describe('merged domain tier preservation', () => {
+    it('keeps merged full-only tools out of workflow', () => {
+      const workflowTools = new Set(getToolsForProfile('workflow').map((t) => t.name));
+      const fullTools = new Set(getToolsForProfile('full').map((t) => t.name));
+
+      for (const toolName of [
+        'antidebug_bypass',
+        'antidebug_detect_protections',
+        'execute_sandbox_script',
+        'run_macro',
+        'list_macros',
+        'canvas_engine_fingerprint',
+        'create_task_handoff',
+      ]) {
+        expect(workflowTools.has(toolName)).toBe(false);
+        expect(fullTools.has(toolName)).toBe(true);
+      }
+    });
+
+    it('preserves workflow visibility for merged skia and state-board tools', () => {
+      const workflowTools = new Set(getToolsForProfile('workflow').map((t) => t.name));
+
+      for (const toolName of [
+        'skia_detect_renderer',
+        'skia_extract_scene',
+        'skia_correlate_objects',
+        'state_board',
+        'state_board_watch',
+        'state_board_io',
+      ]) {
+        expect(workflowTools.has(toolName)).toBe(true);
+      }
+    });
+  });
+
+  describe('buildProfileDomains hierarchy', () => {
+    it('validates search ⊂ workflow ⊂ full', () => {
+      const searchDomains = getProfileDomains('search');
+      const workflowDomains = getProfileDomains('workflow');
+      const fullDomains = getProfileDomains('full');
+
+      const workflowDomainSet = new Set(workflowDomains);
+      const fullDomainSet = new Set(fullDomains);
+
+      // search ⊂ workflow
+      for (const d of searchDomains) {
+        expect(workflowDomainSet.has(d), `search domain '${d}' missing from workflow`).toBe(true);
+      }
+      // workflow ⊂ full
+      for (const d of workflowDomains) {
+        expect(fullDomainSet.has(d), `workflow domain '${d}' missing from full`).toBe(true);
+      }
+    });
+  });
+});

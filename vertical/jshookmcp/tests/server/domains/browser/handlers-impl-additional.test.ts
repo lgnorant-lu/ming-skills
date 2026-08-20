@@ -1,0 +1,981 @@
+import type { BrowserStatusResponse } from '@tests/server/domains/shared/common-test-types';
+import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+
+/* ------------------------------------------------------------------ *
+ *  Hoisted mocks for every sub-handler module the facade delegates to
+ * ------------------------------------------------------------------ */
+
+interface MockHandler {
+  [key: string]: Mock<(...args: any[]) => Promise<any>>;
+}
+
+const {
+  browserControlMocks,
+  pageNavigationMocks,
+  pageInteractionMocks,
+  pageEvaluationMocks,
+  pageDataMocks,
+  consoleMocks,
+  scriptManagementMocks,
+  captchaMocks,
+  stealthMocks,
+  frameworkMocks,
+  indexedMocks,
+  detailedDataHandlerMocks,
+  jsHeapMocks,
+  tabWorkflowMocks,
+  camoufoxBrowserMocks,
+  humanMouseMock,
+  humanScrollMock,
+  humanTypingMock,
+  captchaVisionSolveMock,
+  widgetChallengeSolveMock,
+} = vi.hoisted(() => ({
+  browserControlMocks: {
+    handleBrowserLaunch: vi.fn(async (args: any) => ({ from: 'browser-launch', args })),
+    handleBrowserClose: vi.fn(async (args: any) => ({ from: 'browser-close', args })),
+    handleBrowserStatus: vi.fn(async (args: any) => ({ from: 'browser-status', args })),
+    handleBrowserListTabs: vi.fn(async (args: any) => ({ from: 'list-tabs', args })),
+    handleBrowserSelectTab: vi.fn(async (args: any) => ({ from: 'select-tab', args })),
+    handleBrowserAttach: vi.fn(async (args: any) => ({ from: 'attach', args })),
+  } as MockHandler,
+  pageNavigationMocks: {
+    handlePageNavigate: vi.fn(async (args: any) => ({ from: 'page-nav', args })),
+    handlePageReload: vi.fn(async (args: any) => ({ from: 'reload', args })),
+    handlePageBack: vi.fn(async (args: any) => ({ from: 'back', args })),
+    handlePageForward: vi.fn(async (args: any) => ({ from: 'forward', args })),
+  } as MockHandler,
+  pageInteractionMocks: {
+    handlePageClick: vi.fn(async (args: any) => ({ from: 'click', args })),
+    handlePageType: vi.fn(async (args: any) => ({ from: 'type', args })),
+    handlePageUploadFiles: vi.fn(async (args: any) => ({ from: 'upload-files', args })),
+    handlePageSelect: vi.fn(async (args: any) => ({ from: 'select', args })),
+    handlePageHover: vi.fn(async (args: any) => ({ from: 'hover', args })),
+    handlePageScroll: vi.fn(async (args: any) => ({ from: 'scroll', args })),
+    handlePagePressKey: vi.fn(async (args: any) => ({ from: 'press-key', args })),
+  } as MockHandler,
+  pageEvaluationMocks: {
+    handlePageEvaluate: vi.fn(async (args: any) => ({ from: 'evaluate', args })),
+    handlePageScreenshot: vi.fn(async (args: any) => ({ from: 'screenshot', args })),
+    handlePageInjectScript: vi.fn(async (args: any) => ({ from: 'inject-script', args })),
+    handlePageWaitForSelector: vi.fn(async (args: any) => ({ from: 'wait-selector', args })),
+  } as MockHandler,
+  pageDataMocks: {
+    handlePageSetCookies: vi.fn(async (args: any) => ({ from: 'set-cookies', args })),
+    handlePageGetCookies: vi.fn(async (args: any) => ({ from: 'get-cookies', args })),
+    handlePageClearCookies: vi.fn(async (args: any) => ({ from: 'clear-cookies', args })),
+    getPageCookieCount: vi.fn(async () => 3),
+    handlePageListFrames: vi.fn(async (args: any) => ({ from: 'list-frames', args })),
+    handlePageSetViewport: vi.fn(async (args: any) => ({ from: 'set-viewport', args })),
+    handlePageEmulateDevice: vi.fn(async (args: any) => ({ from: 'emulate', args })),
+    handlePageGetLocalStorage: vi.fn(async (args: any) => ({ from: 'get-ls', args })),
+    handlePageSetLocalStorage: vi.fn(async (args: any) => ({ from: 'set-ls', args })),
+  } as MockHandler,
+  consoleMocks: {
+    handleConsoleMonitor: vi.fn(async (args: any) => ({ from: 'console-enable', args })),
+    handleConsoleGetLogs: vi.fn(async (args: any) => ({ from: 'console-logs', args })),
+    handleConsoleExecute: vi.fn(async (args: any) => ({ from: 'console-exec', args })),
+  } as MockHandler,
+  scriptManagementMocks: {
+    handleGetAllScripts: vi.fn(async (args: any) => ({ from: 'all-scripts', args })),
+    handleGetScriptSource: vi.fn(async (args: any) => ({ from: 'script-source', args })),
+  } as MockHandler,
+  captchaMocks: {
+    handleCaptchaDetect: vi.fn(async (args: any) => ({ from: 'captcha-detect', args })),
+    handleCaptchaWait: vi.fn(async (args: any) => ({ from: 'captcha-wait', args })),
+    handleCaptchaConfig: vi.fn(async (args: any) => ({ from: 'captcha-config', args })),
+  } as MockHandler,
+  stealthMocks: {
+    handleStealthInject: vi.fn(async (args: any) => ({ from: 'stealth-inject', args })),
+    handleStealthSetUserAgent: vi.fn(async (args: any) => ({ from: 'stealth-ua', args })),
+  } as MockHandler,
+  frameworkMocks: {
+    handleFrameworkStateExtract: vi.fn(async (args: any) => ({ from: 'framework', args })),
+  } as MockHandler,
+  indexedMocks: {
+    handleIndexedDBDump: vi.fn(async (args: any) => ({ from: 'indexed-dump', args })),
+  } as MockHandler,
+  detailedDataHandlerMocks: {
+    handleGetDetailedData: vi.fn(async (args: any) => ({ from: 'detailed-data', args })),
+  } as MockHandler,
+  jsHeapMocks: {
+    handleJSHeapSearch: vi.fn(async (args: any) => ({ from: 'heap-search', args })),
+  } as MockHandler,
+  tabWorkflowMocks: {
+    handleTabWorkflow: vi.fn(async (args: any) => ({ from: 'tab-workflow', args })),
+  } as MockHandler,
+  camoufoxBrowserMocks: {
+    handleCamoufoxServerLaunch: vi.fn(async (args: any) => ({ from: 'cfox-launch', args })),
+    handleCamoufoxServerClose: vi.fn(async (args: any) => ({ from: 'cfox-close', args })),
+    handleCamoufoxServerStatus: vi.fn(async (args: any) => ({ from: 'cfox-status', args })),
+  } as MockHandler,
+  humanMouseMock: vi.fn(async (args: any, _collector: any, _pageController: any) => ({
+    from: 'human-mouse',
+    args,
+  })),
+  humanScrollMock: vi.fn(async (args: any, _collector: any) => ({ from: 'human-scroll', args })),
+  humanTypingMock: vi.fn(async (args: any, _collector: any, _pageController: any) => ({
+    from: 'human-typing',
+    args,
+  })),
+  captchaVisionSolveMock: vi.fn(async (args: any, _collector: any) => ({
+    from: 'captcha-vision',
+    args,
+  })),
+  widgetChallengeSolveMock: vi.fn(async (args: any, _collector: any) => ({
+    from: 'widget-solve',
+    args,
+  })),
+}));
+
+const { resolveOutputDirectoryMock, smartHandleMock } = vi.hoisted(() => ({
+  resolveOutputDirectoryMock: vi.fn(() => 'screenshots/captcha'),
+  smartHandleMock: vi.fn((v: any) => ({ wrapped: v })),
+}));
+
+function classFactory(spy: ReturnType<typeof vi.fn>, instance: any) {
+  return function MockHandler(deps: any) {
+    (spy as unknown as (deps: any) => void)(deps);
+    return instance;
+  };
+}
+
+// Mock all sub-handler modules
+vi.mock('@src/modules/captcha/AICaptchaDetector', () => ({
+  AICaptchaDetector: vi.fn(),
+}));
+
+vi.mock('@src/utils/outputPaths', () => ({
+  resolveOutputDirectory: (...args: any[]) => (resolveOutputDirectoryMock as any)(...args),
+}));
+
+vi.mock('@src/utils/DetailedDataManager', () => ({
+  DetailedDataManager: {
+    getInstance: () => ({
+      smartHandle: (...args: any[]) => (smartHandleMock as any)(...args),
+    }),
+  },
+}));
+
+vi.mock('@src/modules/browser/CamoufoxBrowserManager', () => ({
+  CamoufoxBrowserManager: class {
+    private page: any;
+    constructor() {
+      this.page = {
+        goto: vi.fn(async () => {}),
+        title: vi.fn(async () => 'Camoufox Page'),
+        url: vi.fn(() => TEST_URLS.root),
+      };
+    }
+    async launch() {}
+    async connectToServer() {}
+    async close() {}
+    async newPage() {
+      return this.page;
+    }
+    getBrowser() {
+      return {};
+    }
+  },
+}));
+
+vi.mock('@src/server/domains/browser/handlers/browser-control', () => ({
+  BrowserControlHandlers: classFactory(vi.fn(), browserControlMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/camoufox-browser', () => ({
+  CamoufoxBrowserHandlers: classFactory(vi.fn(), camoufoxBrowserMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/page-navigation', () => ({
+  PageNavigationHandlers: classFactory(vi.fn(), pageNavigationMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/page-interaction', () => ({
+  PageInteractionHandlers: classFactory(vi.fn(), pageInteractionMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/page-evaluation', () => ({
+  PageEvaluationHandlers: classFactory(vi.fn(), pageEvaluationMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/page-data', () => ({
+  PageDataHandlers: classFactory(vi.fn(), pageDataMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/console-handlers', () => ({
+  ConsoleHandlers: classFactory(vi.fn(), consoleMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/script-management', () => ({
+  ScriptManagementHandlers: classFactory(vi.fn(), scriptManagementMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/captcha-handlers', () => ({
+  CaptchaHandlers: classFactory(vi.fn(), captchaMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/stealth-injection', () => ({
+  StealthInjectionHandlers: classFactory(vi.fn(), stealthMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/framework-state', () => ({
+  FrameworkStateHandlers: classFactory(vi.fn(), frameworkMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/indexeddb-dump', () => ({
+  IndexedDBDumpHandlers: classFactory(vi.fn(), indexedMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/detailed-data', () => ({
+  DetailedDataHandlers: classFactory(vi.fn(), detailedDataHandlerMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/js-heap', () => ({
+  JSHeapSearchHandlers: classFactory(vi.fn(), jsHeapMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/tab-workflow', () => ({
+  TabWorkflowHandlers: classFactory(vi.fn(), tabWorkflowMocks),
+}));
+vi.mock('@src/server/domains/browser/handlers/human-behavior', () => ({
+  handleHumanMouse: (args: any, collector: any, pageController: any) =>
+    humanMouseMock(args, collector, pageController),
+  handleHumanScroll: (args: any, collector: any) => humanScrollMock(args, collector),
+  handleHumanTyping: (args: any, collector: any, pageController: any) =>
+    humanTypingMock(args, collector, pageController),
+}));
+vi.mock('@src/server/domains/browser/handlers/captcha-solver', () => ({
+  handleCaptchaVisionSolve: (args: any, collector: any) => captchaVisionSolveMock(args, collector),
+  handleWidgetChallengeSolve: (args: any, collector: any) =>
+    widgetChallengeSolveMock(args, collector),
+}));
+
+import { BrowserToolHandlers } from '@server/domains/browser/handlers';
+
+class TestBrowserToolHandlers extends BrowserToolHandlers {
+  public setActiveDriver(driver: 'chrome' | 'camoufox') {
+    this.activeDriver = driver;
+  }
+  public setCamoufoxManager(manager: any) {
+    this.camoufoxManager = manager;
+  }
+  public setCamoufoxPage(page: any) {
+    this.camoufoxPage = page;
+  }
+}
+
+type JsonResponse = {
+  content: Array<{ type: string; text?: string; [key: string]: any }>;
+  isError?: boolean;
+  [key: string]: any;
+};
+
+function getResponseText(response: any): string {
+  const res = response as JsonResponse;
+  if (!res || !Array.isArray(res.content) || res.content.length === 0) {
+    throw new Error('Expected response content');
+  }
+  const content = res.content[0];
+  if (!content || content.type !== 'text' || typeof content.text !== 'string') {
+    throw new Error(`Expected text content, got ${content?.type ?? 'nothing'}`);
+  }
+  return content.text;
+}
+
+function parseJson<T = Record<string, any>>(response: any): T {
+  return JSON.parse(getResponseText(response)) as T;
+}
+
+import {
+  createPageMock,
+  createCodeCollectorMock,
+  createConsoleMonitorMock,
+} from '@tests/server/domains/shared/mock-factories';
+import { TEST_URLS } from '@tests/shared/test-urls';
+import { EventBus } from '@server/EventBus';
+
+describe('BrowserToolHandlers — additional delegation coverage', () => {
+  const collector = createCodeCollectorMock({ getActivePage: vi.fn() } as any);
+  const pageController = createPageMock();
+  const scriptManager = {} as any;
+  const consoleMonitor = createConsoleMonitorMock({
+    setPlaywrightPage: vi.fn(),
+    disable: vi.fn(async () => {}),
+    clearPlaywrightPage: vi.fn(),
+  } as any);
+  const eventBus = new EventBus();
+
+  let handlers: TestBrowserToolHandlers;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    handlers = new TestBrowserToolHandlers(
+      collector as any,
+      pageController as any,
+      scriptManager as any,
+      consoleMonitor as any,
+      eventBus as any,
+    );
+  });
+
+  // ============ Page Interaction delegation ============
+  describe('page interaction delegation', () => {
+    it('delegates handlePageClick', async () => {
+      const args = { selector: '#btn' };
+      const result = await handlers.handlePageClick(args);
+      expect(pageInteractionMocks.handlePageClick).toHaveBeenCalledWith(args);
+      expect(result).toEqual({ from: 'click', args });
+    });
+
+    it('delegates handlePageType', async () => {
+      const args = { selector: '#input', text: 'hello' };
+      const result = await handlers.handlePageType(args);
+      expect(pageInteractionMocks.handlePageType).toHaveBeenCalledWith(args);
+      expect(result).toEqual({ from: 'type', args });
+    });
+
+    it('delegates handlePageUploadFiles', async () => {
+      const args = { selector: '#upload', paths: ['fixtures/a.txt'] };
+      const result = await handlers.handlePageUploadFiles(args);
+      expect(pageInteractionMocks.handlePageUploadFiles).toHaveBeenCalledWith(args);
+      expect(result).toEqual({ from: 'upload-files', args });
+    });
+
+    it('delegates handlePageSelect', async () => {
+      const args = { selector: 'select', value: 'opt1' };
+      const result = await handlers.handlePageSelect(args);
+      expect(pageInteractionMocks.handlePageSelect).toHaveBeenCalledWith(args);
+      expect(result).toEqual({ from: 'select', args });
+    });
+
+    it('delegates handlePageHover', async () => {
+      const args = { selector: '.menu' };
+      const result = await handlers.handlePageHover(args);
+      expect(pageInteractionMocks.handlePageHover).toHaveBeenCalledWith(args);
+      expect(result).toEqual({ from: 'hover', args });
+    });
+
+    it('delegates handlePageScroll', async () => {
+      const args = { x: 0, y: 500 };
+      const result = await handlers.handlePageScroll(args);
+      expect(pageInteractionMocks.handlePageScroll).toHaveBeenCalledWith(args);
+      expect(result).toEqual({ from: 'scroll', args });
+    });
+
+    it('delegates handlePagePressKey', async () => {
+      const args = { key: 'Enter' };
+      const result = await handlers.handlePagePressKey(args);
+      expect(pageInteractionMocks.handlePagePressKey).toHaveBeenCalledWith(args);
+      expect(result).toEqual({ from: 'press-key', args });
+    });
+  });
+
+  // ============ Page Evaluation delegation ============
+  describe('page evaluation delegation', () => {
+    it('delegates handlePageEvaluate', async () => {
+      const args = { code: 'document.title' };
+      const result = await handlers.handlePageEvaluate(args);
+      expect(pageEvaluationMocks.handlePageEvaluate).toHaveBeenCalledWith(args);
+      expect(result).toEqual({ from: 'evaluate', args });
+    });
+
+    it('delegates handlePageScreenshot', async () => {
+      const args = { fullPage: true };
+      const result = await handlers.handlePageScreenshot(args);
+      expect(pageEvaluationMocks.handlePageScreenshot).toHaveBeenCalledWith(args);
+      expect(result).toEqual({ from: 'screenshot', args });
+    });
+
+    it('delegates handlePageInjectScript', async () => {
+      const args = { script: 'console.log("hi")' };
+      const result = await handlers.handlePageInjectScript(args);
+      expect(pageEvaluationMocks.handlePageInjectScript).toHaveBeenCalledWith(args);
+      expect(result).toEqual({ from: 'inject-script', args });
+    });
+
+    it('delegates handlePageWaitForSelector', async () => {
+      const args = { selector: '.loaded' };
+      const result = await handlers.handlePageWaitForSelector(args);
+      expect(pageEvaluationMocks.handlePageWaitForSelector).toHaveBeenCalledWith(args);
+      expect(result).toEqual({ from: 'wait-selector', args });
+    });
+  });
+
+  // ============ Page Data delegation ============
+  describe('page data delegation', () => {
+    it('delegates handlePageListFrames', async () => {
+      const result = await handlers.handlePageListFrames({});
+      expect(pageDataMocks.handlePageListFrames).toHaveBeenCalledWith({});
+      expect(result).toEqual({ from: 'list-frames', args: {} });
+    });
+
+    it('delegates handlePageCookiesDispatch (get)', async () => {
+      await handlers.handlePageCookiesDispatch({ action: 'get' });
+      expect(pageDataMocks.handlePageGetCookies).toHaveBeenCalledWith({ action: 'get' });
+    });
+
+    it('delegates handlePageCookiesDispatch (set)', async () => {
+      const args = { action: 'set', cookies: [{ name: 'a', value: 'b' }] };
+      await handlers.handlePageCookiesDispatch(args);
+      expect(pageDataMocks.handlePageSetCookies).toHaveBeenCalledWith(args);
+    });
+
+    it('delegates handlePageCookiesDispatch (clear) with matching expectedCount', async () => {
+      (pageDataMocks.getPageCookieCount as any).mockResolvedValueOnce(3);
+      await handlers.handlePageCookiesDispatch({ action: 'clear', expectedCount: 3 });
+      expect(pageDataMocks.handlePageClearCookies).toHaveBeenCalledWith({
+        action: 'clear',
+        expectedCount: 3,
+      });
+    });
+
+    it('rejects clear without expectedCount', async () => {
+      const result = (await handlers.handlePageCookiesDispatch({ action: 'clear' })) as any;
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('expectedCount');
+    });
+
+    it('rejects clear with wrong expectedCount', async () => {
+      (pageDataMocks.getPageCookieCount as any).mockResolvedValueOnce(5);
+      const result = (await handlers.handlePageCookiesDispatch({
+        action: 'clear',
+        expectedCount: 3,
+      })) as any;
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('mismatch');
+    });
+
+    it('delegates handlePageSetViewport', async () => {
+      const args = { width: 1920, height: 1080 };
+      await handlers.handlePageSetViewport(args);
+      expect(pageDataMocks.handlePageSetViewport).toHaveBeenCalledWith(args);
+    });
+
+    it('delegates handlePageEmulateDevice', async () => {
+      const args = { device: 'iPhone' };
+      await handlers.handlePageEmulateDevice(args);
+      expect(pageDataMocks.handlePageEmulateDevice).toHaveBeenCalledWith(args);
+    });
+
+    it('delegates handlePageLocalStorageDispatch (get)', async () => {
+      await handlers.handlePageLocalStorageDispatch({ action: 'get' });
+      expect(pageDataMocks.handlePageGetLocalStorage).toHaveBeenCalledWith({ action: 'get' });
+    });
+
+    it('delegates handlePageLocalStorageDispatch (set)', async () => {
+      const args = { action: 'set', key: 'k', value: 'v' };
+      await handlers.handlePageLocalStorageDispatch(args);
+      expect(pageDataMocks.handlePageSetLocalStorage).toHaveBeenCalledWith(args);
+    });
+
+    // ============ Page Navigation ============
+    describe('page navigation delegation', () => {
+      it('delegates handlePageReload', async () => {
+        const result = await handlers.handlePageReload({});
+        expect(pageNavigationMocks.handlePageReload).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'reload', args: {} });
+      });
+
+      it('delegates handlePageBack', async () => {
+        const result = await handlers.handlePageBack({});
+        expect(pageNavigationMocks.handlePageBack).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'back', args: {} });
+      });
+
+      it('delegates handlePageForward', async () => {
+        const result = await handlers.handlePageForward({});
+        expect(pageNavigationMocks.handlePageForward).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'forward', args: {} });
+      });
+
+      it('delegates handlePageNavigate to pageNavigation for chrome driver', async () => {
+        const args = { url: TEST_URLS.root };
+        const result = await handlers.handlePageNavigate(args);
+        expect(pageNavigationMocks.handlePageNavigate).toHaveBeenCalledWith(args);
+        expect(result).toEqual({ from: 'page-nav', args });
+      });
+    });
+
+    // ============ Console delegation ============
+    describe('console delegation', () => {
+      it('delegates handleConsoleMonitor', async () => {
+        const result = await handlers.handleConsoleMonitor({});
+        expect(consoleMocks.handleConsoleMonitor).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'console-enable', args: {} });
+      });
+
+      it('delegates handleConsoleGetLogs', async () => {
+        await handlers.handleConsoleGetLogs({});
+        expect(consoleMocks.handleConsoleGetLogs).toHaveBeenCalledWith({});
+      });
+
+      it('delegates handleConsoleExecute', async () => {
+        const args = { code: 'console.log("test")' };
+        await handlers.handleConsoleExecute(args);
+        expect(consoleMocks.handleConsoleExecute).toHaveBeenCalledWith(args);
+      });
+    });
+
+    // ============ Script Management delegation ============
+    describe('script management delegation', () => {
+      it('delegates handleGetAllScripts', async () => {
+        const result = await handlers.handleGetAllScripts({});
+        expect(scriptManagementMocks.handleGetAllScripts).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'all-scripts', args: {} });
+      });
+
+      it('delegates handleGetScriptSource', async () => {
+        const args = { scriptId: '123' };
+        const result = await handlers.handleGetScriptSource(args);
+        expect(scriptManagementMocks.handleGetScriptSource).toHaveBeenCalledWith(args);
+        expect(result).toEqual({ from: 'script-source', args });
+      });
+    });
+
+    // ============ CAPTCHA delegation ============
+    describe('captcha delegation', () => {
+      it('delegates handleCaptchaDetect', async () => {
+        const result = await handlers.handleCaptchaDetect({});
+        expect(captchaMocks.handleCaptchaDetect).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'captcha-detect', args: {} });
+      });
+
+      it('delegates handleCaptchaWait', async () => {
+        await handlers.handleCaptchaWait({});
+        expect(captchaMocks.handleCaptchaWait).toHaveBeenCalledWith({});
+      });
+
+      it('delegates handleCaptchaConfig', async () => {
+        const args = { autoDetect: true };
+        await handlers.handleCaptchaConfig(args);
+        expect(captchaMocks.handleCaptchaConfig).toHaveBeenCalledWith(args);
+      });
+    });
+
+    // ============ Stealth delegation ============
+    describe('stealth delegation', () => {
+      it('delegates handleStealthInject', async () => {
+        const result = await handlers.handleStealthInject({});
+        expect(stealthMocks.handleStealthInject).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'stealth-inject', args: {} });
+      });
+
+      it('delegates handleStealthSetUserAgent', async () => {
+        const args = { platform: 'mac' };
+        const result = await handlers.handleStealthSetUserAgent(args);
+        expect(stealthMocks.handleStealthSetUserAgent).toHaveBeenCalledWith(args);
+        expect(result).toEqual({ from: 'stealth-ua', args });
+      });
+    });
+
+    // ============ Framework State delegation ============
+    describe('framework state delegation', () => {
+      it('delegates handleFrameworkStateExtract', async () => {
+        const args = { framework: 'react' };
+        const result = await handlers.handleFrameworkStateExtract(args);
+        expect(frameworkMocks.handleFrameworkStateExtract).toHaveBeenCalledWith(args);
+        expect(result).toEqual({ from: 'framework', args });
+      });
+    });
+
+    // ============ IndexedDB delegation ============
+    describe('IndexedDB delegation', () => {
+      it('delegates handleIndexedDBDump', async () => {
+        const result = await handlers.handleIndexedDBDump({});
+        expect(indexedMocks.handleIndexedDBDump).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'indexed-dump', args: {} });
+      });
+    });
+
+    // ============ JS Heap Search delegation ============
+    describe('JS heap search delegation', () => {
+      it('delegates handleJSHeapSearch', async () => {
+        const args = { query: 'token' };
+        const result = await handlers.handleJSHeapSearch(args);
+        expect(jsHeapMocks.handleJSHeapSearch).toHaveBeenCalledWith(args);
+        expect(result).toEqual({ from: 'heap-search', args });
+      });
+    });
+
+    // ============ Tab Workflow delegation ============
+    describe('tab workflow delegation', () => {
+      it('delegates handleTabWorkflow', async () => {
+        const args = { action: 'open' };
+        const result = await handlers.handleTabWorkflow(args);
+        expect(tabWorkflowMocks.handleTabWorkflow).toHaveBeenCalledWith(args);
+        expect(result).toEqual({ from: 'tab-workflow', args });
+      });
+    });
+
+    // ============ Detailed Data delegation ============
+    describe('detailed data delegation', () => {
+      it('delegates handleGetDetailedData', async () => {
+        const args = { id: 'abc' };
+        const result = await handlers.handleGetDetailedData(args);
+        expect(detailedDataHandlerMocks.handleGetDetailedData).toHaveBeenCalledWith(args);
+        expect(result).toEqual({ from: 'detailed-data', args });
+      });
+    });
+
+    // ============ Camoufox Server delegation ============
+    describe('camoufox server delegation', () => {
+      it('delegates handleCamoufoxServerLaunch', async () => {
+        const result = await handlers.handleCamoufoxServerLaunch({});
+        expect(camoufoxBrowserMocks.handleCamoufoxServerLaunch).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'cfox-launch', args: {} });
+      });
+
+      it('delegates handleCamoufoxServerClose', async () => {
+        const result = await handlers.handleCamoufoxServerClose({});
+        expect(camoufoxBrowserMocks.handleCamoufoxServerClose).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'cfox-close', args: {} });
+      });
+
+      it('delegates handleCamoufoxServerStatus', async () => {
+        const result = await handlers.handleCamoufoxServerStatus({});
+        expect(camoufoxBrowserMocks.handleCamoufoxServerStatus).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'cfox-status', args: {} });
+      });
+    });
+
+    // ============ Human Behavior delegation ============
+    describe('human behavior delegation', () => {
+      it('delegates handleHumanMouse with collector', async () => {
+        const args = { toX: 100, toY: 200 };
+        const result = await handlers.handleHumanMouse(args);
+        expect(humanMouseMock).toHaveBeenCalledWith(args, collector, pageController);
+        expect(result).toEqual({ from: 'human-mouse', args });
+      });
+
+      it('delegates handleHumanScroll with collector', async () => {
+        const args = { distance: 500 };
+        const result = await handlers.handleHumanScroll(args);
+        expect(humanScrollMock).toHaveBeenCalledWith(args, collector);
+        expect(result).toEqual({ from: 'human-scroll', args });
+      });
+
+      it('delegates handleHumanTyping with collector', async () => {
+        const args = { selector: '#input', text: 'hello' };
+        const result = await handlers.handleHumanTyping(args);
+        expect(humanTypingMock).toHaveBeenCalledWith(args, collector, pageController);
+        expect(result).toEqual({ from: 'human-typing', args });
+      });
+    });
+
+    describe('browser codegen recording', () => {
+      it('records browser tool calls and returns a cleaned replay script', async () => {
+        const start = parseJson<any>(await handlers.handleBrowserCodegenStart());
+        expect(start.success).toBe(true);
+        expect(start.recording).toBe(true);
+
+        await eventBus.emit('tool:called', {
+          toolName: 'page_navigate',
+          domain: 'browser',
+          timestamp: '2026-01-01T00:00:00.000Z',
+          success: true,
+          args: { url: TEST_URLS.root },
+        } as any);
+        await eventBus.emit('tool:called', {
+          toolName: 'page_click',
+          domain: 'browser',
+          timestamp: '2026-01-01T00:00:01.000Z',
+          success: true,
+          args: { selector: '#login', frameSelector: 'iframe#auth' },
+        } as any);
+        await eventBus.emit('tool:called', {
+          toolName: 'page_wait_for_selector',
+          domain: 'browser',
+          timestamp: '2026-01-01T00:00:01.500Z',
+          success: true,
+          args: { selector: '#login', frameSelector: 'iframe#auth' },
+        } as any);
+        await eventBus.emit('tool:called', {
+          toolName: 'page_wait_for_selector',
+          domain: 'browser',
+          timestamp: '2026-01-01T00:00:01.750Z',
+          success: true,
+          args: { selector: '#login', frameSelector: 'iframe#auth' },
+        } as any);
+        await eventBus.emit('tool:called', {
+          toolName: 'console_get_logs',
+          domain: 'browser',
+          timestamp: '2026-01-01T00:00:02.000Z',
+          success: true,
+          args: {},
+        } as any);
+        await eventBus.emit('tool:called', {
+          toolName: 'page_click',
+          domain: 'browser',
+          timestamp: '2026-01-01T00:00:03.000Z',
+          success: false,
+          args: { selector: '#missing' },
+          result: { success: false, isError: false },
+        } as any);
+
+        const stop = parseJson<any>(await handlers.handleBrowserCodegenStop());
+        expect(stop.success).toBe(true);
+        expect(stop.recording).toBe(false);
+        expect(stop.rawStepCount).toBe(4);
+        expect(stop.stepCount).toBe(2);
+        expect(stop.steps).toEqual([
+          {
+            tool: 'page_navigate',
+            args: { url: TEST_URLS.root },
+            timestamp: '2026-01-01T00:00:00.000Z',
+          },
+          {
+            tool: 'page_click',
+            args: { selector: '#login', frameSelector: 'iframe#auth' },
+            timestamp: '2026-01-01T00:00:01.000Z',
+          },
+        ]);
+        expect(stop.script).toContain('await callTool(step.tool, step.args);');
+        expect(stop.script).toContain('"tool":"page_navigate"');
+        expect(stop.script).toContain('"frameSelector":"iframe#auth"');
+        expect(stop.script).not.toContain('page_wait_for_selector');
+        expect(stop.script).not.toContain('#missing');
+      });
+
+      it('keeps ten concurrent session recordings isolated', async () => {
+        const current = { sessionId: 'default' };
+        const isolated = new TestBrowserToolHandlers(
+          collector as any,
+          pageController as any,
+          scriptManager as any,
+          consoleMonitor as any,
+          eventBus as any,
+          () => current.sessionId,
+        );
+        const sessionIds = Array.from({ length: 10 }, (_, index) => `session-${index}`);
+
+        for (const sessionId of sessionIds) {
+          current.sessionId = sessionId;
+          await isolated.handleBrowserCodegenStart();
+        }
+        for (const [index, sessionId] of sessionIds.entries()) {
+          await eventBus.emit('tool:called', {
+            toolName: 'page_navigate',
+            domain: 'browser',
+            sessionId,
+            timestamp: `2026-01-01T00:00:${String(index).padStart(2, '0')}.000Z`,
+            success: true,
+            args: {
+              url: `${TEST_URLS.root}?session=${index}`,
+              _meta: { sessionId },
+            },
+          });
+        }
+
+        for (const [index, sessionId] of sessionIds.entries()) {
+          current.sessionId = sessionId;
+          const stop = parseJson<any>(await isolated.handleBrowserCodegenStop());
+          expect(stop.sessionId).toBe(sessionId);
+          expect(stop.rawStepCount).toBe(1);
+          expect(stop.steps[0].args).toEqual({ url: `${TEST_URLS.root}?session=${index}` });
+        }
+      });
+
+      it('reports unavailable recorder when eventBus is missing', async () => {
+        const noBusHandlers = new TestBrowserToolHandlers(
+          collector as any,
+          pageController as any,
+          scriptManager as any,
+          consoleMonitor as any,
+        );
+
+        const body = parseJson<any>(await noBusHandlers.handleBrowserCodegenStart());
+        expect(body.success).toBe(false);
+      });
+
+      it('compacts wait_for_selector after page_type with same selector', async () => {
+        await handlers.handleBrowserCodegenStart();
+        await eventBus.emit('tool:called', {
+          toolName: 'page_type',
+          domain: 'browser',
+          timestamp: '2026-01-01T00:00:00.000Z',
+          success: true,
+          args: { selector: '#input', text: 'hello' },
+        } as any);
+        await eventBus.emit('tool:called', {
+          toolName: 'page_wait_for_selector',
+          domain: 'browser',
+          timestamp: '2026-01-01T00:00:01.000Z',
+          success: true,
+          args: { selector: '#input' },
+        } as any);
+        const stop = parseJson<any>(await handlers.handleBrowserCodegenStop());
+        expect(stop.stepCount).toBe(1);
+        expect(stop.steps[0].tool).toBe('page_type');
+      });
+
+      it('merges consecutive identical tool calls', async () => {
+        await handlers.handleBrowserCodegenStart();
+        await eventBus.emit('tool:called', {
+          toolName: 'page_navigate',
+          domain: 'browser',
+          timestamp: '2026-01-01T00:00:00.000Z',
+          success: true,
+          args: { url: TEST_URLS.root },
+        } as any);
+        await eventBus.emit('tool:called', {
+          toolName: 'page_navigate',
+          domain: 'browser',
+          timestamp: '2026-01-01T00:00:01.000Z',
+          success: true,
+          args: { url: TEST_URLS.root },
+        } as any);
+        const stop = parseJson<any>(await handlers.handleBrowserCodegenStop());
+        expect(stop.stepCount).toBe(1);
+        expect(stop.steps[0].timestamp).toBe('2026-01-01T00:00:01.000Z');
+      });
+    });
+
+    // ============ CAPTCHA Solving delegation ============
+    describe('captcha solving delegation', () => {
+      it('delegates handleCaptchaVisionSolve with collector', async () => {
+        const args = { mode: 'manual' };
+        const result = await handlers.handleCaptchaVisionSolve(args);
+        expect(captchaVisionSolveMock).toHaveBeenCalledWith(args, collector);
+        expect(result).toEqual({ from: 'captcha-vision', args });
+      });
+
+      it('delegates handleWidgetChallengeSolve with collector', async () => {
+        const args = { siteKey: 'abc' };
+        const result = await handlers.handleWidgetChallengeSolve(args);
+        expect(widgetChallengeSolveMock).toHaveBeenCalledWith(args, collector);
+        expect(result).toEqual({ from: 'widget-solve', args });
+      });
+    });
+
+    // ============ Browser status with camoufox ============
+    describe('browser status with camoufox active', () => {
+      it('returns camoufox status when camoufoxManager has a browser', async () => {
+        handlers.setActiveDriver('camoufox');
+        handlers.setCamoufoxManager({ getBrowser: vi.fn(() => ({})) });
+        handlers.setCamoufoxPage({ fake: true });
+
+        const body = parseJson<BrowserStatusResponse>(await handlers.handleBrowserStatus({}));
+        expect(body.driver).toBe('camoufox');
+        expect(body.running).toBe(true);
+        expect(body.hasActivePage).toBe(true);
+      });
+
+      it('returns camoufox status when camoufoxManager has no browser', async () => {
+        handlers.setActiveDriver('camoufox');
+        handlers.setCamoufoxManager({ getBrowser: vi.fn(() => null) });
+
+        const body = parseJson<BrowserStatusResponse>(await handlers.handleBrowserStatus({}));
+        expect(body.driver).toBe('camoufox');
+        expect(body.running).toBe(false);
+        expect(body.hasActivePage).toBe(false);
+      });
+
+      it('delegates to browserControl for chrome driver', async () => {
+        const result = await handlers.handleBrowserStatus({});
+        expect(browserControlMocks.handleBrowserStatus).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'browser-status', args: {} });
+      });
+    });
+
+    // ============ Browser close edge cases ============
+    describe('browser close edge cases', () => {
+      it('delegates directly to browserControl when activeDriver is chrome', async () => {
+        const result = await handlers.handleBrowserClose({});
+        expect(browserControlMocks.handleBrowserClose).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'browser-close', args: {} });
+      });
+    });
+
+    // ============ Browser launch chrome (no existing camoufox) ============
+    describe('browser launch chrome — no existing camoufox', () => {
+      it('launches chrome without closing camoufox when none is active', async () => {
+        const result = await handlers.handleBrowserLaunch({ driver: 'chrome' });
+        expect(browserControlMocks.handleBrowserLaunch).toHaveBeenCalledWith({ driver: 'chrome' });
+        expect(consoleMonitor.disable).not.toHaveBeenCalled();
+        expect(result).toEqual({ from: 'browser-launch', args: { driver: 'chrome' } });
+      });
+
+      it('defaults driver to chrome when not specified', async () => {
+        const result = await handlers.handleBrowserLaunch({});
+        expect(browserControlMocks.handleBrowserLaunch).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'browser-launch', args: {} });
+      });
+    });
+
+    // ============ Browser tabs ============
+    describe('browser tabs delegation', () => {
+      it('delegates handleBrowserListTabs', async () => {
+        const result = await handlers.handleBrowserListTabs({});
+        expect(browserControlMocks.handleBrowserListTabs).toHaveBeenCalledWith({});
+        expect(result).toEqual({ from: 'list-tabs', args: {} });
+      });
+
+      it('delegates handleBrowserSelectTab', async () => {
+        const args = { tabIndex: 1 };
+        const result = await handlers.handleBrowserSelectTab(args);
+        expect(browserControlMocks.handleBrowserSelectTab).toHaveBeenCalledWith(args);
+        expect(result).toEqual({ from: 'select-tab', args });
+      });
+    });
+
+    // ============ closeCamoufox error handling ============
+    describe('closeCamoufox error handling', () => {
+      it('continues closing camoufox even if consoleMonitor.disable throws', async () => {
+        consoleMonitor.disable.mockRejectedValueOnce(new Error('disable failed'));
+        handlers.setActiveDriver('camoufox');
+        const closeSpy = vi.fn(async () => {});
+        handlers.setCamoufoxManager({ close: closeSpy });
+
+        await handlers.handleBrowserLaunch({ driver: 'chrome' });
+
+        expect(consoleMonitor.disable).toHaveBeenCalled();
+        expect(consoleMonitor.clearPlaywrightPage).toHaveBeenCalled();
+        expect(closeSpy).toHaveBeenCalled();
+        expect(browserControlMocks.handleBrowserLaunch).toHaveBeenCalled();
+      });
+    });
+
+    // ============ getTabRegistry ============
+    describe('getTabRegistry', () => {
+      it('returns the TabRegistry instance', async () => {
+        const registry = handlers.getTabRegistry();
+        expect(registry).toBeDefined();
+      });
+
+      it('switches registry by logical session provider', () => {
+        const current = { value: 'session-a' as string | null };
+        const coordinator = {
+          getTabRegistry: vi.fn((sessionId: string | null) => ({
+            marker: `registry:${sessionId ?? 'default'}`,
+          })),
+        } as any;
+
+        const isolated = new TestBrowserToolHandlers(
+          collector as any,
+          pageController as any,
+          scriptManager as any,
+          consoleMonitor as any,
+          eventBus as any,
+          () => current.value,
+          coordinator,
+        );
+
+        expect(isolated.getTabRegistry()).toMatchObject({ marker: 'registry:session-a' });
+        current.value = 'session-b';
+        expect(isolated.getTabRegistry()).toMatchObject({ marker: 'registry:session-b' });
+      });
+    });
+
+    // ============ handleBrowserAttach without camoufox ============
+    describe('handleBrowserAttach without camoufox', () => {
+      it('attaches chrome without closing camoufox when none active', async () => {
+        await handlers.handleBrowserAttach({ browserURL: 'http://localhost:9222' });
+        expect(browserControlMocks.handleBrowserAttach).toHaveBeenCalledWith({
+          browserURL: 'http://localhost:9222',
+        });
+        expect(consoleMonitor.disable).not.toHaveBeenCalled();
+      });
+    });
+
+    // ============ getCamoufoxPage private method coverage ============
+    describe('getCamoufoxPage', () => {
+      it('returns failure response when camoufoxManager is null', async () => {
+        handlers.setActiveDriver('camoufox');
+        handlers.setCamoufoxManager(null);
+
+        // Navigate triggers getCamoufoxPage internally
+        const response = await handlers.handlePageNavigate({ url: TEST_URLS.root });
+        const body = parseJson<any>(response);
+        expect(body.success).toBe(false);
+        expect(body.message).toMatch(/Camoufox browser not launched/);
+      });
+    });
+  });
+});

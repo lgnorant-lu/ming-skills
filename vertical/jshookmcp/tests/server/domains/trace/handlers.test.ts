@@ -1,0 +1,2114 @@
+import { existsSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { TraceToolHandlers } from '@server/domains/trace/handlers';
+import { TraceRecorder } from '@modules/trace/TraceRecorder';
+import { TraceDB } from '@modules/trace/TraceDB';
+import type { MCPServerContext } from '@server/MCPServer.context';
+import { TEST_URLS, withPath } from '@tests/shared/test-urls';
+
+const parseToolResponse = <T>(response: unknown): T => {
+  const r = response as { content?: Array<{ text?: string }> };
+  return JSON.parse(r?.content?.[0]?.text ?? '{}') as T;
+};
+
+vi.mock('@utils/artifacts', () => ({
+  resolveArtifactPath: async () => ({ absolutePath: join(tmpdir(), 'auto.json') }),
+}));
+
+function createTmpDbPath(): string {
+  return join(tmpdir(), `test-handler-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
+}
+
+function cleanupDbArtifacts(path?: string | null): void {
+  if (!path) return;
+
+  try {
+    if (existsSync(path)) unlinkSync(path);
+  } catch {
+    /* cleanup best-effort */
+  }
+  try {
+    if (existsSync(path + '-wal')) unlinkSync(path + '-wal');
+  } catch {
+    /* cleanup best-effort */
+  }
+  try {
+    if (existsSync(path + '-shm')) unlinkSync(path + '-shm');
+  } catch {
+    /* cleanup best-effort */
+  }
+}
+
+function createMockContext(): Partial<MCPServerContext> {
+  return {
+    eventBus: {
+      onAny: vi.fn().mockReturnValue(() => {}),
+      emit: vi.fn(),
+      on: vi.fn().mockReturnValue(() => {}),
+      once: vi.fn().mockReturnValue(() => {}),
+    } as unknown as MCPServerContext['eventBus'],
+    collector: undefined,
+  };
+}
+
+describe('TraceToolHandlers', () => {
+  let dbPath = '';
+  let db: TraceDB | null = null;
+  let cleanupPaths: string[] = [];
+
+  beforeEach(() => {
+    dbPath = createTmpDbPath();
+    db = new TraceDB({ dbPath });
+    cleanupPaths = [dbPath];
+  });
+
+  afterEach(() => {
+    try {
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.close();
+    } catch {
+      /* already closed */
+    }
+    for (const p of cleanupPaths) {
+      cleanupDbArtifacts(p);
+    }
+  });
+
+  describe('handleQueryTraceSql', () => {
+    it('executes SQL query and returns results', async () => {
+      // Seed the DB with test data
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.insertEvent({
+        timestamp: 1000,
+        category: 'debugger',
+        eventType: 'Debugger.paused',
+        data: '{"reason": "breakpoint"}',
+        scriptId: '42',
+        lineNumber: 10,
+      });
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.flush();
+
+      // Create handler with a mock recorder that returns our DB
+      const recorder = new TraceRecorder();
+      vi.spyOn(recorder, 'getDB').mockReturnValue(db);
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ rowCount: number; columns: string[] }>(
+        await handler.handleQueryTraceSql({
+          sql: "SELECT * FROM events WHERE category = 'debugger'",
+        }),
+      );
+
+      expect(result.rowCount).toBe(1);
+      expect(result.columns).toContain('timestamp');
+    });
+
+    it('rejects when no DB available', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      await expect(handler.handleQueryTraceSql({ sql: 'SELECT * FROM events' })).rejects.toThrow(
+        /No active recording/,
+      );
+    });
+
+    it('rejects when sql parameter is missing', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      await expect(handler.handleQueryTraceSql({})).rejects.toThrow(/sql parameter is required/);
+    });
+
+    it('opens temporary DB when dbPath is provided', async () => {
+      // Seed the DB
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.insertEvent({
+        timestamp: 2000,
+        category: 'network',
+        eventType: 'Network.requestWillBeSent',
+        data: '{}',
+        scriptId: null,
+        lineNumber: null,
+      });
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.flush();
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ rows: any[][] }>(
+        await handler.handleQueryTraceSql({
+          sql: 'SELECT COUNT(*) as cnt FROM events',
+          dbPath,
+        }),
+      );
+
+      expect(result.rows[0]![0]).toBe(1);
+    });
+
+    it('wraps successful query tool output without nesting a ToolResponse', async () => {
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 1000,
+        category: 'runtime',
+        eventType: 'Runtime.consoleAPICalled',
+        data: '{}',
+      });
+      // @ts-expect-error
+      db.flush();
+      const recorder = new TraceRecorder();
+      vi.spyOn(recorder, 'getDB').mockReturnValue(db);
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ success: boolean; rowCount: number; content?: unknown }>(
+        await handler.handleQueryTraceSqlTool({ sql: 'SELECT * FROM events' }),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.rowCount).toBe(1);
+      expect(result.content).toBeUndefined();
+    });
+
+    it('turns query tool validation errors into structured failure responses', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ success: boolean; error: string; message: string }>(
+        await handler.handleQueryTraceSqlTool({}),
+      );
+
+      expect(result).toMatchObject({
+        success: false,
+        error: 'sql parameter is required',
+        message: 'sql parameter is required',
+      });
+    });
+  });
+
+  describe('handleSeekToTimestamp', () => {
+    it('assembles state snapshot at a given timestamp', async () => {
+      // Seed with various event types
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.insertEvent({
+        timestamp: 900,
+        category: 'debugger',
+        eventType: 'Debugger.paused',
+        data: '{"reason": "breakpoint"}',
+        scriptId: '10',
+        lineNumber: 5,
+      });
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.insertEvent({
+        timestamp: 1000,
+        category: 'network',
+        eventType: 'Network.loadingFinished',
+        data: '{"requestId": "1"}',
+        scriptId: null,
+        lineNumber: null,
+      });
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.insertEvent({
+        timestamp: 1050,
+        category: 'runtime',
+        eventType: 'Runtime.consoleAPICalled',
+        data: '{"type": "log"}',
+        scriptId: null,
+        lineNumber: null,
+      });
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.insertMemoryDelta({
+        timestamp: 950,
+        address: '0x1000',
+        oldValue: '0x00',
+        newValue: '0xFF',
+        size: 4,
+        valueType: 'int32',
+      });
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.flush();
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{
+        seekTimestamp: number;
+        events: any[];
+        debuggerState: { recentEvents: any[] };
+        memoryState: { addressValues: any[] };
+        networkState: { completedRequests: any[] };
+      }>(
+        await handler.handleSeekToTimestamp({
+          timestamp: 1000,
+          dbPath,
+          windowMs: 100,
+        }),
+      );
+
+      expect(result.seekTimestamp).toBe(1000);
+      expect(result.events.length).toBeGreaterThanOrEqual(1);
+      expect(result.debuggerState.recentEvents.length).toBeGreaterThanOrEqual(1);
+      expect(result.memoryState.addressValues.length).toBeGreaterThanOrEqual(1);
+      expect(result.networkState.completedRequests.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('omits wall-clock-only state for monotonic seeks', async () => {
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 2000,
+        wallTime: 2000,
+        monotonicTime: 20,
+        category: 'runtime',
+        eventType: 'Runtime.consoleAPICalled',
+        data: '{"type":"log"}',
+        scriptId: null,
+        lineNumber: null,
+      });
+      // @ts-expect-error
+      db.insertMemoryDelta({
+        timestamp: 1950,
+        address: '0x1000',
+        oldValue: '0x00',
+        newValue: '0xFF',
+        size: 4,
+        valueType: 'int32',
+      });
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 1980,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({ nodeCount: 1 }),
+      });
+      // @ts-expect-error
+      db.flush();
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{
+        events: any[];
+        memoryState: { addressValues: any[]; omittedReason?: string };
+        nearestHeapSnapshot: Record<string, unknown> | null;
+        nearestHeapSnapshotOmittedReason?: string;
+      }>(
+        await handler.handleSeekToTimestamp({
+          timestamp: 20,
+          dbPath,
+          windowMs: 10,
+          timeDomain: 'monotonic',
+        }),
+      );
+
+      expect(result.events.length).toBe(1);
+      expect(result.memoryState.addressValues).toEqual([]);
+      expect(result.memoryState.omittedReason).toMatch(/wall-clock timestamps/);
+      expect(result.nearestHeapSnapshot).toBeNull();
+      expect(result.nearestHeapSnapshotOmittedReason).toMatch(/wall-clock timestamps/);
+    });
+
+    it('handles invalid JSON in event data safely', async () => {
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 900,
+        category: 'debugger',
+        eventType: 'Debugger.paused',
+        data: '{invalid:json',
+        scriptId: '10',
+        lineNumber: 5,
+      });
+      // @ts-expect-error
+      db.flush();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ events: any[] }>(
+        await handler.handleSeekToTimestamp({
+          timestamp: 1000,
+          dbPath,
+          windowMs: 100,
+        }),
+      );
+
+      expect(result.events[0].data).toBe('{invalid:json');
+    });
+
+    it('returns null nearest heap snapshot when none exist', async () => {
+      // Seed at least one event so the handler can build a timeline
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 900,
+        category: 'debugger',
+        eventType: 'Debugger.paused',
+        data: '{}',
+        scriptId: '10',
+        lineNumber: 5,
+      });
+      // @ts-expect-error
+      db.flush();
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ nearestHeapSnapshot: null | Record<string, unknown> }>(
+        await handler.handleSeekToTimestamp({
+          timestamp: 1000,
+          dbPath,
+          windowMs: 50,
+        }),
+      );
+
+      expect(result.nearestHeapSnapshot).toBeNull();
+    });
+
+    it('rejects when timestamp parameter is missing', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      await expect(handler.handleSeekToTimestamp({})).rejects.toThrow(
+        /timestamp parameter is required/,
+      );
+    });
+
+    it('uses active recording DB when dbPath is not provided', async () => {
+      const recorder = new TraceRecorder();
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 1000,
+        category: 'network',
+        eventType: 'Network.requestWillBeSent',
+        data: '{}',
+      });
+      // @ts-expect-error
+      db.flush();
+      vi.spyOn(recorder, 'getDB').mockReturnValue(db);
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ events: any[] }>(
+        await handler.handleSeekToTimestamp({ timestamp: 1000 }),
+      );
+      expect(result.events.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('returns profiler samples in the seek window when present', async () => {
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 1000,
+        category: 'runtime',
+        eventType: 'Runtime.consoleAPICalled',
+        data: '{}',
+        scriptId: null,
+        lineNumber: null,
+      });
+      // @ts-expect-error
+      db.insertSample({
+        timestamp: 1010,
+        selfTime: 8,
+        aggregateTime: 10,
+        functionName: 'hotFn',
+        scriptId: 'script-1',
+        url: 'app.js',
+        lineNumber: 3,
+        columnNumber: 1,
+      });
+      // @ts-expect-error
+      db.flush();
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ samplesInWindow: Array<{ functionName: string }> }>(
+        await handler.handleSeekToTimestamp({
+          timestamp: 1000,
+          dbPath,
+          windowMs: 50,
+        }),
+      );
+
+      expect(result.samplesInWindow).toHaveLength(1);
+      expect(result.samplesInWindow[0]?.functionName).toBe('hotFn');
+    });
+
+    it('returns structured runtime console and exception state in the seek window', async () => {
+      // @ts-expect-error
+      db.insertConsoleLog({
+        timestamp: 1010,
+        wallTime: 1010,
+        monotonicTime: 10,
+        level: 'warning',
+        text: 'watch this',
+        args: '[{"value":"watch this"}]',
+        stackTrace: '{"callFrames":[]}',
+        scriptId: 'console-script',
+        lineNumber: 4,
+        columnNumber: 2,
+        executionContextId: 1,
+      });
+      // @ts-expect-error
+      db.insertException({
+        timestamp: 1020,
+        wallTime: 1020,
+        monotonicTime: 20,
+        text: 'Uncaught Error: boom',
+        exceptionId: 5,
+        url: 'app.js',
+        scriptId: 'exception-script',
+        lineNumber: 8,
+        columnNumber: 1,
+        description: 'Error: boom',
+        stackTrace: '{"callFrames":[]}',
+        executionContextId: 1,
+      });
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{
+        runtimeState: {
+          consoleLogs: Array<{ text: string; level: string; scriptId: string }>;
+          exceptions: Array<{ text: string; exceptionId: number; description: string }>;
+        };
+      }>(
+        await handler.handleSeekToTimestamp({
+          timestamp: 1000,
+          dbPath,
+          windowMs: 50,
+        }),
+      );
+
+      expect(result.runtimeState.consoleLogs).toHaveLength(1);
+      expect(result.runtimeState.consoleLogs[0]).toMatchObject({
+        level: 'warning',
+        text: 'watch this',
+        scriptId: 'console-script',
+      });
+      expect(result.runtimeState.exceptions).toHaveLength(1);
+      expect(result.runtimeState.exceptions[0]).toMatchObject({
+        exceptionId: 5,
+        description: 'Error: boom',
+      });
+    });
+
+    it('direction=forward returns only events at or after the seek timestamp', async () => {
+      for (const ts of [900, 1000, 1100]) {
+        // @ts-expect-error
+        db.insertEvent({
+          timestamp: ts,
+          category: 'debugger',
+          eventType: 'Debugger.paused',
+          data: '{}',
+          scriptId: '1',
+          lineNumber: ts,
+        });
+      }
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ events: Array<{ timestamp: number }> }>(
+        await handler.handleSeekToTimestamp({
+          timestamp: 1000,
+          dbPath,
+          windowMs: 100,
+          direction: 'forward',
+        }),
+      );
+
+      const timestamps = result.events.map((e) => e.timestamp).toSorted((a, b) => a - b);
+      // window is [1000, 1100]; ts 900 (strictly before) is excluded
+      expect(timestamps).toEqual([1000, 1100]);
+    });
+
+    it('direction=backward returns only events at or before the seek timestamp', async () => {
+      for (const ts of [900, 1000, 1100]) {
+        // @ts-expect-error
+        db.insertEvent({
+          timestamp: ts,
+          category: 'debugger',
+          eventType: 'Debugger.paused',
+          data: '{}',
+          scriptId: '1',
+          lineNumber: ts,
+        });
+      }
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ events: Array<{ timestamp: number }> }>(
+        await handler.handleSeekToTimestamp({
+          timestamp: 1000,
+          dbPath,
+          windowMs: 100,
+          direction: 'backward',
+        }),
+      );
+
+      const timestamps = result.events.map((e) => e.timestamp).toSorted((a, b) => a - b);
+      // window is [900, 1000]; ts 1100 (strictly after) is excluded
+      expect(timestamps).toEqual([900, 1000]);
+    });
+
+    it('defaults to the symmetric both window when direction is omitted', async () => {
+      for (const ts of [900, 1000, 1100]) {
+        // @ts-expect-error
+        db.insertEvent({
+          timestamp: ts,
+          category: 'debugger',
+          eventType: 'Debugger.paused',
+          data: '{}',
+          scriptId: '1',
+          lineNumber: ts,
+        });
+      }
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ events: Array<{ timestamp: number }> }>(
+        await handler.handleSeekToTimestamp({ timestamp: 1000, dbPath, windowMs: 100 }),
+      );
+
+      const timestamps = result.events.map((e) => e.timestamp).toSorted((a, b) => a - b);
+      // symmetric [900, 1100] — all three events
+      expect(timestamps).toEqual([900, 1000, 1100]);
+    });
+  });
+
+  describe('handleGetTraceSamples', () => {
+    it('returns top hot functions aggregated by self time', async () => {
+      // @ts-expect-error
+      db.insertSample({
+        timestamp: 1000,
+        selfTime: 5,
+        aggregateTime: 8,
+        functionName: 'warm',
+        scriptId: '1',
+        url: 'a.js',
+        lineNumber: 1,
+        columnNumber: 0,
+      });
+      // @ts-expect-error
+      db.insertSample({
+        timestamp: 1010,
+        selfTime: 5,
+        aggregateTime: 8,
+        functionName: 'warm',
+        scriptId: '1',
+        url: 'a.js',
+        lineNumber: 1,
+        columnNumber: 0,
+      });
+      // @ts-expect-error
+      db.insertSample({
+        timestamp: 1020,
+        selfTime: 30,
+        aggregateTime: 40,
+        functionName: 'hot',
+        scriptId: '2',
+        url: 'b.js',
+        lineNumber: 9,
+        columnNumber: 0,
+      });
+      // @ts-expect-error
+      db.flush();
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{
+        mode: string;
+        functionCount: number;
+        topFunctions: Array<{ functionName: string; selfTime: number; sampleCount: number }>;
+      }>(await handler.handleGetTraceSamples({ dbPath }));
+
+      expect(result.mode).toBe('top');
+      expect(result.functionCount).toBe(2);
+      expect(result.topFunctions[0]?.functionName).toBe('hot');
+      expect(result.topFunctions[0]?.selfTime).toBe(30);
+      expect(result.topFunctions[1]?.functionName).toBe('warm');
+      expect(result.topFunctions[1]?.selfTime).toBe(10);
+      expect(result.topFunctions[1]?.sampleCount).toBe(2);
+    });
+
+    it('returns samples for a single function in function mode', async () => {
+      // @ts-expect-error
+      db.insertSample({
+        timestamp: 1000,
+        selfTime: 5,
+        aggregateTime: 8,
+        functionName: 'target',
+        scriptId: '1',
+        url: 'a.js',
+        lineNumber: 1,
+        columnNumber: 0,
+      });
+      // @ts-expect-error
+      db.insertSample({
+        timestamp: 1010,
+        selfTime: 3,
+        aggregateTime: 4,
+        functionName: 'other',
+        scriptId: '2',
+        url: 'b.js',
+        lineNumber: 2,
+        columnNumber: 0,
+      });
+      // @ts-expect-error
+      db.flush();
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{
+        mode: string;
+        functionName: string;
+        sampleCount: number;
+        samples: Array<{ functionName: string }>;
+      }>(
+        await handler.handleGetTraceSamples({
+          dbPath,
+          mode: 'function',
+          functionName: 'target',
+        }),
+      );
+
+      expect(result.mode).toBe('function');
+      expect(result.functionName).toBe('target');
+      expect(result.sampleCount).toBe(1);
+      expect(result.samples[0]?.functionName).toBe('target');
+    });
+
+    it('returns samples within a time window in window mode', async () => {
+      // @ts-expect-error
+      db.insertSample({
+        timestamp: 1000,
+        selfTime: 5,
+        aggregateTime: 8,
+        functionName: 'in',
+        scriptId: '1',
+        url: 'a.js',
+        lineNumber: 1,
+        columnNumber: 0,
+      });
+      // @ts-expect-error
+      db.insertSample({
+        timestamp: 5000,
+        selfTime: 3,
+        aggregateTime: 4,
+        functionName: 'out',
+        scriptId: '2',
+        url: 'b.js',
+        lineNumber: 2,
+        columnNumber: 0,
+      });
+      // @ts-expect-error
+      db.flush();
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{
+        mode: string;
+        sampleCount: number;
+        samples: Array<{ functionName: string }>;
+      }>(
+        await handler.handleGetTraceSamples({
+          dbPath,
+          mode: 'window',
+          timestamp: 1000,
+          windowMs: 50,
+        }),
+      );
+
+      expect(result.mode).toBe('window');
+      expect(result.sampleCount).toBe(1);
+      expect(result.samples[0]?.functionName).toBe('in');
+    });
+
+    it('rejects function mode without functionName', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+      // @ts-expect-error
+      db.close();
+
+      await expect(handler.handleGetTraceSamples({ dbPath, mode: 'function' })).rejects.toThrow(
+        /functionName is required/,
+      );
+    });
+
+    it('rejects window mode without timestamp', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+      // @ts-expect-error
+      db.close();
+
+      await expect(handler.handleGetTraceSamples({ dbPath, mode: 'window' })).rejects.toThrow(
+        /timestamp is required/,
+      );
+    });
+
+    it('wraps top-mode tool output without nesting a ToolResponse', async () => {
+      // @ts-expect-error
+      db.insertSample({
+        timestamp: 1000,
+        selfTime: 5,
+        aggregateTime: 8,
+        functionName: 'fn',
+        scriptId: '1',
+        url: 'a.js',
+        lineNumber: 1,
+        columnNumber: 0,
+      });
+      // @ts-expect-error
+      db.flush();
+      const recorder = new TraceRecorder();
+      vi.spyOn(recorder, 'getDB').mockReturnValue(db);
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ success: boolean; mode: string; content?: unknown }>(
+        await handler.handleGetTraceSamplesTool({}),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.mode).toBe('top');
+      expect(result.content).toBeUndefined();
+    });
+  });
+
+  describe('handleGetTraceNetworkFlow', () => {
+    it('returns request metadata, chunks, events, and summarized body content', async () => {
+      // @ts-expect-error
+      db.upsertNetworkResource({
+        requestId: 'req-trace',
+        url: withPath(TEST_URLS.root, 'api'),
+        method: 'GET',
+        resourceType: 'XHR',
+        requestHeaders: '{"accept":"application/json"}',
+        requestPostData: null,
+        status: 200,
+        statusText: 'OK',
+        responseHeaders: '{"content-type":"application/json"}',
+        mimeType: 'application/json',
+        protocol: 'h2',
+        remoteAddress: '127.0.0.1:443',
+        fromDiskCache: false,
+        fromServiceWorker: false,
+        startedWallTime: 1000,
+        responseWallTime: 1100,
+        finishedWallTime: 1200,
+        startedMonotonicTime: 10,
+        responseMonotonicTime: 20,
+        finishedMonotonicTime: 30,
+        encodedDataLength: 4096,
+        receivedDataLength: 4096,
+        receivedEncodedDataLength: 4096,
+        chunkCount: 1,
+        streamingEnabled: true,
+        streamingSupported: true,
+        streamingError: null,
+        bodyCaptureState: 'inline',
+        bodyInline: 'x'.repeat(2048),
+        bodyArtifactPath: null,
+        bodyBase64Encoded: false,
+        bodySize: 2048,
+        bodyTruncated: false,
+        bodyError: null,
+        failed: false,
+        errorText: null,
+      });
+      // @ts-expect-error
+      db.insertNetworkChunk({
+        requestId: 'req-trace',
+        sequence: 1,
+        timestamp: 1150,
+        monotonicTime: 25,
+        dataLength: 2048,
+        encodedDataLength: 2048,
+        chunkData: Buffer.from('x'.repeat(32)).toString('base64'),
+        chunkIsBase64: true,
+      });
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 1100,
+        category: 'network',
+        eventType: 'Network.responseReceived',
+        data: '{"requestId":"req-trace"}',
+        scriptId: null,
+        lineNumber: null,
+        requestId: 'req-trace',
+        wallTime: 1100,
+        monotonicTime: 20,
+        sequence: 1,
+      });
+      // @ts-expect-error
+      db.flush();
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{
+        requestId: string;
+        request: { protocol: string };
+        body: { summary: { truncated: boolean } };
+        chunks: { total: number; returned: number };
+        events: Array<{ eventType: string }>;
+      }>(
+        await handler.handleGetTraceNetworkFlow({
+          requestId: 'req-trace',
+          dbPath,
+          maxBodyBytes: 1024,
+        }),
+      );
+
+      expect(result.requestId).toBe('req-trace');
+      expect(result.request.protocol).toBe('h2');
+      expect(result.body.summary.truncated).toBe(true);
+      expect(result.chunks.total).toBe(1);
+      expect(result.chunks.returned).toBe(1);
+      expect(result.events[0]?.eventType).toBe('Network.responseReceived');
+    });
+
+    it('rejects non-string dbPath values', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      await expect(
+        handler.handleGetTraceNetworkFlow({
+          requestId: 'req-trace',
+          dbPath: 1234,
+        }),
+      ).rejects.toThrow(/dbPath must be a string/);
+    });
+  });
+
+  describe('handleDiffHeapSnapshots', () => {
+    it('computes differences between two snapshots', async () => {
+      // Insert two snapshots with different summaries
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 1000,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({
+          totalSize: 1000,
+          nodeCount: 10,
+        }),
+      });
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 2000,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({
+          totalSize: 1500,
+          nodeCount: 15,
+          objectCounts: { String: 8, Array: 3, Map: 2, Object: 2 },
+        }),
+      });
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{
+        diff: {
+          added: Array<{ name: string }>;
+          removed: any[];
+          changed: Array<{ name: string; delta: number }>;
+          totalSizeDelta: number;
+        };
+      }>(
+        await handler.handleDiffHeapSnapshots({
+          snapshotId1: 1,
+          snapshotId2: 2,
+          dbPath,
+        }),
+      );
+
+      expect(result.diff.totalSizeDelta).toBe(500);
+      expect(result.diff.added.some((a) => a.name === 'String')).toBe(true);
+    });
+
+    it('uses active recording DB when dbPath is not provided', async () => {
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 1000,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({ objectCounts: { ObjectToKeep: 5 } }),
+      });
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 2000,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({ objectCounts: { ObjectToKeep: 5 } }),
+      });
+      // @ts-expect-error
+      db.flush();
+
+      const recorder = new TraceRecorder();
+      vi.spyOn(recorder, 'getDB').mockReturnValue(db);
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<Record<string, any>>(
+        await handler.handleDiffHeapSnapshots({
+          snapshotId1: 1,
+          snapshotId2: 2,
+        }),
+      );
+
+      expect(result.diff.changedCount).toBe(0);
+    });
+
+    it('handles removed keys from snapshot1 to snapshot2', async () => {
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 1000,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({ objectCounts: { ObjectToRemove: 5 } }),
+      });
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 2000,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({ objectCounts: {} }),
+      });
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<Record<string, any>>(
+        await handler.handleDiffHeapSnapshots({
+          snapshotId1: 1,
+          snapshotId2: 2,
+          dbPath,
+        }),
+      );
+
+      expect(result.diff.removed.some((r: any) => r.name === 'ObjectToRemove')).toBe(true);
+    });
+
+    it('reports changed counts when snapshot object counts differ', async () => {
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 1000,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({
+          totalSize: 100,
+          nodeCount: 2,
+          objectCounts: { ChangedObject: 2, StableObject: 4 },
+        }),
+      });
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 2000,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({
+          totalSize: 200,
+          nodeCount: 3,
+          objectCounts: { ChangedObject: 5, StableObject: 4 },
+        }),
+      });
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{
+        diff: { changed: Array<{ name: string; delta: number }> };
+      }>(
+        await handler.handleDiffHeapSnapshots({
+          snapshotId1: 1,
+          snapshotId2: 2,
+          dbPath,
+        }),
+      );
+
+      expect(result.diff.changed.some((c) => c.name === 'ChangedObject')).toBe(true);
+      expect(result.diff.changed.find((c) => c.name === 'ChangedObject')?.delta).toBe(3);
+      // @ts-expect-error
+      expect(result.diff.totalSizeDelta).toBe(100);
+    });
+
+    it('rejects when snapshotIds are missing', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      await expect(handler.handleDiffHeapSnapshots({})).rejects.toThrow(
+        /snapshotId1 and snapshotId2 are required/,
+      );
+    });
+
+    it('throws if snapshot1 not found', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      await expect(
+        handler.handleDiffHeapSnapshots({
+          snapshotId1: 999,
+          snapshotId2: 2,
+          dbPath,
+        }),
+      ).rejects.toThrow(/not found/);
+    });
+
+    it('throws if snapshot2 not found', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 1000,
+        snapshotData: Buffer.from('{}'),
+        summary: '{}',
+      });
+      // @ts-expect-error
+      db.flush();
+
+      await expect(
+        handler.handleDiffHeapSnapshots({
+          snapshotId1: 1,
+          snapshotId2: 999,
+          dbPath,
+        }),
+      ).rejects.toThrow(/not found/);
+    });
+
+    it('reports per-class retained-size delta as topRetainers', async () => {
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 1000,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({
+          totalSize: 100,
+          nodeCount: 2,
+          objectCounts: { Array: 1, Object: 1 },
+          objectSizes: { Array: 40, Object: 60 },
+        }),
+      });
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 2000,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({
+          totalSize: 400,
+          nodeCount: 3,
+          objectCounts: { Array: 2, Object: 1 },
+          objectSizes: { Array: 340, Object: 60 },
+        }),
+      });
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{
+        diff: {
+          topRetainers: Array<{
+            name: string;
+            sizeBefore: number;
+            sizeAfter: number;
+            sizeDelta: number;
+          }>;
+        };
+      }>(
+        await handler.handleDiffHeapSnapshots({
+          snapshotId1: 1,
+          snapshotId2: 2,
+          dbPath,
+        }),
+      );
+
+      // Array grew 40 → 340 (+300, the actual leak signal); Object unchanged → excluded.
+      expect(result.diff.topRetainers).toHaveLength(1);
+      expect(result.diff.topRetainers[0]).toMatchObject({
+        name: 'Array',
+        sizeBefore: 40,
+        sizeAfter: 340,
+        sizeDelta: 300,
+      });
+    });
+
+    it('returns empty topRetainers when snapshots predate objectSizes', async () => {
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 1000,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({ objectCounts: { X: 1 } }),
+      });
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 2000,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({ objectCounts: { X: 2 } }),
+      });
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ diff: { topRetainers: unknown[] } }>(
+        await handler.handleDiffHeapSnapshots({
+          snapshotId1: 1,
+          snapshotId2: 2,
+          dbPath,
+        }),
+      );
+
+      // No objectSizes → no fabrication; empty list, but counts still diff.
+      expect(result.diff.topRetainers).toEqual([]);
+    });
+  });
+
+  describe('handleExportTrace', () => {
+    it('exports to Chrome Trace Event JSON format', async () => {
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.insertEvent({
+        timestamp: 1000,
+        category: 'debugger',
+        eventType: 'Debugger.paused',
+        data: '{"reason": "breakpoint"}',
+        scriptId: '42',
+        lineNumber: 10,
+      });
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.insertEvent({
+        timestamp: 2000,
+        category: 'debugger',
+        eventType: 'Debugger.resumed',
+        data: '{}',
+        scriptId: null,
+        lineNumber: null,
+      });
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 3000,
+        category: 'network',
+        eventType: 'Network.requestWillBeSent',
+        data: '{}',
+        scriptId: null,
+        lineNumber: null,
+      });
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.flush();
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const outputPath = join(tmpdir(), `test-export-${Date.now()}.json`);
+      cleanupPaths.push(outputPath);
+
+      const result = parseToolResponse<{
+        eventCount: number;
+        threadCount: number;
+        format: string;
+        exportedPath: string;
+      }>(
+        await handler.handleExportTrace({
+          dbPath,
+          outputPath,
+        }),
+      );
+
+      expect(result.eventCount).toBe(3);
+      expect(result.threadCount).toBe(2);
+      expect(result.format).toBe('Chrome Trace Event JSON');
+      expect(existsSync(outputPath)).toBe(true);
+
+      // Verify the exported JSON structure
+      const { readFileSync } = await import('node:fs');
+      const exported = JSON.parse(readFileSync(outputPath, 'utf-8')) as Array<{
+        name: string;
+        cat: string;
+        ph: string;
+        ts: number;
+        pid: number;
+        tid: number;
+        s?: string;
+        args?: { name?: string };
+      }>;
+      // Metadata thread_name events are prepended (one per used tid).
+      const metadataEvents = exported.filter((e) => e.ph === 'M');
+      const realEvents = exported.filter((e) => e.ph !== 'M');
+      expect(metadataEvents).toHaveLength(2);
+      expect(realEvents).toHaveLength(3);
+
+      // Thread metadata should expose friendly names for each track.
+      const threadNames = metadataEvents.map((e) => e.args?.name);
+      expect(threadNames).toContain('Debugger');
+      expect(threadNames).toContain('Network');
+
+      // Debugger.paused should be 'B' (begin) on the debugger thread (tid 2)
+      expect(realEvents[0]!.ph).toBe('B');
+      expect(realEvents[0]!.name).toBe('Debugger.paused');
+      expect(realEvents[0]!.cat).toBe('debugger');
+      expect(realEvents[0]!.pid).toBe(1);
+      expect(realEvents[0]!.tid).toBe(2);
+      // Timestamp should be in microseconds (1000ms * 1000 = 1000000µs)
+      expect(realEvents[0]!.ts).toBe(1000000);
+
+      // Debugger.resumed should be 'E' (end) on the same debugger thread
+      expect(realEvents[1]!.ph).toBe('E');
+      expect(realEvents[1]!.tid).toBe(2);
+
+      // Network instant event should land on a separate thread (tid 3)
+      expect(realEvents[2]!.ph).toBe('i');
+      expect(realEvents[2]!.s).toBe('g');
+      expect(realEvents[2]!.tid).toBe(3);
+      expect(realEvents[2]!.cat).toBe('network');
+    });
+
+    it('maps each event category to a distinct Chrome Trace Event thread id', async () => {
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.insertEvent({
+        timestamp: 1000,
+        category: 'debugger',
+        eventType: 'Debugger.paused',
+        data: '{}',
+        scriptId: '1',
+        lineNumber: 1,
+      });
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 2000,
+        category: 'network',
+        eventType: 'Network.requestWillBeSent',
+        data: '{}',
+        scriptId: null,
+        lineNumber: null,
+      });
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 3000,
+        category: 'runtime',
+        eventType: 'Runtime.consoleAPICalled',
+        data: '{}',
+        scriptId: null,
+        lineNumber: null,
+      });
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 4000,
+        category: 'page',
+        eventType: 'Page.frameNavigated',
+        data: '{}',
+        scriptId: null,
+        lineNumber: null,
+      });
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 5000,
+        category: 'unknown-category',
+        eventType: 'Something.else',
+        data: '{}',
+        scriptId: null,
+        lineNumber: null,
+      });
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.flush();
+      // @ts-expect-error — auto-suppressed [TS18047]
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const outputPath = join(tmpdir(), `test-export-tids-${Date.now()}.json`);
+      cleanupPaths.push(outputPath);
+
+      const result = parseToolResponse<{ eventCount: number; threadCount: number }>(
+        await handler.handleExportTrace({
+          dbPath,
+          outputPath,
+        }),
+      );
+
+      expect(result.eventCount).toBe(5);
+      // 4 known categories (debugger/network/runtime/page) + 1 default tid for unknown
+      expect(result.threadCount).toBe(5);
+
+      const { readFileSync } = await import('node:fs');
+      const exported = JSON.parse(readFileSync(outputPath, 'utf-8')) as Array<{
+        cat: string;
+        ph: string;
+        tid: number;
+      }>;
+      const tidByCat = new Map<string, number>();
+      for (const e of exported) {
+        if (e.ph === 'M') continue;
+        tidByCat.set(e.cat, e.tid);
+      }
+      expect(tidByCat.get('debugger')).toBe(2);
+      expect(tidByCat.get('network')).toBe(3);
+      expect(tidByCat.get('runtime')).toBe(5);
+      expect(tidByCat.get('page')).toBe(6);
+      // Unknown categories fall back to the default tid (1)
+      expect(tidByCat.get('unknown-category')).toBe(1);
+      // All mapped tids are distinct — no two categories collapse onto one track
+      const distinctTids = new Set(tidByCat.values());
+      expect(distinctTids.size).toBe(tidByCat.size);
+    });
+
+    it('exports CPU profile samples as flame-graph X events on a dedicated track', async () => {
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 1000,
+        category: 'debugger',
+        eventType: 'Debugger.paused',
+        data: '{}',
+        scriptId: '1',
+        lineNumber: 1,
+      });
+      // @ts-expect-error
+      db.insertSample({
+        timestamp: 1000,
+        selfTime: 5,
+        aggregateTime: 8,
+        functionName: 'hotFn',
+        scriptId: '10',
+        url: 'app.js',
+        lineNumber: 42,
+        columnNumber: 0,
+      });
+      // @ts-expect-error
+      db.insertSample({
+        timestamp: 1010,
+        selfTime: 3,
+        aggregateTime: 4,
+        functionName: 'hotFn',
+        scriptId: '10',
+        url: 'app.js',
+        lineNumber: 42,
+        columnNumber: 0,
+      });
+      // @ts-expect-error
+      db.flush();
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const outputPath = join(tmpdir(), `test-export-cpu-${Date.now()}.json`);
+      cleanupPaths.push(outputPath);
+
+      const result = parseToolResponse<{
+        eventCount: number;
+        cpuProfileFunctions: number;
+        threadCount: number;
+      }>(await handler.handleExportTrace({ dbPath, outputPath }));
+
+      // eventCount stays CDP-event-only; cpu profile counted separately
+      expect(result.eventCount).toBe(1);
+      expect(result.cpuProfileFunctions).toBe(1);
+      // debugger tid 2 + cpu-profile tid 8
+      expect(result.threadCount).toBe(2);
+
+      const { readFileSync } = await import('node:fs');
+      const exported = JSON.parse(readFileSync(outputPath, 'utf-8')) as Array<{
+        name: string;
+        cat: string;
+        ph: string;
+        tid: number;
+        dur?: number;
+        args?: Record<string, unknown>;
+      }>;
+      const cpuEvents = exported.filter((e) => e.cat === 'cpu-profile');
+      expect(cpuEvents).toHaveLength(1);
+      expect(cpuEvents[0]?.ph).toBe('X');
+      expect(cpuEvents[0]?.tid).toBe(8);
+      expect(cpuEvents[0]?.name).toBe('hotFn');
+      // selfTime 5 + 3 = 8ms → 8000µs duration
+      expect(cpuEvents[0]?.dur).toBe(8000);
+      expect(cpuEvents[0]?.args?.sampleCount).toBe(2);
+      // thread_name metadata for the CPU Profile track must be present
+      const cpuThreadName = exported.find((e) => e.ph === 'M' && e.tid === 8);
+      expect(cpuThreadName?.args?.name).toBe('CPU Profile');
+    });
+
+    it('exports using automatically resolved artifact path when outputPath is omitted', async () => {
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ exportedPath: string }>(
+        await handler.handleExportTrace({
+          dbPath,
+        }),
+      );
+
+      expect(result.exportedPath).toBe(join(tmpdir(), 'auto.json'));
+    });
+
+    it('throws if no dbPath and no active recording in getDbForReading', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      await expect(handler.handleExportTrace({})).rejects.toThrow(/No active recording/);
+    });
+
+    it('rejects export paths outside project and temp roots', async () => {
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+      const outsidePath = process.platform === 'win32' ? '..\\..\\trace.json' : '../../trace.json';
+
+      await expect(
+        handler.handleExportTrace({
+          dbPath,
+          outputPath: outsidePath,
+        }),
+      ).rejects.toThrow(/outputPath must be within/);
+    });
+
+    it('exports to HAR 1.4 format with structured entries and captured bodies', async () => {
+      // Insert a network resource via the internal upsert statement
+      // (queryWithParams rejects writes). Column order:
+      // request_id, url, method, resource_type, request_headers, request_post_data,
+      // status, status_text, response_headers, mime_type, protocol, remote_address,
+      // from_disk_cache, from_service_worker, started_wall_time, response_wall_time,
+      // finished_wall_time, started_monotonic_time, response_monotonic_time,
+      // finished_monotonic_time, encoded_data_length, received_data_length,
+      // received_encoded_data_length, chunk_count, streaming_enabled,
+      // streaming_supported, streaming_error, body_capture_state, body_inline,
+      // body_artifact_path, body_base64_encoded, body_size, body_truncated,
+      // body_error, failed, error_text  (36 params)
+      const startedTs = Date.now();
+      // @ts-expect-error — accessing internal upsert statement
+      const stmt = db['upsertNetworkResourceStmt'];
+      stmt.run(
+        'req-test-1',
+        withPath(TEST_URLS.api, 'v1/test'),
+        'GET',
+        'XHR',
+        JSON.stringify({ 'Content-Type': 'application/json' }),
+        '{"query":"value"}',
+        200,
+        'OK',
+        JSON.stringify({ 'Content-Type': 'application/json' }),
+        'application/json',
+        'HTTP/1.1',
+        '127.0.0.1',
+        0,
+        0,
+        startedTs,
+        startedTs + 50,
+        startedTs + 100,
+        null,
+        null,
+        null,
+        1024,
+        1024,
+        1024,
+        0,
+        1,
+        0,
+        null,
+        'inline',
+        '{"ok":true}',
+        null,
+        0,
+        0,
+        0,
+        null,
+        0,
+        null,
+      );
+
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const outputPath = join(tmpdir(), `test-export-har-${Date.now()}.har`);
+      cleanupPaths.push(outputPath);
+
+      const result = parseToolResponse<{
+        format: string;
+        entryCount: number;
+        exportedPath: string;
+      }>(
+        await handler.handleExportTrace({
+          dbPath,
+          format: 'har',
+          outputPath,
+        }),
+      );
+
+      expect(result.format).toBe('HAR 1.4');
+      expect(result.entryCount).toBe(1);
+      expect(existsSync(outputPath)).toBe(true);
+
+      const { readFileSync } = await import('node:fs');
+      const har = JSON.parse(readFileSync(outputPath, 'utf-8')) as {
+        log: {
+          version: string;
+          entries: Array<{
+            request: { method: string; url: string; postData?: { text: string } };
+            response: { status: number; content: { text?: string } };
+          }>;
+        };
+      };
+      expect(har.log.version).toBe('1.4');
+      expect(har.log.entries).toHaveLength(1);
+      expect(har.log.entries[0]!.request.method).toBe('GET');
+      expect(har.log.entries[0]!.response.status).toBe(200);
+      expect(har.log.entries[0]!.request.postData?.text).toBe('{"query":"value"}');
+      expect(har.log.entries[0]!.response.content.text).toBe('{"ok":true}');
+    });
+
+    it('exports to Perfetto binary protobuf format', async () => {
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 1000,
+        category: 'debugger',
+        eventType: 'Debugger.paused',
+        data: JSON.stringify({ reason: 'breakpoint' }),
+      });
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 1100,
+        category: 'debugger',
+        eventType: 'Debugger.resumed',
+        data: JSON.stringify({}),
+      });
+
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const outputPath = join(tmpdir(), `test-export-perfetto-${Date.now()}.bin`);
+      cleanupPaths.push(outputPath);
+
+      const result = parseToolResponse<{
+        format: string;
+        eventCount: number;
+        trackCount: number;
+        fileSizeBytes: number;
+        exportedPath: string;
+      }>(
+        await handler.handleExportTrace({
+          dbPath,
+          format: 'perfetto',
+          outputPath,
+        }),
+      );
+
+      expect(result.format).toBe('Perfetto binary protobuf');
+      expect(result.eventCount).toBeGreaterThanOrEqual(2);
+      expect(result.trackCount).toBeGreaterThanOrEqual(1);
+      expect(result.fileSizeBytes).toBeGreaterThan(0);
+      expect(existsSync(outputPath)).toBe(true);
+
+      // Verify the first packet uses Trace.packet (field 1, wire type 2).
+      const { readFileSync } = await import('node:fs');
+      const buf = readFileSync(outputPath);
+      expect(buf.length).toBeGreaterThan(0);
+      expect(buf[0]).toBe(0x0a);
+      let firstLen = 0;
+      let factor = 1;
+      let offset = 1;
+      while (offset < buf.length) {
+        const byte = buf[offset++]!;
+        firstLen += (byte & 0x7f) * factor;
+        if ((byte & 0x80) === 0) break;
+        factor *= 0x80;
+      }
+      expect(firstLen).toBeGreaterThan(0);
+      expect(offset + firstLen).toBeLessThanOrEqual(buf.length);
+    });
+  });
+
+  describe('handleStartTraceRecording', () => {
+    it('starts a recording with or without CDP session', async () => {
+      const recorder = new TraceRecorder();
+      const mockSession = { sessionId: 'sess-1', dbPath: 'path.db' } as any;
+      vi.spyOn(recorder, 'start').mockResolvedValue(mockSession);
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<Record<string, unknown>>(
+        await handler.handleStartTraceRecording({}),
+      );
+      expect(result.status).toBe('recording');
+      expect(result.sessionId).toBe('sess-1');
+    });
+
+    it('rejects invalid cdpDomains shapes', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      await expect(
+        handler.handleStartTraceRecording({
+          cdpDomains: ['Debugger', 42],
+        }),
+      ).rejects.toThrow(/cdpDomains must be an array of strings/);
+    });
+
+    it('rejects invalid recording toggle types', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      await expect(
+        handler.handleStartTraceRecording({
+          recordResponseBodies: 'yes',
+        }),
+      ).rejects.toThrow(/recordResponseBodies must be a boolean/);
+    });
+
+    it('throws if EventBus is not available on ctx', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = {} as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      await expect(handler.handleStartTraceRecording({})).rejects.toThrow(/EventBus not available/);
+    });
+
+    it('attempts to create CDP session from active page', async () => {
+      const recorder = new TraceRecorder();
+      const mockSession = { sessionId: 'sess-1', dbPath: 'path.db' } as any;
+      vi.spyOn(recorder, 'start').mockResolvedValue(mockSession);
+      const ctx = createMockContext() as MCPServerContext;
+      ctx.collector = {
+        getActivePage: vi.fn().mockResolvedValue({
+          createCDPSession: vi.fn().mockResolvedValue({}),
+        }),
+      } as any;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<Record<string, unknown>>(
+        await handler.handleStartTraceRecording({}),
+      );
+      expect(result.message).toContain('active');
+    });
+
+    it('handles failure to attach CDP session gracefully', async () => {
+      const recorder = new TraceRecorder();
+      const mockSession = { sessionId: 'sess-1', dbPath: 'path.db' } as any;
+      vi.spyOn(recorder, 'start').mockResolvedValue(mockSession);
+      const ctx = createMockContext() as MCPServerContext;
+      ctx.collector = {
+        getActivePage: vi.fn().mockResolvedValue({
+          createCDPSession: vi.fn().mockRejectedValue(new Error('no CDP')),
+        }),
+      } as any;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<Record<string, unknown>>(
+        await handler.handleStartTraceRecording({}),
+      );
+      expect(result.status).toBe('recording');
+      expect(result.message).toContain('not available');
+    });
+  });
+
+  describe('handleStopTraceRecording', () => {
+    it('stops a recording and returns summary', async () => {
+      const recorder = new TraceRecorder();
+      const mockStopStats = {
+        sessionId: 'sess-1',
+        dbPath: 'path.db',
+        startedAt: 1000,
+        stoppedAt: 2000,
+        eventCount: 5,
+        memoryDeltaCount: 2,
+        heapSnapshotCount: 1,
+      } as any;
+      vi.spyOn(recorder, 'stop').mockResolvedValue(mockStopStats);
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<Record<string, unknown>>(
+        await handler.handleStopTraceRecording(),
+      );
+      expect(result.status).toBe('stopped');
+      expect(result.durationMs).toBe(1000);
+      expect(result.eventCount).toBe(5);
+    });
+  });
+
+  describe('handleSummarizeTrace', () => {
+    it('summarizes an active recording with non-string data', async () => {
+      const recorder = new TraceRecorder();
+      vi.spyOn(recorder, 'getState').mockReturnValue('recording');
+      const eventsResult = {
+        columns: ['timestamp', 'category', 'event_type', 'data', 'script_id', 'line_number'],
+        rows: [[1000, 'network', 'Network.requestWillBeSent', { rawObject: true }, '61', 1]],
+        rowCount: 1,
+      };
+      const memoryResult = {
+        columns: ['timestamp', 'address', 'old_value', 'new_value', 'size', 'value_type'],
+        rows: [],
+        rowCount: 0,
+      };
+      const fakeDb = {
+        query: vi.fn((sql: string) => {
+          if (sql.includes('memory_deltas')) {
+            return memoryResult;
+          }
+          return eventsResult;
+        }),
+        getTopFunctions: vi.fn(() => []),
+      } as unknown as TraceDB;
+      vi.spyOn(recorder, 'getDB').mockReturnValue(fakeDb);
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ events: any; memory: any; metadata: { dbPath: string } }>(
+        await handler.handleSummarizeTrace({ detail: 'summary' }),
+      );
+      expect(result.events).toBeDefined();
+      expect(result.memory).toBeDefined();
+      expect(result.metadata.dbPath).toContain('active recording');
+    });
+
+    it('summarizes an existing db path', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      // @ts-expect-error
+      db.close();
+
+      const result = parseToolResponse<{ metadata: { dbPath: string } }>(
+        await handler.handleSummarizeTrace({ dbPath }),
+      );
+      expect(result.metadata.dbPath).toBe(dbPath);
+    });
+
+    it('throws if no dbPath and no active recording', async () => {
+      const recorder = new TraceRecorder();
+      vi.spyOn(recorder, 'getState').mockReturnValue('stopped');
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      await expect(handler.handleSummarizeTrace({})).rejects.toThrow(/No trace database specified/);
+    });
+
+    it('throws if active recording has no database', async () => {
+      const recorder = new TraceRecorder();
+      vi.spyOn(recorder, 'getState').mockReturnValue('recording');
+      vi.spyOn(recorder, 'getDB').mockReturnValue(null);
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      await expect(handler.handleSummarizeTrace({})).rejects.toThrow(
+        /Active recording has no database/,
+      );
+    });
+
+    it('handles string data in events via safeParseJSON (line 450)', async () => {
+      const recorder = new TraceRecorder();
+      vi.spyOn(recorder, 'getState').mockReturnValue('recording');
+      const eventsResult = {
+        columns: ['timestamp', 'category', 'event_type', 'data', 'script_id', 'line_number'],
+        rows: [[1000, 'network', 'Network.requestWillBeSent', '{"requestId":"1"}', '61', 1]],
+        rowCount: 1,
+      };
+      const memoryResult = {
+        columns: ['timestamp', 'address', 'old_value', 'new_value', 'size', 'value_type'],
+        rows: [],
+        rowCount: 0,
+      };
+      const fakeDb = {
+        query: vi.fn((sql: string) => {
+          if (sql.includes('memory_deltas')) return memoryResult;
+          return eventsResult;
+        }),
+        getTopFunctions: vi.fn(() => []),
+      } as unknown as TraceDB;
+      vi.spyOn(recorder, 'getDB').mockReturnValue(fakeDb);
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ events: { categories: any[]; totalEvents: number } }>(
+        await handler.handleSummarizeTrace({}),
+      );
+      // safeParseJSON converts the string '{"requestId":"1"}' to an object internally;
+      // the summary aggregates by category so we verify the network category appears
+      expect(result.events.categories.find((c: any) => c.category === 'network')).toBeDefined();
+      expect(result.events.totalEvents).toBe(1);
+    });
+
+    it('rejects invalid detail values', async () => {
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      await expect(handler.handleSummarizeTrace({ detail: 'verbose' })).rejects.toThrow(
+        /Invalid detail/,
+      );
+    });
+
+    it('includes cpuProfile top functions in the summary', async () => {
+      // @ts-expect-error
+      db.insertSample({
+        timestamp: 1000,
+        selfTime: 5,
+        aggregateTime: 8,
+        functionName: 'hot',
+        scriptId: '1',
+        url: 'a.js',
+        lineNumber: 1,
+        columnNumber: 0,
+      });
+      // @ts-expect-error
+      db.insertSample({
+        timestamp: 1010,
+        selfTime: 2,
+        aggregateTime: 3,
+        functionName: 'cold',
+        scriptId: '2',
+        url: 'b.js',
+        lineNumber: 2,
+        columnNumber: 0,
+      });
+      // @ts-expect-error
+      db.flush();
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{
+        cpuProfile: {
+          sampleCount: number;
+          topFunctions: Array<{ functionName: string; selfTime: number }>;
+        };
+      }>(await handler.handleSummarizeTrace({ dbPath }));
+
+      expect(result.cpuProfile.sampleCount).toBe(2);
+      expect(result.cpuProfile.topFunctions).toHaveLength(2);
+      expect(result.cpuProfile.topFunctions[0]?.functionName).toBe('hot');
+      expect(result.cpuProfile.topFunctions[0]?.selfTime).toBe(5);
+    });
+  });
+
+  describe('handleStartTraceRecording — createCDPSession branch', () => {
+    it('skips CDP session when page lacks createCDPSession (line 47)', async () => {
+      const recorder = new TraceRecorder();
+      const mockSession = { sessionId: 'sess-1', dbPath: 'path.db' } as any;
+      vi.spyOn(recorder, 'start').mockResolvedValue(mockSession);
+      const ctx = createMockContext() as MCPServerContext;
+      ctx.collector = {
+        getActivePage: vi.fn().mockResolvedValue({
+          // page exists but createCDPSession is NOT a function
+          evaluate: vi.fn(),
+        }),
+      } as any;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<Record<string, unknown>>(
+        await handler.handleStartTraceRecording({}),
+      );
+      expect(result.status).toBe('recording');
+      expect(result.message).toContain('not available');
+    });
+  });
+
+  describe('handleStopTraceRecording — stoppedAt branch', () => {
+    it('uses 0 duration when stoppedAt is undefined (line 73)', async () => {
+      const recorder = new TraceRecorder();
+      vi.spyOn(recorder, 'stop').mockResolvedValue({
+        sessionId: 'sess-1',
+        dbPath: 'path.db',
+        startedAt: 1000,
+        stoppedAt: undefined,
+        eventCount: 5,
+        memoryDeltaCount: 2,
+        heapSnapshotCount: 1,
+      } as any);
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<Record<string, unknown>>(
+        await handler.handleStopTraceRecording(),
+      );
+      expect(result.status).toBe('stopped');
+      expect(result.durationMs).toBe(0);
+    });
+
+    it('returns cleanup errors when stop finishes with partial cleanup failure', async () => {
+      const recorder = new TraceRecorder();
+      vi.spyOn(recorder, 'stop').mockResolvedValue({
+        sessionId: 'sess-1',
+        dbPath: 'path.db',
+        startedAt: 1000,
+        stoppedAt: 2000,
+        eventCount: 5,
+        memoryDeltaCount: 2,
+        heapSnapshotCount: 1,
+        cleanupErrors: ['Runtime.disable failed: disable failed'],
+      } as any);
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<Record<string, unknown>>(
+        await handler.handleStopTraceRecording(),
+      );
+      expect(result.status).toBe('stopped_with_errors');
+      expect(result.cleanupErrors).toEqual(['Runtime.disable failed: disable failed']);
+    });
+  });
+
+  describe('handleSeekToTimestamp — nearestHeapSnapshot present branch', () => {
+    it('returns nearest heap snapshot when one exists before timestamp (line 198)', async () => {
+      // @ts-expect-error
+      db.insertEvent({
+        timestamp: 900,
+        category: 'debugger',
+        eventType: 'Debugger.paused',
+        data: '{}',
+        scriptId: '10',
+        lineNumber: 5,
+      });
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 500,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({ nodeCount: 2 }),
+      });
+      // @ts-expect-error
+      db.flush();
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<{ nearestHeapSnapshot: Record<string, unknown> | null }>(
+        await handler.handleSeekToTimestamp({
+          timestamp: 1000,
+          dbPath,
+          windowMs: 100,
+        }),
+      );
+
+      expect(result.nearestHeapSnapshot).not.toBeNull();
+      expect(result.nearestHeapSnapshot).toBeDefined();
+    });
+  });
+
+  describe('handleDiffHeapSnapshots — missing objectCounts branch', () => {
+    it('uses empty objectCounts when summary2 has none (line 246)', async () => {
+      // snapshot1 has objectCounts, snapshot2 does NOT
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 1000,
+        snapshotData: Buffer.from('{}'),
+        summary: JSON.stringify({ totalSize: 100, nodeCount: 2, objectCounts: { ObjectX: 5 } }),
+      });
+      // @ts-expect-error
+      db.insertHeapSnapshot({
+        timestamp: 2000,
+        snapshotData: Buffer.from('{}'),
+        // No objectCounts field — summary2['objectCounts'] is undefined
+        summary: JSON.stringify({ totalSize: 200, nodeCount: 3 }),
+      });
+      // @ts-expect-error
+      db.close();
+
+      const recorder = new TraceRecorder();
+      const ctx = createMockContext() as MCPServerContext;
+      const handler = new TraceToolHandlers(recorder, ctx);
+
+      const result = parseToolResponse<Record<string, any>>(
+        await handler.handleDiffHeapSnapshots({
+          snapshotId1: 1,
+          snapshotId2: 2,
+          dbPath,
+        }),
+      );
+
+      // ObjectX went from 5 to 0 — should appear in removed
+      expect(result.diff.removed.some((r: any) => r.name === 'ObjectX')).toBe(true);
+    });
+  });
+});

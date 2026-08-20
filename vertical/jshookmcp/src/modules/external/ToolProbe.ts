@@ -1,0 +1,96 @@
+/**
+ * Tool availability probe.
+ * Detects whether external CLI tools are available on the system.
+ */
+
+import { EXTERNAL_TOOL_PROBE_TIMEOUT_MS } from '@src/constants';
+
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { logger } from '@utils/logger';
+
+const execFileAsync = promisify(execFile);
+
+export interface ProbeResult {
+  available: boolean;
+  path?: string;
+  version?: string;
+  reason?: string;
+}
+
+/**
+ * Check if a command exists and optionally extract its version.
+ */
+export async function probeCommand(
+  command: string,
+  versionArgs: string[] = ['--version'],
+  timeoutMs = EXTERNAL_TOOL_PROBE_TIMEOUT_MS,
+): Promise<ProbeResult> {
+  try {
+    // On Windows, use 'where'; on Unix, use 'which'
+    const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+    const { stdout: pathOutput } = await execFileAsync(whichCmd, [command], {
+      timeout: timeoutMs,
+      windowsHide: true,
+    });
+    const resolvedPath = pathOutput.trim().split(/\r?\n/)[0];
+
+    // Try to get version
+    let version: string | undefined;
+    try {
+      const { stdout: versionOutput } = await execFileAsync(command, versionArgs, {
+        timeout: timeoutMs,
+        windowsHide: true,
+      });
+      const firstLine = versionOutput.trim().split(/\r?\n/)[0];
+      version = firstLine ? firstLine.substring(0, 100) : undefined;
+    } catch {
+      // Version check failure is non-fatal
+    }
+
+    return { available: true, path: resolvedPath, version };
+  } catch (err: unknown) {
+    const errorCode =
+      typeof err === 'object' && err !== null && 'code' in err
+        ? (err as { code?: string }).code
+        : undefined;
+    const errorMessage =
+      err instanceof Error
+        ? err.message
+        : typeof err === 'object' && err !== null && 'message' in err
+          ? String((err as { message?: unknown }).message ?? '')
+          : String(err ?? '');
+
+    return {
+      available: false,
+      reason:
+        errorCode === 'ENOENT'
+          ? `Command '${command}' not found in PATH`
+          : `Probe failed: ${errorMessage.substring(0, 200)}`,
+    };
+  }
+}
+
+/**
+ * Probe multiple commands and return a summary.
+ */
+export async function probeAll(
+  specs: Array<{ command: string; versionArgs?: string[] }>,
+): Promise<Map<string, ProbeResult>> {
+  const results = new Map<string, ProbeResult>();
+
+  const promises = specs.map(async (spec) => {
+    const result = await probeCommand(spec.command, spec.versionArgs);
+    results.set(spec.command, result);
+    if (result.available) {
+      logger.debug(
+        `[ToolProbe] ${spec.command}: available at ${result.path} (${result.version || 'unknown version'})`,
+      );
+    } else {
+      logger.debug(`[ToolProbe] ${spec.command}: not available — ${result.reason}`);
+    }
+  });
+
+  await Promise.all(promises);
+  return results;
+}

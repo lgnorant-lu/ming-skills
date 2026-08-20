@@ -1,0 +1,328 @@
+import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { tool } from '@server/registry/tool-builder';
+import { getReverseEngineeringConfig } from '@utils/reverseEngineeringConfig';
+
+const workflowNetworkPolicySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    allowPrivateNetwork: {
+      type: 'boolean',
+      description:
+        'Allow access to private/reserved targets only when the request also matches allowedHosts or allowedCidrs.',
+    },
+    allowInsecureHttp: {
+      type: 'boolean',
+      description:
+        'Allow non-loopback HTTP targets only when the request also matches allowedHosts or allowedCidrs.',
+    },
+    allowedHosts: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'Exact hostname or host:port allowlist for the primary target (for example ["labs.example.com", ' +
+        '"localhost:8080"]).',
+    },
+    allowedCidrs: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'CIDR allowlist applied after DNS resolution (for example ["10.10.0.0/16", "192.168.1.10/32"]).',
+    },
+    allowedRedirectHosts: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'Optional hostname or host:port allowlist for redirect hops. When omitted, redirects inherit ' +
+        'allowedHosts/allowedCidrs.',
+    },
+  },
+  description:
+    'Request-level network authorization policy. Use this instead of process-wide bypasses when you need to reach' +
+    ' a real lab target, private address, or plain HTTP service.',
+} as const;
+
+const reverseSessionConfig = getReverseEngineeringConfig().reverseSession;
+
+export const workflowToolDefinitions: Tool[] = [
+  tool('js_bundle_search', (t) =>
+    t
+      .desc(
+        'Fetch a remote JS bundle and search it with named regex patterns, with caching and noise filtering.',
+      )
+      .string('url', 'Remote URL of the JavaScript bundle to analyze')
+      .array(
+        'patterns',
+        {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Human-readable label for this pattern' },
+            regex: { type: 'string', description: 'JavaScript regex string' },
+            contextBefore: {
+              type: 'number',
+              description: 'Characters of context before match (default: 80)',
+            },
+            contextAfter: {
+              type: 'number',
+              description: 'Characters of context after match (default: 80)',
+            },
+          },
+          required: ['name', 'regex'],
+        },
+        'Named regex patterns to search for',
+      )
+      .boolean('cacheBundle', 'Cache the bundle for 5 minutes to avoid re-downloads', {
+        default: true,
+      })
+      .boolean(
+        'forceRefresh',
+        'Bypass the warm cache and re-fetch the bundle even when a fresh cached copy exists. ' +
+          'Useful when a signed URL rotated or the CDN churned the content. The fresh copy is still written back to the cache.',
+        { default: false },
+      )
+      .boolean('stripNoise', 'Skip matches inside SVG path data or base64 blobs', { default: true })
+      .number('maxMatches', 'Maximum matches to return per pattern', {
+        default: 10,
+        minimum: 1,
+        maximum: 1000,
+      })
+      .prop('networkPolicy', workflowNetworkPolicySchema)
+      .requiredOpenWorld('url', 'patterns'),
+  ),
+  tool('page_script_register', (t) =>
+    t
+      .desc(
+        'Register a named reusable JS snippet in the Script Library. Execute with page_script_run.',
+      )
+      .string('name', 'Unique script name (e.g. "my_extractor")')
+      .string(
+        'code',
+        'JavaScript expression/IIFE to register. Use `typeof __params__ !== "undefined" ? __params__ : {}` to ' +
+          'safely access runtime parameters.',
+      )
+      .string('description', 'Optional human-readable description of the script')
+      .boolean(
+        'protected',
+        'Pin this script so it is never chosen as the LRU eviction victim when the registry is full. ' +
+          'Defaults to the existing entry value on update, or false on first register.',
+      )
+      .required('name', 'code'),
+  ),
+  tool('page_script_run', (t) =>
+    t
+      .desc(
+        'Execute a named script from the Script Library with optional runtime params (__params__).',
+      )
+      .string('name', 'Script name to run (built-in or registered)')
+      .prop('params', {
+        type: 'object',
+        additionalProperties: true,
+        description: 'Optional parameters injected as __params__ (must be JSON-serializable)',
+      })
+      .requiredOpenWorld('name'),
+  ),
+  tool('api_probe_batch', (t) =>
+    t
+      .desc('Batch-probe API endpoints in browser context with auto token injection and HTML skip.')
+      .string(
+        'baseUrl',
+        'Base URL prefix (e.g. "https://chat.qwen.ai") — trailing slash will be stripped',
+      )
+      .array(
+        'paths',
+        { type: 'string' },
+        'Paths to probe (e.g. ["/api/v1/users", "/api/v1/chats"])',
+      )
+      .enum(
+        'method',
+        ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'],
+        'HTTP method for all probes',
+        { default: 'GET' },
+      )
+      .object(
+        'headers',
+        { additionalProperties: { type: 'string' } },
+        'Additional HTTP headers to include in all requests',
+      )
+      .string('bodyTemplate', 'JSON body string to send for POST/PUT/PATCH requests (optional)')
+      .array(
+        'includeBodyStatuses',
+        { type: 'number' },
+        'Status codes for which to include response body snippet (default: [200, 201, 204])',
+      )
+      .number('maxBodySnippetLength', 'Max characters per response body snippet', {
+        default: 500,
+        minimum: 0,
+        maximum: 10000,
+      })
+      .boolean(
+        'autoInjectAuth',
+        'Auto-inject Bearer token from localStorage (token / active_token / access_token).',
+        { default: true },
+      )
+      .number('concurrency', 'Max in-browser concurrent probes (1-32, default 6)', {
+        default: 6,
+        minimum: 1,
+        maximum: 32,
+      })
+      .number(
+        'delayMs',
+        'Fixed pause in ms before each probe (0-60000, default 0). Use with jitterMs to throttle.',
+        { default: 0, minimum: 0, maximum: 60000 },
+      )
+      .number(
+        'jitterMs',
+        'Random extra delay in ms (0 to jitterMs) added before each probe (0-60000, default 0).',
+        { default: 0, minimum: 0, maximum: 60000 },
+      )
+      .prop('networkPolicy', workflowNetworkPolicySchema)
+      .requiredOpenWorld('baseUrl', 'paths'),
+  ),
+  tool('list_extension_workflows', (t) =>
+    t
+      .desc('List runtime-loaded extension workflows from plugins/ or workflows/ directories.')
+      .query(),
+  ),
+  tool('run_extension_workflow', (t) =>
+    t
+      .desc(
+        'Execute an extension workflow by workflowId with optional config and timeout overrides.',
+      )
+      .string('workflowId', 'Registered extension workflow id to execute')
+      .string('profile', 'Optional profile label exposed to the workflow execution context')
+      .prop('config', {
+        type: 'object',
+        additionalProperties: true,
+        description: 'Optional config overrides read through ctx.getConfig(path, fallback)',
+      })
+      .prop('nodeInputOverrides', {
+        type: 'object',
+        additionalProperties: { type: 'object', additionalProperties: true },
+        description: 'Optional shallow input overrides keyed by workflow node id',
+      })
+      .number('timeoutMs', 'Optional override for total workflow timeout in milliseconds')
+      .requiredOpenWorld('workflowId'),
+  ),
+  tool('reverse_session', (t) =>
+    t
+      .desc(
+        'Create, inspect, list, preview, or run an end-to-end reverse-engineering workflow session with artifact root, cross-domain tool calls, and evidence refs.',
+      )
+      .string('action', 'Action: create, status, list, plan, or run. Defaults to create.')
+      .string('platform', 'Target platform: android, native, web, or unknown.')
+      .string('packageName', 'Android package/process name.')
+      .string('apkPath', 'Local APK path for APK/DEX intake.')
+      .number('pid', 'Runtime process id when known.')
+      .string('artifactRoot', 'Optional artifact root directory for planned outputs.')
+      .string('sessionId', 'Session id for action=status or action=run.')
+      .number('maxSteps', 'Maximum ready/planned steps to execute during action=run.', {
+        default: reverseSessionConfig.runMaxSteps,
+      })
+      .boolean('stopOnError', 'Stop action=run after the first failed tool result.', {
+        default: true,
+      })
+      .boolean('includeResults', 'Include parsed tool results in action=run execution records.', {
+        default: false,
+      })
+      .query(),
+  ),
+  tool('workflow_run_inspect', (t) =>
+    t
+      .desc(
+        'Inspect the global workflow run store: list recent run_extension_workflow / run_macro runs, ' +
+          'get a run entry by runId, or fetch the last successful full result (stepResults, spans, metrics) for a workflow or macro id.',
+      )
+      .enum(
+        'action',
+        ['list', 'get', 'lastSuccess'],
+        'Inspection action. "list" returns recent runs (optionally filtered by workflowId); ' +
+          '"get" returns one run entry by runId; "lastSuccess" returns the last ok result for a workflowId.',
+        { default: 'list' },
+      )
+      .string('runId', 'Run id to fetch (action=get).')
+      .string(
+        'workflowId',
+        'Workflow or macro id; filters "list" results or selects the "lastSuccess" workflow.',
+      )
+      .query(),
+  ),
+  tool('workflow_conditional_step', (t) =>
+    t
+      .desc(
+        'Evaluate a condition against previous workflow step results and execute one of two tool branches. ' +
+          'Supports built-in predicates: always_true, always_false, any_step_failed, ' +
+          'success_rate_gte_N (N=0-100), variable_equals_KEY_VALUE, variable_contains_KEY_VALUE, ' +
+          'variable_matches_KEY_REGEX. When stepResults is omitted, reads from the last successful ' +
+          'workflow run for the given workflowId.',
+      )
+      .string(
+        'predicateId',
+        'Predicate identifier. Built-in: always_true, always_false, any_step_failed, ' +
+          'success_rate_gte_<0-100>, variable_equals_<KEY>_<VALUE>, variable_contains_<KEY>_<VALUE>, ' +
+          'variable_matches_<KEY>_<REGEX>.',
+      )
+      .object(
+        'whenTrue',
+        {
+          tool: { type: 'string', description: 'Tool name to invoke when predicate is true' },
+          args: {
+            type: 'object',
+            additionalProperties: true,
+            description: 'Optional args to pass to the whenTrue tool (default: {})',
+          },
+        },
+        'Tool to execute when the predicate evaluates to true.',
+        { required: ['tool'] },
+      )
+      .object(
+        'whenFalse',
+        {
+          tool: { type: 'string', description: 'Tool name to invoke when predicate is false' },
+          args: {
+            type: 'object',
+            additionalProperties: true,
+            description: 'Optional args to pass to the whenFalse tool (default: {})',
+          },
+        },
+        'Optional tool to execute when the predicate evaluates to false. When omitted and the ' +
+          'predicate is false, the step is skipped silently.',
+        { required: ['tool'] },
+      )
+      .prop('stepResults', {
+        type: 'object',
+        additionalProperties: true,
+        description:
+          'Optional map of stepId → result to evaluate the predicate against. When omitted, ' +
+          'fetched from the last successful workflow run for workflowId.',
+      })
+      .string(
+        'workflowId',
+        'Workflow or macro id used to look up the last successful run stepResults when ' +
+          'stepResults is not provided.',
+      )
+      .requiredOpenWorld('predicateId', 'whenTrue'),
+  ),
+  tool('workflow_retry_policy', (t) =>
+    t
+      .desc(
+        'Configure a global retry policy with exponential backoff for workflow steps. The stored ' +
+          'policy is applied by run_extension_workflow / run_macro when individual nodes lack an ' +
+          'explicit retry config. Returns the normalised policy.',
+      )
+      .number('maxAttempts', 'Maximum number of attempts including the initial try (1-10)', {
+        minimum: 1,
+        maximum: 10,
+      })
+      .number('backoffMs', 'Initial backoff delay in milliseconds (0-60000)', {
+        default: 0,
+        minimum: 0,
+        maximum: 60000,
+      })
+      .number(
+        'multiplier',
+        'Exponential backoff multiplier: each retry waits backoffMs * multiplier^(attempt-1) ms (1-10)',
+        { default: 2, minimum: 1, maximum: 10 },
+      )
+      .required('maxAttempts', 'backoffMs'),
+  ),
+];

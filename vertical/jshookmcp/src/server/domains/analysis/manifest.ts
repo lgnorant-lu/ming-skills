@@ -1,0 +1,286 @@
+import type { DomainManifest, MCPServerContext } from '@server/domains/shared/registry';
+import { ensureBrowserCore, toolLookup } from '@server/domains/shared/registry';
+import { coreTools } from '@server/domains/analysis/definitions';
+import type { CoreAnalysisHandlers } from '@server/domains/analysis/index';
+import { LLMDeobfuscator } from '@modules/deobfuscator/LLMDeobfuscator';
+
+const DOMAIN = 'core' as const;
+const DEP_KEY = 'coreAnalysisHandlers' as const;
+type H = CoreAnalysisHandlers;
+const t = toolLookup(coreTools);
+
+let globalContext: MCPServerContext | null = null;
+
+import { createProgressDebouncer } from '@server/EventBus';
+
+/**
+ * Analysis-domain bind helper that threads `_meta.progressToken` into
+ * a throttled `onProgress` callback — same pattern as memory/manifest.ts.
+ */
+function bindWithProgress(invoke: (h: H, a: Record<string, unknown>) => Promise<unknown>) {
+  return (deps: Record<string, unknown>) => {
+    const handler = deps[DEP_KEY] as H;
+    return (args: Record<string, unknown>) => {
+      const meta = args._meta as { progressToken?: string | number } | undefined;
+      let onProgress: ((progress: number, total?: number) => void) | undefined;
+
+      if (meta?.progressToken !== undefined && globalContext) {
+        onProgress = createProgressDebouncer(globalContext.eventBus, meta.progressToken);
+      }
+      return invoke(handler, { ...args, onProgress });
+    };
+  };
+}
+
+const b = bindWithProgress;
+
+async function ensure(ctx: MCPServerContext): Promise<H> {
+  const {
+    Deobfuscator,
+    AdvancedDeobfuscator,
+    ObfuscationDetector,
+    CodeAnalyzer,
+    CryptoDetector,
+    HookManager,
+  } = await import('@server/domains/shared/modules');
+  const { CoreAnalysisHandlers } = await import('@server/domains/analysis/index');
+  const { JScramberDeobfuscator } = await import('@modules/deobfuscator/JScramblerDeobfuscator');
+  const { UniversalUnpacker } = await import('@modules/deobfuscator/PackerDeobfuscator');
+  const { VMDeobfuscator } = await import('@modules/deobfuscator/VMDeobfuscator');
+  globalContext = ctx;
+  await ensureBrowserCore(ctx);
+
+  // Dynamic import: load shared modules and analysis handler lazily
+  const needsShared =
+    !ctx.deobfuscator ||
+    !ctx.advancedDeobfuscator ||
+    !ctx.obfuscationDetector ||
+    !ctx.analyzer ||
+    !ctx.cryptoDetector ||
+    !ctx.hookManager ||
+    !ctx.coreAnalysisHandlers;
+
+  if (needsShared) {
+    if (!ctx.deobfuscator) ctx.deobfuscator = new Deobfuscator();
+    if (!ctx.advancedDeobfuscator) ctx.advancedDeobfuscator = new AdvancedDeobfuscator();
+    if (!ctx.obfuscationDetector) ctx.obfuscationDetector = new ObfuscationDetector();
+    if (!ctx.analyzer) ctx.analyzer = new CodeAnalyzer();
+    if (!ctx.cryptoDetector) ctx.cryptoDetector = new CryptoDetector();
+    if (!ctx.hookManager) ctx.hookManager = new HookManager();
+
+    if (!ctx.coreAnalysisHandlers) {
+      ctx.coreAnalysisHandlers = new CoreAnalysisHandlers({
+        collector: ctx.collector!,
+        scriptManager: ctx.scriptManager!,
+        deobfuscator: ctx.deobfuscator,
+        advancedDeobfuscator: ctx.advancedDeobfuscator,
+        obfuscationDetector: ctx.obfuscationDetector,
+        analyzer: ctx.analyzer,
+        cryptoDetector: ctx.cryptoDetector,
+        hookManager: ctx.hookManager,
+        samplingBridge: ctx.samplingBridge,
+        jscramblerDeobfuscator: new JScramberDeobfuscator(),
+        packerDeobfuscator: new UniversalUnpacker(),
+        vmDeobfuscator: new VMDeobfuscator(),
+      });
+    }
+  }
+  return ctx.coreAnalysisHandlers!;
+}
+
+const manifest = {
+  kind: 'domain-manifest',
+  version: 1,
+  domain: DOMAIN,
+  depKey: DEP_KEY,
+  profiles: ['workflow', 'full'],
+  ensure,
+
+  workflowRule: {
+    patterns: [
+      /(deobfuscate|deobfusc|beautify|analyze).*(javascript|js|script|code)/i,
+      /(反混淆|美化|分析).*(javascript|js|脚本|代码)/i,
+    ],
+    priority: 85,
+    tools: ['deobfuscate', 'extract_function_tree', 'llm_suggest_names'],
+    hint: 'JavaScript analysis workflow: collect -> deobfuscate -> inspect function tree | LLM-powered naming',
+  },
+
+  prerequisites: {
+    collect_code: [
+      { condition: 'Browser must be launched', fix: 'Call browser_launch or browser_attach first' },
+    ],
+    ai_suggest_exploits: [
+      {
+        condition: 'Client must support MCP sampling',
+        fix: 'Use Claude Desktop or another sampling-capable MCP client',
+      },
+    ],
+  },
+
+  registrations: [
+    { tool: t('collect_code'), domain: DOMAIN, bind: b((h, a) => h.handleCollectCode(a)) },
+    {
+      tool: t('search_in_scripts'),
+      domain: DOMAIN,
+      profiles: ['search', 'workflow', 'full'],
+      bind: b((h, a) => h.handleSearchInScripts(a)),
+    },
+    {
+      tool: t('extract_function_tree'),
+      domain: DOMAIN,
+      bind: b((h, a) => h.handleExtractFunctionTree(a)),
+    },
+    { tool: t('deobfuscate'), domain: DOMAIN, bind: b((h, a) => h.handleDeobfuscate(a)) },
+    {
+      tool: t('understand_code'),
+      domain: DOMAIN,
+      profiles: ['search', 'workflow', 'full'],
+      bind: b((h, a) => h.handleUnderstandCode(a)),
+    },
+    {
+      tool: t('detect_crypto'),
+      domain: DOMAIN,
+      profiles: ['search', 'workflow', 'full'],
+      bind: b((h, a) => h.handleDetectCrypto(a)),
+    },
+    { tool: t('manage_hooks'), domain: DOMAIN, bind: b((h, a) => h.handleManageHooks(a)) },
+    {
+      tool: t('detect_obfuscation'),
+      domain: DOMAIN,
+      profiles: ['search', 'workflow', 'full'],
+      bind: b((h, a) => h.handleDetectObfuscation(a)),
+    },
+    { tool: t('webcrack_unpack'), domain: DOMAIN, bind: b((h, a) => h.handleWebcrackUnpack(a)) },
+    {
+      tool: t('clear_collected_data'),
+      domain: DOMAIN,
+      bind: b((h) => h.handleClearCollectedData()),
+    },
+    {
+      tool: t('get_collection_stats'),
+      domain: DOMAIN,
+      bind: b((h) => h.handleGetCollectionStats()),
+    },
+    {
+      tool: t('webpack_enumerate'),
+      domain: DOMAIN,
+      bind: b((h, a) => h.handleWebpackEnumerate(a)),
+    },
+    {
+      tool: t('llm_suggest_names'),
+      domain: DOMAIN,
+      bind: bindWithProgress(async (_h, args) => {
+        if (!globalContext) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({ success: false, error: 'Server context not initialized' }),
+              },
+            ],
+          };
+        }
+        const deob = new LLMDeobfuscator(globalContext.samplingBridge);
+        if (!deob.isAvailable()) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  success: false,
+                  error: 'Sampling not supported by this client',
+                  hint:
+                    'The connected MCP client does not declare sampling capabilities. ' +
+                    'Try using Claude Desktop or another sampling-capable client.',
+                }),
+              },
+            ],
+          };
+        }
+        const code = typeof args.code === 'string' ? args.code : '';
+        const identifiers = Array.isArray(args.identifiers)
+          ? (args.identifiers as unknown[]).filter((id): id is string => typeof id === 'string')
+          : [];
+        const suggestions = await deob.suggestVariableNames(code, identifiers);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                success: true,
+                suggestions: suggestions ?? [],
+                samplingUsed: true,
+              }),
+            },
+          ],
+        };
+      }),
+    },
+    {
+      tool: t('js_deobfuscate_jsvmp'),
+      domain: DOMAIN,
+      bind: b((h, a) => h.handleJsDeobfuscateJsvmp(a)),
+    },
+    {
+      tool: t('js_deobfuscate_pipeline'),
+      domain: DOMAIN,
+      bind: b((h, a) => h.handleJsDeobfuscatePipeline(a)),
+    },
+    {
+      tool: t('js_analyze_vm'),
+      domain: DOMAIN,
+      bind: b((h, a) => h.handleJsAnalyzeVm(a)),
+    },
+    {
+      tool: t('js_solve_constraints'),
+      domain: DOMAIN,
+      bind: b((h, a) => h.handleJsSolveConstraints(a)),
+    },
+    {
+      tool: t('analysis_ast_match'),
+      domain: DOMAIN,
+      bind: b((h, a) => h.handleAnalysisAstMatch(a)),
+    },
+    {
+      tool: t('analysis_deflat_control_flow'),
+      domain: DOMAIN,
+      bind: b((h, a) => h.handleAnalysisDeflatControlFlow(a)),
+    },
+    {
+      tool: t('analysis_decode_string_array'),
+      domain: DOMAIN,
+      bind: b((h, a) => h.handleAnalysisDecodeStringArray(a)),
+    },
+    {
+      tool: t('js_symbolic_execute'),
+      domain: DOMAIN,
+      bind: b((h, a) => h.handleJsSymbolicExecute(a)),
+    },
+    {
+      tool: t('js_symbolic_execute_jsvmp'),
+      domain: DOMAIN,
+      bind: b((h, a) => h.handleJsSymbolicExecuteJsvmp(a)),
+    },
+    {
+      tool: t('ai_suggest_exploits'),
+      domain: DOMAIN,
+      profiles: ['workflow', 'full'],
+      bind: b((h, a) => h.handleAiSuggestExploits(a)),
+    },
+    {
+      tool: t('analysis_data_flow'),
+      domain: DOMAIN,
+      profiles: ['workflow', 'full'],
+      bind: b((h, a) => h.handleAnalysisDataFlow(a)),
+    },
+    {
+      tool: t('analysis_security_scan'),
+      domain: DOMAIN,
+      profiles: ['workflow', 'full'],
+      bind: b((h, a) => h.handleAnalysisSecurityScan(a)),
+    },
+  ],
+} satisfies DomainManifest<typeof DEP_KEY, H, typeof DOMAIN>;
+
+export default manifest;

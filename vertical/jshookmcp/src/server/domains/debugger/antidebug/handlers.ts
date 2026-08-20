@@ -1,0 +1,260 @@
+import type { Page } from 'rebrowser-puppeteer-core';
+import type { CodeCollector } from '@server/domains/shared/modules/collector';
+import { argBool, argNumber, argStringArray } from '@server/domains/shared/parse-args';
+import {
+  evaluateWithTimeout,
+  evaluateOnNewDocumentWithTimeout,
+} from '@modules/collector/PageController';
+import { ANTI_DEBUG_SCRIPTS } from '@server/domains/debugger/antidebug/scripts';
+import { handleSafe } from '@server/domains/shared/ResponseBuilder';
+
+type DebuggerBypassMode = 'remove' | 'noop';
+
+interface ProtectionFinding {
+  type: string;
+  severity: 'low' | 'medium' | 'high';
+  evidence: string;
+  recommendedBypass: string;
+}
+
+interface DetectProtectionsResult {
+  success: boolean;
+  detected: boolean;
+  count: number;
+  protections: ProtectionFinding[];
+  recommendations: string[];
+  evidence: Record<string, unknown>;
+}
+
+export class AntiDebugToolHandlers {
+  private static readonly DEFAULT_DEBUGGER_MODE: DebuggerBypassMode = 'remove';
+  private static readonly DEFAULT_MAX_DRIFT = 50;
+  private static readonly DEFAULT_STACK_FILTER_PATTERNS = [
+    'puppeteer',
+    'devtools',
+    '__puppeteer',
+    'CDP',
+  ] as const;
+
+  constructor(private collector: CodeCollector) {}
+
+  private parseDebuggerMode(value: unknown): DebuggerBypassMode {
+    if (value === 'remove' || value === 'noop') {
+      return value;
+    }
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'remove' || normalized === 'noop') {
+        return normalized;
+      }
+    }
+    return AntiDebugToolHandlers.DEFAULT_DEBUGGER_MODE;
+  }
+
+  private mergeStackFilterPatterns(extraPatterns: string[]): string[] {
+    const merged = [...AntiDebugToolHandlers.DEFAULT_STACK_FILTER_PATTERNS, ...extraPatterns].map(
+      (item) => item.trim(),
+    );
+
+    return Array.from(new Set(merged.filter((item) => item.length > 0)));
+  }
+
+  private buildScript(template: string, replacements: Record<string, string>): string {
+    let output = template;
+    for (const [token, value] of Object.entries(replacements)) {
+      output = output.split(token).join(value);
+    }
+    return output;
+  }
+
+  private buildDebuggerBypassScript(mode: DebuggerBypassMode): string {
+    return this.buildScript(ANTI_DEBUG_SCRIPTS.bypassDebuggerStatement, {
+      __ANTI_DEBUG_MODE__: JSON.stringify(mode),
+    });
+  }
+
+  private buildTimingBypassScript(maxDrift: number): string {
+    return this.buildScript(ANTI_DEBUG_SCRIPTS.bypassTiming, {
+      __ANTI_DEBUG_MAX_DRIFT__: String(maxDrift),
+    });
+  }
+
+  private buildStackTraceBypassScript(filterPatterns: string[]): string {
+    return this.buildScript(ANTI_DEBUG_SCRIPTS.bypassStackTrace, {
+      __ANTI_DEBUG_FILTER_PATTERNS__: JSON.stringify(filterPatterns),
+    });
+  }
+
+  private async injectScripts(page: Page, scripts: string[], persistent: boolean): Promise<void> {
+    if (persistent) {
+      for (const script of scripts) {
+        await evaluateOnNewDocumentWithTimeout(page, script);
+      }
+    }
+
+    for (const script of scripts) {
+      await evaluateWithTimeout(page, script);
+    }
+  }
+
+  private async getPage(): Promise<Page> {
+    return this.collector.getActivePage();
+  }
+
+  async handleAntiDebugBypassAll(args: Record<string, unknown>) {
+    return handleSafe(async () => {
+      const persistent = argBool(args, 'persistent', true);
+      const page = await this.getPage();
+
+      const scripts = [
+        this.buildDebuggerBypassScript(AntiDebugToolHandlers.DEFAULT_DEBUGGER_MODE),
+        this.buildTimingBypassScript(AntiDebugToolHandlers.DEFAULT_MAX_DRIFT),
+        this.buildStackTraceBypassScript(this.mergeStackFilterPatterns([])),
+        ANTI_DEBUG_SCRIPTS.bypassConsoleDetect,
+      ];
+
+      await this.injectScripts(page, scripts, persistent);
+
+      return {
+        tool: 'antidebug_bypass_all',
+        persistent,
+        injectedCount: scripts.length,
+        injected: [
+          'bypassDebuggerStatement',
+          'bypassTiming',
+          'bypassStackTrace',
+          'bypassConsoleDetect',
+        ],
+      };
+    });
+  }
+
+  async handleAntiDebugBypassDebuggerStatement(args: Record<string, unknown>) {
+    return handleSafe(async () => {
+      const mode = this.parseDebuggerMode(args.mode);
+      const page = await this.getPage();
+      const script = this.buildDebuggerBypassScript(mode);
+
+      await this.injectScripts(page, [script], true);
+
+      return {
+        tool: 'antidebug_bypass_debugger_statement',
+        mode,
+        persistent: true,
+      };
+    });
+  }
+
+  async handleAntiDebugBypassTiming(args: Record<string, unknown>) {
+    return handleSafe(async () => {
+      const maxDrift =
+        argNumber(args, 'maxDrift', AntiDebugToolHandlers.DEFAULT_MAX_DRIFT) ??
+        AntiDebugToolHandlers.DEFAULT_MAX_DRIFT;
+
+      const page = await this.getPage();
+      const script = this.buildTimingBypassScript(maxDrift);
+
+      await this.injectScripts(page, [script], true);
+
+      return {
+        tool: 'antidebug_bypass_timing',
+        maxDrift,
+        persistent: true,
+      };
+    });
+  }
+
+  async handleAntiDebugBypassStackTrace(args: Record<string, unknown>) {
+    return handleSafe(async () => {
+      const userPatterns = argStringArray(args, 'filterPatterns');
+      const mergedPatterns = this.mergeStackFilterPatterns(userPatterns);
+
+      const page = await this.getPage();
+      const script = this.buildStackTraceBypassScript(mergedPatterns);
+
+      await this.injectScripts(page, [script], true);
+
+      return {
+        tool: 'antidebug_bypass_stack_trace',
+        filterPatterns: mergedPatterns,
+        persistent: true,
+      };
+    });
+  }
+
+  async handleAntiDebugBypassConsoleDetect(_args: Record<string, unknown>) {
+    return handleSafe(async () => {
+      const page = await this.getPage();
+      await this.injectScripts(page, [ANTI_DEBUG_SCRIPTS.bypassConsoleDetect], true);
+
+      return {
+        tool: 'antidebug_bypass_console_detect',
+        persistent: true,
+      };
+    });
+  }
+
+  async handleAntiDebugDetectProtections(_args: Record<string, unknown>) {
+    return handleSafe(async () => {
+      const page = await this.getPage();
+      const result = (await evaluateWithTimeout(
+        page,
+        ANTI_DEBUG_SCRIPTS.detectProtections,
+      )) as DetectProtectionsResult | null;
+
+      return {
+        tool: 'antidebug_detect_protections',
+        detected: result?.detected ?? false,
+        count: result?.count ?? 0,
+        protections: result?.protections ?? [],
+        recommendations: result?.recommendations ?? [],
+        evidence: result?.evidence ?? {},
+      };
+    });
+  }
+
+  async handleAntidebugBypass(args: Record<string, unknown>) {
+    const rawTypes = args['types'];
+    const typesArr: string[] = Array.isArray(rawTypes) ? (rawTypes as string[]) : ['all'];
+    const types = typesArr.length === 0 ? ['all'] : typesArr;
+
+    if (types.includes('all')) {
+      return this.handleAntiDebugBypassAll(args);
+    }
+
+    const persistent = argBool(args, 'persistent', true);
+    const mode = this.parseDebuggerMode(args['mode']);
+    const maxDrift =
+      argNumber(args, 'maxDrift', AntiDebugToolHandlers.DEFAULT_MAX_DRIFT) ??
+      AntiDebugToolHandlers.DEFAULT_MAX_DRIFT;
+    const userPatterns = argStringArray(args, 'filterPatterns');
+
+    return handleSafe(async () => {
+      const page = await this.getPage();
+      const applied: string[] = [];
+
+      if (types.includes('debugger_statement')) {
+        const script = this.buildDebuggerBypassScript(mode);
+        await this.injectScripts(page, [script], persistent);
+        applied.push('debugger_statement');
+      }
+      if (types.includes('timing')) {
+        const script = this.buildTimingBypassScript(maxDrift);
+        await this.injectScripts(page, [script], persistent);
+        applied.push('timing');
+      }
+      if (types.includes('stack_trace')) {
+        const mergedPatterns = this.mergeStackFilterPatterns(userPatterns);
+        const script = this.buildStackTraceBypassScript(mergedPatterns);
+        await this.injectScripts(page, [script], persistent);
+        applied.push('stack_trace');
+      }
+      if (types.includes('console_detect')) {
+        await this.injectScripts(page, [ANTI_DEBUG_SCRIPTS.bypassConsoleDetect], persistent);
+        applied.push('console_detect');
+      }
+
+      return { tool: 'antidebug_bypass', applied, persistent };
+    });
+  }
+}

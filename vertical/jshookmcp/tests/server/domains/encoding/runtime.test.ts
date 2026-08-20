@@ -1,0 +1,841 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { EncodingToolHandlers } from '@server/domains/encoding/handlers';
+import { createCodeCollectorMock, parseJson } from '@tests/server/domains/shared/mock-factories';
+
+describe('EncodingToolHandlers (handlers.impl.core.runtime)', () => {
+  const collector = createCodeCollectorMock({
+    getActivePage: vi.fn(),
+  } as any);
+
+  let handlers: EncodingToolHandlers;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // @ts-expect-error — auto-suppressed [TS2345]
+    handlers = new EncodingToolHandlers(collector);
+  });
+
+  /* ---------- handleBinaryDetectFormat ---------- */
+
+  describe('handleBinaryDetectFormat', () => {
+    it('returns error for invalid source', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryDetectFormat({ source: 'invalid', data: 'aa' }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('Invalid source');
+    });
+
+    it('returns error when data is missing for non-file source', async () => {
+      const body = parseJson<any>(await handlers.handleBinaryDetectFormat({ source: 'raw' }));
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('data is required');
+    });
+
+    it('detects base64 source and returns analysis', async () => {
+      const data = Buffer.from('Hello, World!').toString('base64');
+      const body = parseJson<any>(
+        await handlers.handleBinaryDetectFormat({ source: 'base64', data }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.source).toBe('base64');
+      expect(body.byteLength).toBeGreaterThan(0);
+      expect(body.encodingSignals).toContain('base64');
+      expect(typeof body.entropy).toBe('number');
+      expect(typeof body.assessment).toBe('string');
+      expect(body.previewHex).toBeTruthy();
+    });
+
+    it('detects hex source and returns analysis', async () => {
+      const data = '48656c6c6f';
+      const body = parseJson<any>(await handlers.handleBinaryDetectFormat({ source: 'hex', data }));
+      expect(body.success).toBe(true);
+      expect(body.source).toBe('hex');
+      expect(body.byteLength).toBe(5);
+      expect(body.encodingSignals).toContain('hex');
+    });
+
+    it('defaults source to raw', async () => {
+      const body = parseJson<any>(await handlers.handleBinaryDetectFormat({ data: '48656c6c6f' }));
+      expect(body.success).toBe(true);
+      expect(body.source).toBe('raw');
+    });
+
+    it('detects magic formats for PNG header', async () => {
+      const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      const data = pngHeader.toString('base64');
+      const body = parseJson<any>(
+        await handlers.handleBinaryDetectFormat({ source: 'base64', data }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.magicFormats).toContain('png');
+    });
+
+    it('returns topBytes in frequency analysis', async () => {
+      const data = Buffer.from('aaabbc').toString('base64');
+      const body = parseJson<any>(
+        await handlers.handleBinaryDetectFormat({ source: 'base64', data }),
+      );
+      expect(body.success).toBe(true);
+      expect(Array.isArray(body.topBytes)).toBe(true);
+    });
+
+    it('reports requestBodyUsed as false when no requestId is provided', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryDetectFormat({
+          source: 'base64',
+          data: Buffer.from('test').toString('base64'),
+        }),
+      );
+      expect(body.requestBodyUsed).toBe(false);
+      expect(body.requestId).toBeNull();
+    });
+
+    it('uses the response body resolver before page-captured fallbacks', async () => {
+      const resolveResponseBody = vi.fn(async () => ({
+        body: Buffer.from('GIF89a', 'utf8').toString('base64'),
+        base64Encoded: true,
+      }));
+      handlers = new EncodingToolHandlers(collector as any, resolveResponseBody);
+
+      const body = parseJson<any>(
+        await handlers.handleBinaryDetectFormat({ source: 'raw', requestId: 'req-body-1' }),
+      );
+
+      expect(resolveResponseBody).toHaveBeenCalledWith('req-body-1');
+      expect(body.success).toBe(true);
+      expect(body.requestId).toBe('req-body-1');
+      expect(body.requestBodyUsed).toBe(true);
+      expect(body.magicFormats).toContain('gif');
+      expect(collector.getActivePage).not.toHaveBeenCalled();
+    });
+  });
+
+  /* ---------- handleBinaryDecode ---------- */
+
+  describe('handleBinaryDecode', () => {
+    it('returns error when data is missing', async () => {
+      const body = parseJson<any>(await handlers.handleBinaryDecode({ encoding: 'base64' }));
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('data is required');
+    });
+
+    it('returns error for invalid encoding', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryDecode({ data: 'aaa', encoding: 'invalid' }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('Invalid encoding');
+    });
+
+    it('returns error for invalid outputFormat', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryDecode({
+          data: 'aGVsbG8=',
+          encoding: 'base64',
+          outputFormat: 'invalid',
+        }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('Invalid outputFormat');
+    });
+
+    it('decodes base64 to hex output', async () => {
+      const data = Buffer.from('hello').toString('base64');
+      const body = parseJson<any>(
+        await handlers.handleBinaryDecode({
+          data,
+          encoding: 'base64',
+          outputFormat: 'hex',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.encoding).toBe('base64');
+      expect(body.outputFormat).toBe('hex');
+      expect(body.result).toBe(Buffer.from('hello').toString('hex'));
+    });
+
+    it('decodes base64 to utf8 output', async () => {
+      const data = Buffer.from('hello').toString('base64');
+      const body = parseJson<any>(
+        await handlers.handleBinaryDecode({
+          data,
+          encoding: 'base64',
+          outputFormat: 'utf8',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.outputFormat).toBe('utf8');
+    });
+
+    it('decodes RFC4648 base32 to utf8 output', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryDecode({
+          data: 'NBSWY3DP',
+          encoding: 'base32',
+          outputFormat: 'utf8',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.result).toBe('hello');
+    });
+
+    it('decodes hex input to hex output', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryDecode({
+          data: '48656c6c6f',
+          encoding: 'hex',
+          outputFormat: 'hex',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.encoding).toBe('hex');
+    });
+
+    it('decodes url encoding to utf8', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryDecode({
+          data: 'hello%20world',
+          encoding: 'url',
+          outputFormat: 'utf8',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.encoding).toBe('url');
+      expect(body.outputFormat).toBe('utf8');
+      expect(body.result).toBe('hello world');
+    });
+
+    it('decodes url encoding to hex', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryDecode({
+          data: 'hello',
+          encoding: 'url',
+          outputFormat: 'hex',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.encoding).toBe('url');
+      expect(body.outputFormat).toBe('hex');
+      expect(body.byteLength).toBeGreaterThan(0);
+      expect(typeof body.hexDump).toBe('string');
+    });
+
+    it('decodes url encoding to json for JSON content', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryDecode({
+          data: '%7B%22ok%22%3Atrue%7D',
+          encoding: 'url',
+          outputFormat: 'json',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.result).toEqual({ ok: true });
+    });
+
+    it('decodes url encoding to json with text fallback for non-JSON', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryDecode({
+          data: 'plain+text',
+          encoding: 'url',
+          outputFormat: 'json',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.result).toEqual({ text: 'plain text' });
+    });
+
+    it('defaults outputFormat to hex', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryDecode({
+          data: Buffer.from('hi').toString('base64'),
+          encoding: 'base64',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.outputFormat).toBe('hex');
+    });
+
+    it('decodes protobuf data', async () => {
+      // field 1, varint 150 = 0x08 0x96 0x01
+      const proto = Buffer.from([0x08, 0x96, 0x01]);
+      const data = proto.toString('base64');
+      const body = parseJson<any>(
+        await handlers.handleBinaryDecode({
+          data,
+          encoding: 'protobuf',
+          outputFormat: 'json',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.encoding).toBe('protobuf');
+    });
+  });
+
+  /* ---------- handleBinaryEncode ---------- */
+
+  describe('handleBinaryEncode', () => {
+    it('returns error when data is missing', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryEncode({ inputFormat: 'utf8', outputEncoding: 'base64' }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('data is required');
+    });
+
+    it('returns error for invalid inputFormat', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryEncode({
+          data: 'hello',
+          inputFormat: 'invalid',
+          outputEncoding: 'base64',
+        }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('Invalid inputFormat');
+    });
+
+    it('returns error for invalid outputEncoding', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryEncode({
+          data: 'hello',
+          inputFormat: 'utf8',
+          outputEncoding: 'invalid',
+        }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('Invalid outputEncoding');
+    });
+
+    it('encodes utf8 to base64', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryEncode({
+          data: 'hello',
+          inputFormat: 'utf8',
+          outputEncoding: 'base64',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.inputFormat).toBe('utf8');
+      expect(body.outputEncoding).toBe('base64');
+      expect(body.output).toBe(Buffer.from('hello').toString('base64'));
+      expect(body.byteLength).toBe(5);
+    });
+
+    it('encodes utf8 to hex', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryEncode({
+          data: 'hello',
+          inputFormat: 'utf8',
+          outputEncoding: 'hex',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.output).toBe(Buffer.from('hello').toString('hex'));
+    });
+
+    it('encodes utf8 to url', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryEncode({
+          data: 'hello world',
+          inputFormat: 'utf8',
+          outputEncoding: 'url',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.output).toContain('hello');
+      expect(body.output).toContain('%20');
+    });
+
+    it.each([
+      'base32',
+      'base32hex',
+      'base32-crockford',
+      'base58',
+      'base85',
+      'gzip',
+      'zlib',
+      'deflate',
+      'brotli',
+    ])('roundtrips utf8 through %s', async (codec) => {
+      const encoded = parseJson<any>(
+        await handlers.handleBinaryEncode({
+          data: 'hello world',
+          inputFormat: 'utf8',
+          outputEncoding: codec,
+        }),
+      );
+      expect(encoded.success).toBe(true);
+      expect(encoded.outputEncoding).toBe(codec);
+      expect(typeof encoded.output).toBe('string');
+
+      const decoded = parseJson<any>(
+        await handlers.handleBinaryDecode({
+          data: encoded.output,
+          encoding: codec,
+          outputFormat: 'utf8',
+        }),
+      );
+      expect(decoded.success).toBe(true);
+      expect(decoded.result).toBe('hello world');
+    });
+
+    it('encodes base32 with RFC4648 padding', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryEncode({
+          data: 'hello',
+          inputFormat: 'utf8',
+          outputEncoding: 'base32',
+        }),
+      );
+      expect(body.output).toBe('NBSWY3DP');
+    });
+
+    it('reports base64 transport for compressed output encodings', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryEncode({
+          data: 'compress me',
+          inputFormat: 'utf8',
+          outputEncoding: 'gzip',
+        }),
+      );
+      expect(body.outputTransport).toBe('base64');
+      expect(body.outputByteLength).toBeGreaterThan(0);
+    });
+
+    it('encodes hex input to base64', async () => {
+      const hexData = Buffer.from('hello').toString('hex');
+      const body = parseJson<any>(
+        await handlers.handleBinaryEncode({
+          data: hexData,
+          inputFormat: 'hex',
+          outputEncoding: 'base64',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.output).toBe(Buffer.from('hello').toString('base64'));
+    });
+
+    it('encodes json input to base64', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryEncode({
+          data: '{"key":"value"}',
+          inputFormat: 'json',
+          outputEncoding: 'base64',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.inputFormat).toBe('json');
+      const decoded = Buffer.from(body.output, 'base64').toString('utf8');
+      expect(JSON.parse(decoded)).toEqual({ key: 'value' });
+    });
+
+    it('returns error for invalid JSON in json inputFormat', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryEncode({
+          data: 'not-valid-json{',
+          inputFormat: 'json',
+          outputEncoding: 'base64',
+        }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.tool).toBe('binary_encode');
+    });
+  });
+
+  /* ---------- handleBinaryEntropyAnalysis ---------- */
+
+  describe('handleBinaryEntropyAnalysis', () => {
+    it('returns error for invalid source', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryEntropyAnalysis({ source: 'invalid' }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('Invalid source');
+    });
+
+    it('returns error when data is missing for non-file source', async () => {
+      const body = parseJson<any>(await handlers.handleBinaryEntropyAnalysis({ source: 'raw' }));
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('data is required');
+    });
+
+    it('defaults source to raw', async () => {
+      const body = parseJson<any>(
+        await handlers.handleBinaryEntropyAnalysis({ data: 'some data here' }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.source).toBe('raw');
+    });
+
+    it('analyzes entropy for base64 data', async () => {
+      const data = Buffer.from('Hello, World! This is a test string.').toString('base64');
+      const body = parseJson<any>(
+        await handlers.handleBinaryEntropyAnalysis({ source: 'base64', data }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.source).toBe('base64');
+      expect(typeof body.overallEntropy).toBe('number');
+      expect(body.overallEntropy).toBeGreaterThanOrEqual(0);
+      expect(body.overallEntropy).toBeLessThanOrEqual(8);
+      expect(typeof body.assessment).toBe('string');
+      expect(Array.isArray(body.blockEntropies)).toBe(true);
+      expect(Array.isArray(body.byteFrequency)).toBe(true);
+      expect(body.byteLength).toBeGreaterThan(0);
+    });
+
+    it('includes chi-square and serial-correlation randomness metrics', async () => {
+      // repeating single byte: heavily skewed (high chi-square) + near-+1 correlation
+      const repeating = Buffer.alloc(64, 0x41).toString('base64');
+      const rep = parseJson<any>(
+        await handlers.handleBinaryEntropyAnalysis({ source: 'base64', data: repeating }),
+      );
+      expect(typeof rep.chiSquare).toBe('number');
+      expect(rep.chiSquare).toBeGreaterThan(1000);
+      expect(typeof rep.serialCorrelation).toBe('number');
+      expect(rep.serialCorrelation).toBeGreaterThan(0.4); // identical bytes -> strongly positive ((n-1)/(2n-1) ≈ 0.5)
+
+      // uniform spread (a permutation of 0..255): chi-square drops to ~0
+      const spread = Buffer.from(Array.from({ length: 256 }, (_, i) => (i * 7919) & 0xff)).toString(
+        'base64',
+      );
+      const spr = parseJson<any>(
+        await handlers.handleBinaryEntropyAnalysis({ source: 'base64', data: spread }),
+      );
+      expect(spr.chiSquare).toBeLessThan(rep.chiSquare);
+      expect(spr.chiSquare).toBeLessThan(10); // near-uniform byte distribution
+      // serial correlation stays bounded in [-1, 1]
+      expect(Math.abs(spr.serialCorrelation)).toBeLessThanOrEqual(1);
+    });
+
+    it('analyzes entropy for hex data', async () => {
+      const data = '48656c6c6f20576f726c64';
+      const body = parseJson<any>(
+        await handlers.handleBinaryEntropyAnalysis({ source: 'hex', data }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.source).toBe('hex');
+    });
+
+    it('uses custom blockSize', async () => {
+      const data = Buffer.from('a'.repeat(100)).toString('base64');
+      const body = parseJson<any>(
+        await handlers.handleBinaryEntropyAnalysis({
+          source: 'base64',
+          data,
+          blockSize: 32,
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.blockSize).toBe(32);
+    });
+
+    it('clamps blockSize to minimum 16', async () => {
+      const data = Buffer.from('test data').toString('base64');
+      const body = parseJson<any>(
+        await handlers.handleBinaryEntropyAnalysis({
+          source: 'base64',
+          data,
+          blockSize: 1,
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.blockSize).toBe(16);
+    });
+
+    it('clamps blockSize to maximum 8192', async () => {
+      const data = Buffer.from('test data').toString('base64');
+      const body = parseJson<any>(
+        await handlers.handleBinaryEntropyAnalysis({
+          source: 'base64',
+          data,
+          blockSize: 99999,
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.blockSize).toBe(8192);
+    });
+
+    it('defaults blockSize to 256', async () => {
+      const data = Buffer.from('test data').toString('base64');
+      const body = parseJson<any>(
+        await handlers.handleBinaryEntropyAnalysis({ source: 'base64', data }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.blockSize).toBe(256);
+    });
+
+    it('returns byteFrequency limited to top 20', async () => {
+      // Create data with many distinct byte values
+      const bytes = Array.from({ length: 256 }, (_, i) => i);
+      const data = Buffer.from(bytes).toString('base64');
+      const body = parseJson<any>(
+        await handlers.handleBinaryEntropyAnalysis({ source: 'base64', data }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.byteFrequency.length).toBeLessThanOrEqual(20);
+    });
+  });
+
+  /* ---------- handleProtobufDecodeRaw ---------- */
+
+  describe('handleProtobufDecodeRaw', () => {
+    it('returns error when data is missing', async () => {
+      const body = parseJson<any>(await handlers.handleProtobufDecodeRaw({}));
+      expect(body.success).toBe(false);
+      expect(body.tool).toBe('protobuf_decode_raw');
+      expect(body.error).toContain('data is required');
+    });
+
+    it('returns error when data is empty string', async () => {
+      const body = parseJson<any>(await handlers.handleProtobufDecodeRaw({ data: '' }));
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('data is required');
+    });
+
+    it('decodes valid protobuf data', async () => {
+      // field 1, varint 150 = 0x08 0x96 0x01
+      const proto = Buffer.from([0x08, 0x96, 0x01]);
+      const data = proto.toString('base64');
+      const body = parseJson<any>(await handlers.handleProtobufDecodeRaw({ data }));
+      expect(body.success).toBe(true);
+      expect(body.byteLength).toBe(3);
+      expect(body.parsedBytes).toBe(3);
+      expect(body.fields).toHaveLength(1);
+      expect(body.fields[0].fieldNumber).toBe(1);
+      expect(body.fields[0].wireType).toBe(0);
+      expect(body.fields[0].value).toBe(150);
+      expect(body.error).toBeNull();
+    });
+
+    it('decodes typed fields with a .proto schema (schemaText + messageName)', async () => {
+      const protobuf = (await import('protobufjs')).default;
+      const schema =
+        'syntax="proto2"; message Person { optional string name = 1; optional int32 age = 2; }';
+      const Person = protobuf.parse(schema).root.lookupType('Person');
+      const data = Buffer.from(Person.encode({ name: 'Alice', age: 30 }).finish()).toString(
+        'base64',
+      );
+
+      const body = parseJson<any>(
+        await handlers.handleProtobufDecodeRaw({ data, schemaText: schema, messageName: 'Person' }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.schema).toBe(true);
+      expect(body.messageName).toBe('Person');
+      expect(body.decoded.name).toBe('Alice');
+      expect(body.decoded.age).toBe(30);
+    });
+
+    it('preserves unknown enum values during typed schema decoding', async () => {
+      const schema = `
+        syntax = "proto3";
+        message Event {
+          enum Status { UNKNOWN = 0; READY = 1; }
+          Status status = 1;
+        }
+      `;
+      const data = Buffer.from([0x08, 0x63]).toString('base64');
+
+      const body = parseJson<any>(
+        await handlers.handleProtobufDecodeRaw({ data, schemaText: schema, messageName: 'Event' }),
+      );
+
+      expect(body.success).toBe(true);
+      expect(body.decoded.status).toBe(99);
+      expect(body.unknownFields).toEqual([]);
+    });
+
+    it('reports closed-enum and schema-unknown fields without losing their wire data', async () => {
+      const schema = `
+        syntax = "proto2";
+        message Event {
+          enum Status { UNKNOWN = 0; READY = 1; }
+          optional Status status = 1;
+        }
+      `;
+      const data = Buffer.from([0x08, 0x63, 0x18, 0x07]).toString('base64');
+
+      const body = parseJson<any>(
+        await handlers.handleProtobufDecodeRaw({ data, schemaText: schema, messageName: 'Event' }),
+      );
+
+      expect(body.success).toBe(true);
+      expect(body.decoded.status).toBe('UNKNOWN');
+      expect(body.unknownFields).toHaveLength(2);
+      expect(body.unknownFields[0]).toMatchObject({
+        hex: '0863',
+        base64: 'CGM=',
+        fields: [{ fieldNumber: 1, wireType: 0, value: 99 }],
+        error: null,
+      });
+      expect(body.unknownFields[1]).toMatchObject({
+        hex: '1807',
+        base64: 'GAc=',
+        fields: [{ fieldNumber: 3, wireType: 0, value: 7 }],
+        error: null,
+      });
+    });
+
+    it('expands google.protobuf.Any message values in ProtoJSON output', async () => {
+      const protobuf = (await import('protobufjs')).default;
+      const schema = `
+        syntax = "proto3";
+        package demo;
+        import "google/protobuf/any.proto";
+        message Payload { string name = 1; }
+        message Envelope { google.protobuf.Any payload = 1; }
+      `;
+      const root = protobuf.Root.fromJSON(protobuf.common.get('google/protobuf/any.proto')!);
+      protobuf.parse(schema, root);
+      root.resolveAll();
+      const Payload = root.lookupType('demo.Payload');
+      const Envelope = root.lookupType('demo.Envelope');
+      const data = Buffer.from(
+        Envelope.encode({
+          payload: {
+            type_url: 'type.googleapis.com/demo.Payload',
+            value: Payload.encode({ name: 'Alice' }).finish(),
+          },
+        }).finish(),
+      ).toString('base64');
+
+      const body = parseJson<any>(
+        await handlers.handleProtobufDecodeRaw({
+          data,
+          schemaText: schema,
+          messageName: 'demo.Envelope',
+        }),
+      );
+
+      expect(body.success).toBe(true);
+      expect(body.decoded.payload).toEqual({
+        name: 'Alice',
+        '@type': 'type.googleapis.com/demo.Payload',
+      });
+    });
+
+    it('does not expand Any type URLs that resolve to non-message schema objects', async () => {
+      const protobuf = (await import('protobufjs')).default;
+      const schema = `
+        syntax = "proto3";
+        package demo;
+        import "google/protobuf/any.proto";
+        enum Status { UNKNOWN = 0; }
+        message Envelope { google.protobuf.Any payload = 1; }
+      `;
+      const root = protobuf.Root.fromJSON(protobuf.common.get('google/protobuf/any.proto')!);
+      protobuf.parse(schema, root);
+      root.resolveAll();
+      const Envelope = root.lookupType('demo.Envelope');
+      const data = Buffer.from(
+        Envelope.encode({
+          payload: {
+            type_url: 'type.googleapis.com/demo.Status',
+            value: Buffer.from([0x00]),
+          },
+        }).finish(),
+      ).toString('base64');
+
+      const body = parseJson<any>(
+        await handlers.handleProtobufDecodeRaw({
+          data,
+          schemaText: schema,
+          messageName: 'demo.Envelope',
+        }),
+      );
+
+      expect(body.success).toBe(true);
+      expect(body.decoded.payload).toEqual({
+        type_url: 'type.googleapis.com/demo.Status',
+        value: 'AA==',
+      });
+    });
+
+    it('falls back to raw wire-format when no schema/messageName given', async () => {
+      const data = Buffer.from([0x08, 0x96, 0x01]).toString('base64');
+      const body = parseJson<any>(await handlers.handleProtobufDecodeRaw({ data }));
+      expect(body.schema).toBe(false);
+      expect(body.fields).toHaveLength(1);
+      expect(body.fields[0].fieldNumber).toBe(1);
+    });
+
+    it('errors on unknown message name in schema mode', async () => {
+      const schema = 'syntax="proto2"; message Person { optional string name = 1; }';
+      const data = Buffer.from([0x08, 0x01]).toString('base64');
+      const body = parseJson<any>(
+        await handlers.handleProtobufDecodeRaw({
+          data,
+          schemaText: schema,
+          messageName: 'NoSuchType',
+        }),
+      );
+      expect(body.success).toBe(false);
+    });
+
+    it('defaults maxDepth to 5', async () => {
+      const proto = Buffer.from([0x08, 0x01]);
+      const data = proto.toString('base64');
+      const body = parseJson<any>(await handlers.handleProtobufDecodeRaw({ data }));
+      expect(body.maxDepth).toBe(5);
+    });
+
+    it('respects custom maxDepth', async () => {
+      const proto = Buffer.from([0x08, 0x01]);
+      const data = proto.toString('base64');
+      const body = parseJson<any>(await handlers.handleProtobufDecodeRaw({ data, maxDepth: 10 }));
+      expect(body.maxDepth).toBe(10);
+    });
+
+    it('falls back to default maxDepth of 5 when maxDepth is 0 (falsy)', async () => {
+      const proto = Buffer.from([0x08, 0x01]);
+      const data = proto.toString('base64');
+      const body = parseJson<any>(await handlers.handleProtobufDecodeRaw({ data, maxDepth: 0 }));
+      // 0 is falsy so `maxDepthRaw || 5` resolves to 5, then clamped to [1, 20]
+      expect(body.maxDepth).toBe(5);
+    });
+
+    it('clamps negative maxDepth to minimum 1', async () => {
+      const proto = Buffer.from([0x08, 0x01]);
+      const data = proto.toString('base64');
+      const body = parseJson<any>(await handlers.handleProtobufDecodeRaw({ data, maxDepth: -5 }));
+      expect(body.maxDepth).toBe(1);
+    });
+
+    it('clamps maxDepth to maximum 20', async () => {
+      const proto = Buffer.from([0x08, 0x01]);
+      const data = proto.toString('base64');
+      const body = parseJson<any>(await handlers.handleProtobufDecodeRaw({ data, maxDepth: 100 }));
+      expect(body.maxDepth).toBe(20);
+    });
+
+    it('decodes multiple fields', async () => {
+      // field 1 varint 1, field 2 varint 2
+      const proto = Buffer.from([0x08, 0x01, 0x10, 0x02]);
+      const data = proto.toString('base64');
+      const body = parseJson<any>(await handlers.handleProtobufDecodeRaw({ data }));
+      expect(body.success).toBe(true);
+      expect(body.fields).toHaveLength(2);
+      expect(body.fields[0].value).toBe(1);
+      expect(body.fields[1].value).toBe(2);
+    });
+
+    it('reports error for malformed protobuf while returning partial fields', async () => {
+      // valid field then unsupported wire type
+      const proto = Buffer.from([0x08, 0x01, 0x0b]);
+      const data = proto.toString('base64');
+      const body = parseJson<any>(await handlers.handleProtobufDecodeRaw({ data }));
+      expect(body.success).toBe(false);
+      expect(body.fields).toHaveLength(1);
+      expect(body.error).toBeTruthy();
+    });
+
+    it('returns error for empty base64 data (resolves to empty string)', async () => {
+      // Buffer.alloc(0).toString('base64') produces '', which fails the !data check
+      const data = Buffer.alloc(0).toString('base64');
+      const body = parseJson<any>(await handlers.handleProtobufDecodeRaw({ data }));
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('data is required');
+    });
+  });
+});

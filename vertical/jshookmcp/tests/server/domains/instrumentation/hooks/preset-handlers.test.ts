@@ -1,0 +1,179 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { HookPresetToolHandlers } from '../../../../../src/server/domains/instrumentation/hooks/preset-handlers';
+
+vi.mock('../../../../../src/utils/logger', () => ({
+  logger: { info: vi.fn(), error: vi.fn() },
+}));
+
+describe('HookPresetToolHandlers', () => {
+  let pageControllerMock: any;
+  let pageMock: any;
+  let handlers: HookPresetToolHandlers;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pageMock = {
+      evaluate: vi.fn().mockResolvedValue(undefined),
+      evaluateOnNewDocument: vi.fn().mockResolvedValue(undefined),
+    };
+    pageControllerMock = {
+      getPage: vi.fn().mockResolvedValue(pageMock),
+    };
+    handlers = new HookPresetToolHandlers(pageControllerMock);
+  });
+
+  describe('handleHookPreset', () => {
+    it('lists available presets accurately', async () => {
+      const res = await handlers.handleHookPreset({ listPresets: true });
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"success": true');
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"totalPresets"');
+    });
+
+    it('errors when no target is provided gracefully', async () => {
+      const res = await handlers.handleHookPreset({});
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"success": false');
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('either preset');
+    });
+
+    it('errors when invalid preset identity is provided', async () => {
+      const res = await handlers.handleHookPreset({ preset: 'invalid_xyz' });
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"success": false');
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('invalid_xyz');
+    });
+
+    it('injects single valid preset via evaluate correctly', async () => {
+      const res = await handlers.handleHookPreset({
+        preset: 'custom-1',
+        customTemplate: { id: 'custom-1', body: 'console.log();' },
+      });
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"success": true');
+      expect(pageMock.evaluate).toHaveBeenCalled();
+    });
+
+    it('injects multiple presets via array payload', async () => {
+      const res = await handlers.handleHookPreset({
+        presets: ['custom-2', 'custom-3'],
+        customTemplates: [
+          { id: 'custom-2', body: '...' },
+          { id: 'custom-3', body: '...' },
+        ],
+      });
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"success": true');
+      expect(pageMock.evaluate).toHaveBeenCalledTimes(2);
+    });
+
+    it('injects via evaluateOnNewDocument strictly when explicitly defined', async () => {
+      const res = await handlers.handleHookPreset({
+        preset: 'custom-4',
+        customTemplate: { id: 'custom-4', body: '...' },
+        method: 'evaluateOnNewDocument',
+      });
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"success": true');
+      expect(pageMock.evaluateOnNewDocument).toHaveBeenCalled();
+    });
+
+    it('handles evaluate error string', async () => {
+      pageMock.evaluate.mockRejectedValue('string error');
+      const res = await handlers.handleHookPreset({ presets: ['anti-debug-bypass'] });
+      expect((res as any).content[0].text).toContain('string error');
+    });
+
+    it('handles build code general string err', async () => {
+      vi.spyOn(handlers as any, 'buildCustomPresetMap').mockImplementation(() => {
+        throw 'string error building';
+      });
+      const res = await handlers.handleHookPreset({ presets: ['dummy'] });
+      expect((res as any).content[0].text).toContain('string error building');
+    });
+
+    it('handles injection failures returning composite result', async () => {
+      pageMock.evaluate.mockRejectedValue(new Error('inject err'));
+      const res = await handlers.handleHookPreset({
+        preset: 'custom-fail',
+        customTemplate: { id: 'custom-fail', body: '...' },
+      });
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"success": false');
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('failed');
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('inject err');
+    });
+
+    it('handles inline custom template array injection maps', async () => {
+      const res = await handlers.handleHookPreset({
+        presets: ['my-custom'],
+        customTemplates: [{ id: 'my-custom', body: 'console.log();' }],
+      });
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"success": true');
+    });
+
+    it('handles inline custom template singular injection map', async () => {
+      const res = await handlers.handleHookPreset({
+        preset: 'my-custom2',
+        customTemplate: { id: 'my-custom2', body: 'console.log();' },
+      });
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"success": true');
+    });
+
+    it('errors on invalid custom template structured payloads directly bubbling', async () => {
+      // Internal throw inside building map is caught by outer catch
+      const res = await handlers.handleHookPreset({
+        customTemplate: { id: 'conflict', body: '' }, // missing body
+      });
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"success": false');
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('non-empty id and body');
+    });
+
+    it('errors on custom template overriding built-in default arrays', async () => {
+      const res = await handlers.handleHookPreset({
+        preset: 'eval',
+        customTemplate: { id: 'eval', body: 'overwrite' },
+      });
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"success": false');
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('conflicts with built-in preset');
+    });
+
+    it('threads customTemplate.mutateReturn into the generated hook code', async () => {
+      const res = await handlers.handleHookPreset({
+        preset: 'mut-custom',
+        customTemplate: {
+          id: 'mut-custom',
+          body: 'const _o = window.foo; window.foo = function() { return __mutateReturn(_o()); };',
+          mutateReturn: '__result + 1',
+        },
+      });
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"success": true');
+      expect(pageMock.evaluate).toHaveBeenCalledTimes(1);
+      const generated = pageMock.evaluate.mock.calls[0]![0] as string;
+      // __mutateReturn helper injected + caller expression embedded verbatim
+      expect(generated).toContain('__mutateReturn');
+      expect(generated).toContain('return (__result + 1)');
+    });
+
+    it('omits __mutateReturn helper when customTemplate has no mutateReturn', async () => {
+      await handlers.handleHookPreset({
+        preset: 'no-mut',
+        customTemplate: { id: 'no-mut', body: 'console.log();' },
+      });
+      const generated = pageMock.evaluate.mock.calls[0]![0] as string;
+      expect(generated).not.toContain('__mutateReturn');
+    });
+  });
+});

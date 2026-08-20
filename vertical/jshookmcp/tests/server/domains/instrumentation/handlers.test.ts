@@ -1,0 +1,505 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFile, rm } from 'node:fs/promises';
+import { InstrumentationSessionManager } from '@server/instrumentation/InstrumentationSession';
+import { InstrumentationType } from '@server/instrumentation/types';
+import { InstrumentationHandlers } from '@server/domains/instrumentation/handlers';
+
+function parseResponse(result: { content: Array<{ type?: string; text?: string }> }) {
+  return JSON.parse(result.content[0]!.text!) as Record<string, unknown>;
+}
+
+describe('InstrumentationHandlers', () => {
+  let manager: InstrumentationSessionManager;
+  let handlers: InstrumentationHandlers;
+
+  beforeEach(() => {
+    manager = new InstrumentationSessionManager();
+    handlers = new InstrumentationHandlers(manager);
+  });
+
+  describe('handleSessionCreate', () => {
+    it('creates session and returns sessionId', async () => {
+      const result = await handlers.handleSessionCreate({});
+      const data = parseResponse(result);
+      expect(data.success).toBe(true);
+      expect(data.session).toBeDefined();
+      expect((data.session as Record<string, unknown>).id).toBeTruthy();
+    });
+
+    it('creates session with optional name', async () => {
+      const result = await handlers.handleSessionCreate({ name: 'test-session' });
+      const data = parseResponse(result);
+      expect(data.success).toBe(true);
+      expect((data.session as Record<string, unknown>).name).toBe('test-session');
+    });
+  });
+
+  describe('handleSessionList', () => {
+    it('returns empty array when no sessions', async () => {
+      const result = await handlers.handleSessionList({});
+      const data = parseResponse(result);
+      expect(data.success).toBe(true);
+      expect(data.totalSessions).toBe(0);
+      expect(data.sessions).toEqual([]);
+    });
+
+    it('returns all active sessions', async () => {
+      await handlers.handleSessionCreate({ name: 'a' });
+      await handlers.handleSessionCreate({ name: 'b' });
+      const result = await handlers.handleSessionList({});
+      const data = parseResponse(result);
+      expect(data.totalSessions).toBe(2);
+    });
+  });
+
+  describe('handleSessionDestroy', () => {
+    it('destroys existing session', async () => {
+      const createResult = await handlers.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+      const destroyResult = await handlers.handleSessionDestroy({ sessionId });
+      const data = parseResponse(destroyResult);
+      expect(data.success).toBe(true);
+      expect(data.message).toBe('Session destroyed');
+    });
+
+    it('returns error for non-existent session', async () => {
+      const result = await handlers.handleSessionDestroy({ sessionId: 'nope' });
+      const data = parseResponse(result);
+      expect(data.success).toBe(false);
+      expect(data.error).toBeTruthy();
+    });
+
+    it('returns error when sessionId is missing', async () => {
+      const result = await handlers.handleSessionDestroy({});
+      const data = parseResponse(result);
+      expect(data.success).toBe(false);
+    });
+  });
+
+  describe('handleSessionStatus', () => {
+    it('returns session stats for existing session', async () => {
+      const createResult = await handlers.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+      const result = await handlers.handleSessionStatus({ sessionId });
+      const data = parseResponse(result);
+      expect(data.success).toBe(true);
+      expect(data.stats).toBeDefined();
+      expect((data.stats as Record<string, unknown>).operationCount).toBe(0);
+    });
+
+    it('returns error for non-existent session', async () => {
+      const result = await handlers.handleSessionStatus({ sessionId: 'nope' });
+      const data = parseResponse(result);
+      expect(data.success).toBe(false);
+    });
+  });
+
+  describe('handleSessionExport', () => {
+    it('exports a session snapshot to an artifact JSON file', async () => {
+      const outputDir = `artifacts/tmp/instrumentation-export-${Date.now()}`;
+      try {
+        const createResult = await handlers.handleSessionCreate({ name: 'export-me' });
+        const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+          .id as string;
+        const opResult = await handlers.handleOperationRegister({
+          sessionId,
+          type: InstrumentationType.RUNTIME_HOOK,
+          target: 'signPayload',
+          config: { captureArgs: true },
+        });
+        const operation = parseResponse(opResult).operation as Record<string, unknown>;
+        await handlers.handleArtifactRecord({
+          operationId: operation.id,
+          data: { returnValue: 'signed' },
+        });
+
+        const result = await handlers.handleSessionExport({ sessionId, outputDir });
+        const data = parseResponse(result);
+
+        expect(data.success).toBe(true);
+        expect(data.sessionId).toBe(sessionId);
+        expect(data.operationCount).toBe(1);
+        expect(data.artifactCount).toBe(1);
+        expect(data.displayPath).toContain(outputDir.replace(/\\/g, '/'));
+
+        const exported = JSON.parse(await readFile(data.exportedPath as string, 'utf8'));
+        expect(exported.schemaVersion).toBe(1);
+        expect(exported.snapshot.session.name).toBe('export-me');
+        expect(exported.snapshot.operations).toHaveLength(1);
+        expect(exported.snapshot.artifacts).toHaveLength(1);
+      } finally {
+        await rm(outputDir, { recursive: true, force: true });
+      }
+    });
+
+    it('returns an error when exporting a missing session', async () => {
+      const result = await handlers.handleSessionExport({ sessionId: 'missing' });
+      const data = parseResponse(result);
+      expect(data.success).toBe(false);
+      expect(data.error).toContain('Session "missing" not found');
+    });
+  });
+
+  describe('handleSessionDiff', () => {
+    it('diffs operations and artifacts across two sessions', async () => {
+      const aCreate = await handlers.handleSessionCreate({});
+      const aId = (parseResponse(aCreate).session as Record<string, unknown>).id as string;
+      const aOp = parseResponse(
+        await handlers.handleOperationRegister({
+          sessionId: aId,
+          type: InstrumentationType.RUNTIME_HOOK,
+          target: 'onlyInA',
+        }),
+      ).operation as Record<string, unknown>;
+      await handlers.handleArtifactRecord({ operationId: aOp.id as string, data: { x: 1 } });
+
+      const bCreate = await handlers.handleSessionCreate({});
+      const bId = (parseResponse(bCreate).session as Record<string, unknown>).id as string;
+      await handlers.handleOperationRegister({
+        sessionId: bId,
+        type: InstrumentationType.RUNTIME_HOOK,
+        target: 'onlyInB',
+      });
+
+      const result = await handlers.handleSessionDiff({ sessionIdA: aId, sessionIdB: bId });
+      const data = parseResponse(result);
+      expect(data.success).toBe(true);
+      const diff = data.diff as Record<string, unknown>;
+      const ops = diff.operations as Record<string, unknown>;
+      expect((ops.removedFromA as unknown[]).length).toBe(1);
+      expect((ops.addedInB as unknown[]).length).toBe(1);
+    });
+
+    it('errors when a source session is missing', async () => {
+      const result = await handlers.handleSessionDiff({ sessionIdA: 'a', sessionIdB: 'b' });
+      const data = parseResponse(result);
+      expect(data.success).toBe(false);
+      expect(data.error).toContain('not found');
+    });
+  });
+
+  describe('handleSessionMerge', () => {
+    it('merges operations and artifacts from two sessions with id remapping', async () => {
+      const aCreate = await handlers.handleSessionCreate({});
+      const aId = (parseResponse(aCreate).session as Record<string, unknown>).id as string;
+      const aOp = parseResponse(
+        await handlers.handleOperationRegister({
+          sessionId: aId,
+          type: InstrumentationType.RUNTIME_HOOK,
+          target: 'fa',
+        }),
+      ).operation as Record<string, unknown>;
+      await handlers.handleArtifactRecord({ operationId: aOp.id as string, data: { a: 1 } });
+
+      const bCreate = await handlers.handleSessionCreate({});
+      const bId = (parseResponse(bCreate).session as Record<string, unknown>).id as string;
+      const bOp = parseResponse(
+        await handlers.handleOperationRegister({
+          sessionId: bId,
+          type: InstrumentationType.NETWORK_INTERCEPT,
+          target: 'fb',
+        }),
+      ).operation as Record<string, unknown>;
+      await handlers.handleArtifactRecord({ operationId: bOp.id as string, data: { b: 2 } });
+
+      const result = await handlers.handleSessionMerge({
+        sessionIdA: aId,
+        sessionIdB: bId,
+        name: 'merged',
+      });
+      const data = parseResponse(result);
+      expect(data.success).toBe(true);
+      expect(data.operationsMerged).toBe(2);
+      expect(data.artifactsMerged).toBe(2);
+      const snap = data.snapshot as Record<string, unknown>;
+      expect((snap.operations as unknown[]).length).toBe(2);
+      expect((snap.artifacts as unknown[]).length).toBe(2);
+
+      // Original sessions are untouched.
+      const aSnap = manager.getSessionSnapshot(aId);
+      expect(aSnap?.operations.length).toBe(1);
+      const bSnap = manager.getSessionSnapshot(bId);
+      expect(bSnap?.operations.length).toBe(1);
+    });
+
+    it('errors when a source session is missing', async () => {
+      const result = await handlers.handleSessionMerge({ sessionIdA: 'a', sessionIdB: 'b' });
+      const data = parseResponse(result);
+      expect(data.success).toBe(false);
+      expect(data.error).toContain('not found');
+    });
+  });
+
+  describe('handleOperationList', () => {
+    it('returns operations for given session', async () => {
+      const createResult = await handlers.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+      await handlers.handleOperationRegister({
+        sessionId,
+        type: InstrumentationType.RUNTIME_HOOK,
+        target: 'fn',
+      });
+      const result = await handlers.handleOperationList({ sessionId });
+      const data = parseResponse(result);
+      expect(data.success).toBe(true);
+      expect(data.totalOperations).toBe(1);
+    });
+  });
+
+  describe('handleOperationStatus and handleOperationStop', () => {
+    it('returns and stops an operation without destroying the session', async () => {
+      const createResult = await handlers.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+      const opResult = await handlers.handleOperationRegister({
+        sessionId,
+        type: InstrumentationType.RUNTIME_HOOK,
+        target: 'signPayload',
+      });
+      const operationId = (parseResponse(opResult).operation as Record<string, unknown>)
+        .id as string;
+
+      const statusResult = await handlers.handleOperationStatus({ sessionId, operationId });
+      const statusData = parseResponse(statusResult);
+      expect((statusData.operation as Record<string, unknown>).status).toBe('active');
+
+      const stopResult = await handlers.handleOperationStop({ sessionId, operationId });
+      const stopData = parseResponse(stopResult);
+      expect(stopData.success).toBe(true);
+      expect(stopData.message).toBe('Operation stopped');
+      expect((stopData.operation as Record<string, unknown>).status).toBe('cancelled');
+
+      const listResult = await handlers.handleOperationList({ sessionId });
+      const operations = parseResponse(listResult).operations as Array<Record<string, unknown>>;
+      expect(operations[0]?.status).toBe('cancelled');
+
+      const sessionStatus = parseResponse(await handlers.handleSessionStatus({ sessionId }));
+      expect((sessionStatus.session as Record<string, unknown>).status).toBe('active');
+    });
+
+    it('returns an error when stopping a missing operation', async () => {
+      const createResult = await handlers.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+
+      const result = await handlers.handleOperationStop({ sessionId, operationId: 'missing' });
+      const data = parseResponse(result);
+
+      expect(data.success).toBe(false);
+      expect(data.error).toContain('Operation "missing" not found');
+    });
+  });
+
+  describe('handleOperationRegister', () => {
+    it('registers an operation and returns operation data', async () => {
+      const createResult = await handlers.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+      const result = await handlers.handleOperationRegister({
+        sessionId,
+        type: InstrumentationType.RUNTIME_HOOK,
+        target: 'signPayload',
+        config: { captureArgs: true },
+      });
+      const data = parseResponse(result);
+      expect(data.success).toBe(true);
+      expect((data.operation as Record<string, unknown>).target).toBe('signPayload');
+    });
+
+    it('rejects invalid operation types', async () => {
+      const createResult = await handlers.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+
+      const result = await handlers.handleOperationRegister({
+        sessionId,
+        type: 'dom-hook',
+        target: 'fn',
+      });
+      const data = parseResponse(result);
+
+      expect(data.success).toBe(false);
+      expect(data.error).toContain('Invalid instrumentation type: dom-hook');
+    });
+  });
+
+  describe('handleArtifactQuery', () => {
+    it('returns artifacts for session', async () => {
+      const createResult = await handlers.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+      const opResult = await handlers.handleOperationRegister({
+        sessionId,
+        type: InstrumentationType.RUNTIME_HOOK,
+        target: 'fn',
+      });
+      const op = parseResponse(opResult).operation as Record<string, unknown>;
+      await handlers.handleArtifactRecord({ operationId: op.id, data: { args: [1, 2] } });
+      const result = await handlers.handleArtifactQuery({ sessionId });
+      const data = parseResponse(result);
+      expect(data.success).toBe(true);
+      expect(data.totalArtifacts).toBe(1);
+    });
+
+    it('respects limit parameter', async () => {
+      const createResult = await handlers.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+      const opResult = await handlers.handleOperationRegister({
+        sessionId,
+        type: InstrumentationType.RUNTIME_HOOK,
+        target: 'fn',
+      });
+      const op = parseResponse(opResult).operation as Record<string, unknown>;
+      await handlers.handleArtifactRecord({ operationId: op.id, data: { args: [1] } });
+      await handlers.handleArtifactRecord({ operationId: op.id, data: { args: [2] } });
+      await handlers.handleArtifactRecord({ operationId: op.id, data: { args: [3] } });
+      const result = await handlers.handleArtifactQuery({ sessionId, limit: 2 });
+      const data = parseResponse(result);
+      expect(data.totalArtifacts).toBe(2);
+    });
+
+    it('clamps invalid artifact query limits to the bounded range', async () => {
+      const createResult = await handlers.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+      const opResult = await handlers.handleOperationRegister({
+        sessionId,
+        type: InstrumentationType.RUNTIME_HOOK,
+        target: 'fn',
+      });
+      const op = parseResponse(opResult).operation as Record<string, unknown>;
+      await handlers.handleArtifactRecord({ operationId: op.id, data: { args: [1] } });
+      await handlers.handleArtifactRecord({ operationId: op.id, data: { args: [2] } });
+      await handlers.handleArtifactRecord({ operationId: op.id, data: { args: [3] } });
+
+      const result = await handlers.handleArtifactQuery({ sessionId, limit: -10 });
+      const data = parseResponse(result);
+
+      expect(data.totalArtifacts).toBe(1);
+    });
+
+    it('rejects invalid artifact type filters', async () => {
+      const createResult = await handlers.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+
+      const result = await handlers.handleArtifactQuery({ sessionId, type: 'dom-hook' });
+      const data = parseResponse(result);
+
+      expect(data.success).toBe(false);
+      expect(data.error).toContain('Invalid instrumentation type: dom-hook');
+    });
+  });
+
+  describe('handleArtifactRecord', () => {
+    it('records artifacts and returns artifact metadata', async () => {
+      const createResult = await handlers.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+      const opResult = await handlers.handleOperationRegister({
+        sessionId,
+        type: InstrumentationType.RUNTIME_HOOK,
+        target: 'fn',
+      });
+      const op = parseResponse(opResult).operation as Record<string, unknown>;
+      const result = await handlers.handleArtifactRecord({
+        operationId: op.id,
+        data: { returnValue: 'signed' },
+      });
+      const data = parseResponse(result);
+      expect(data.success).toBe(true);
+      expect((data.artifact as Record<string, unknown>).operationId).toBe(op.id);
+    });
+  });
+
+  describe('handleHookPreset', () => {
+    it('returns error if sessionId is required', async () => {
+      const result = await handlers.handleHookPreset({});
+      const data = parseResponse(result);
+      expect(data.success).toBe(false);
+      expect(data.error).toBe('sessionId is required');
+    });
+
+    it('returns error if deps are not available', async () => {
+      const createResult = await handlers.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+
+      const result = await handlers.handleHookPreset({ sessionId });
+      const data = parseResponse(result);
+      expect(data.success).toBe(false);
+      expect(data.error).toBe('hookPresetHandlers is not available');
+    });
+
+    it('delegates to sessionManager when deps are available', async () => {
+      const mockDeps = {
+        hookPresetHandlers: { handleHookPreset: vi.fn() },
+      };
+      const handlersWithDeps = new InstrumentationHandlers(manager, mockDeps);
+      const createResult = await handlersWithDeps.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+
+      vi.spyOn(manager, 'applyHookPreset').mockResolvedValue({
+        payload: { success: true, result: 'ok' },
+        operation: { status: 'completed' } as any,
+        artifacts: [],
+      });
+
+      const result = await handlersWithDeps.handleHookPreset({ sessionId, extraArg: 123 });
+      const data = parseResponse(result);
+      expect(data.success).toBe(true);
+      expect(manager.applyHookPreset).toHaveBeenCalledWith(sessionId, mockDeps.hookPresetHandlers, {
+        extraArg: 123,
+      });
+    });
+  });
+
+  describe('handleNetworkReplay', () => {
+    it('returns error if sessionId is missing', async () => {
+      const result = await handlers.handleNetworkReplay({});
+      const data = parseResponse(result);
+      expect(data.success).toBe(false);
+    });
+
+    it('returns error if deps are not available', async () => {
+      const createResult = await handlers.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+
+      const result = await handlers.handleNetworkReplay({ sessionId });
+      const data = parseResponse(result);
+      expect(data.success).toBe(false);
+      expect(data.error).toBe('advancedHandlers is not available');
+    });
+
+    it('delegates to sessionManager when deps are available', async () => {
+      const mockDeps = {
+        advancedHandlers: { handleNetworkReplayRequest: vi.fn() },
+      };
+      const handlersWithDeps = new InstrumentationHandlers(manager, mockDeps);
+      const createResult = await handlersWithDeps.handleSessionCreate({});
+      const sessionId = (parseResponse(createResult).session as Record<string, unknown>)
+        .id as string;
+
+      vi.spyOn(manager, 'replayNetworkRequest').mockResolvedValue({
+        payload: { success: true },
+        operation: { status: 'completed' } as any,
+        artifacts: [],
+      });
+
+      const result = await handlersWithDeps.handleNetworkReplay({ sessionId, extraArg: 123 });
+      const data = parseResponse(result);
+      expect(data.success).toBe(true);
+      expect(manager.replayNetworkRequest).toHaveBeenCalledWith(
+        sessionId,
+        mockDeps.advancedHandlers,
+        { extraArg: 123 },
+      );
+    });
+  });
+});

@@ -1,0 +1,503 @@
+import type { CodeCollector } from '@modules/collector/CodeCollector';
+import type { CDPSessionLike } from '@modules/browser/CDPSessionLike';
+import { logger } from '@utils/logger';
+import { CDP_SESSION_TIMEOUT_MS } from '@src/constants';
+import { NetworkMonitor } from '@modules/monitor/NetworkMonitor';
+import { PlaywrightNetworkMonitor } from '@modules/monitor/PlaywrightNetworkMonitor';
+import type { NetworkMonitorLike } from '@modules/monitor/NetworkMonitor.types';
+import { FetchInterceptor } from '@modules/monitor/FetchInterceptor';
+import type {
+  FetchInterceptRule,
+  FetchInterceptRuleInput,
+} from '@modules/monitor/FetchInterceptor';
+import {
+  clearExceptionsCore,
+  clearLogsCore,
+  getExceptionsCore,
+  getLogsCore,
+  getStatsCore,
+} from '@modules/monitor/ConsoleMonitor.impl.core.logs';
+import {
+  clearInjectedBuffersCore,
+  clearNetworkRecordsCore,
+  getAllJavaScriptResponsesCore,
+  getFetchRequestsCore,
+  getNetworkActivityCore,
+  getNetworkRequestsCore,
+  getNetworkResponsesCore,
+  getNetworkStatsCore,
+  getNetworkStatusCore,
+  getResponseBodyCore,
+  getXHRRequestsCore,
+  injectFetchInterceptorCore,
+  injectXHRInterceptorCore,
+  isNetworkEnabledCore,
+  resetInjectedInterceptorsCore,
+} from '@modules/monitor/ConsoleMonitor.impl.core.network';
+import {
+  clearObjectCacheCore,
+  inspectObjectCore,
+} from '@modules/monitor/ConsoleMonitor.impl.core.object-cache';
+import type { InspectedObjectProperties } from '@modules/monitor/ConsoleMonitor.impl.core.object-cache';
+import {
+  clearDynamicScriptBufferCore,
+  enableDynamicScriptMonitoringCore,
+  getDynamicScriptsCore,
+  injectFunctionTracerCore,
+  injectPropertyWatcherCore,
+  resetDynamicScriptMonitoringCore,
+} from '@modules/monitor/ConsoleMonitor.impl.core.dynamic';
+import type {
+  CdpRemoteObject,
+  ConsoleMessage,
+  ExceptionInfo,
+  PlaywrightConsoleMessageLike,
+  RuntimeEvaluateResult,
+} from './ConsoleMonitor.types';
+import {
+  cdpSendWithTimeout,
+  disableCore,
+  doEnableCdpCore,
+  enablePlaywrightCore,
+} from './ConsoleMonitor.impl.core.session';
+export type { NetworkRequest, NetworkResponse } from '@modules/monitor/NetworkMonitor';
+export type {
+  FetchInterceptRule,
+  FetchInterceptRuleInput,
+} from '@modules/monitor/FetchInterceptor';
+export type { ConsoleMessage, StackFrame, ExceptionInfo } from './ConsoleMonitor.types';
+
+type PlaywrightNetworkMonitorPage = ConstructorParameters<typeof PlaywrightNetworkMonitor>[0];
+
+export class ConsoleMonitor {
+  private cdpSession: CDPSessionLike | null = null;
+  private networkMonitor: NetworkMonitorLike | null = null;
+  private fetchInterceptor: FetchInterceptor | null = null;
+  private playwrightNetworkMonitor: PlaywrightNetworkMonitor | null = null;
+  private playwrightPage: unknown = null;
+  private usingManagedTargetSession = false;
+  private contextSwitchPending = false;
+  private playwrightConsoleHandler: ((msg: PlaywrightConsoleMessageLike) => void) | null = null;
+  private playwrightErrorHandler: ((error: Error) => void) | null = null;
+  private messages: ConsoleMessage[] = [];
+  private readonly MAX_MESSAGES = 1000;
+  private exceptions: ExceptionInfo[] = [];
+  private readonly MAX_EXCEPTIONS = 500;
+  private readonly MAX_INJECTED_DYNAMIC_SCRIPTS = 500;
+  private readonly MAX_OBJECT_CACHE_SIZE = 1000;
+  private objectCache: Map<string, InspectedObjectProperties> = new Map();
+  private initPromise?: Promise<void>;
+  private lastEnableOptions: { enableNetwork?: boolean; enableExceptions?: boolean } = {};
+  constructor(private collector: CodeCollector) {
+    this.touchSplitMembersForTypeCheck();
+  }
+  private touchSplitMembersForTypeCheck(): void {
+    void this.MAX_INJECTED_DYNAMIC_SCRIPTS;
+    void this.MAX_OBJECT_CACHE_SIZE;
+    void this.clearDynamicScriptBuffer;
+    void this.resetDynamicScriptMonitoring;
+    void this.usingManagedTargetSession;
+    void this.playwrightErrorHandler;
+    void this.messages;
+    void this.MAX_MESSAGES;
+    void this.exceptions;
+    void this.MAX_EXCEPTIONS;
+    void this.formatRemoteObject;
+    void this.extractValue;
+  }
+  setPlaywrightPage(page: unknown): void {
+    this.playwrightPage = page;
+    this.playwrightNetworkMonitor?.setPage(page as PlaywrightNetworkMonitorPage | null);
+  }
+  clearPlaywrightPage(): void {
+    this.playwrightPage = null;
+    this.contextSwitchPending = false;
+    this.playwrightConsoleHandler = null;
+    this.playwrightErrorHandler = null;
+    this.playwrightNetworkMonitor?.setPage(null);
+    this.playwrightNetworkMonitor = null;
+  }
+  private getManagedTargetSession(): CDPSessionLike | null {
+    const collectorWithTargets = this.collector as CodeCollector & {
+      getAttachedTargetSession?: () => CDPSessionLike | null;
+    };
+    return collectorWithTargets.getAttachedTargetSession?.() ?? null;
+  }
+  private getManagedTargetNetworkMonitor(): NetworkMonitorLike | null {
+    const collectorWithTargets = this.collector as CodeCollector & {
+      getBrowserTargetSessionManager?: () => NetworkMonitorLike | null;
+    };
+    return collectorWithTargets.getBrowserTargetSessionManager?.() ?? null;
+  }
+  private async createCdpSession(): Promise<{ session: CDPSessionLike; managed: boolean }> {
+    const managedSession = this.getManagedTargetSession();
+    if (managedSession) {
+      return {
+        session: managedSession,
+        managed: true,
+      };
+    }
+    const page = await this.collector.getActivePage();
+    const session = await Promise.race([
+      page.createCDPSession() as Promise<CDPSessionLike>,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('cdp_session_timeout')), CDP_SESSION_TIMEOUT_MS),
+      ),
+    ]);
+    return {
+      session,
+      managed: false,
+    };
+  }
+  markContextChanged(): void {
+    if (
+      !this.cdpSession &&
+      !this.playwrightPage &&
+      !this.networkMonitor &&
+      !this.playwrightNetworkMonitor &&
+      !this.fetchInterceptor
+    ) {
+      return;
+    }
+    this.contextSwitchPending = true;
+    this.clearLogs();
+    this.clearExceptions();
+    if (!this.networkMonitor?.persistsAcrossContextSwitches?.()) {
+      this.clearNetworkRecords();
+    }
+    this.clearObjectCache();
+    logger.info('ConsoleMonitor marked stale after active context switch');
+  }
+  async enable(options?: { enableNetwork?: boolean; enableExceptions?: boolean }): Promise<void> {
+    if (this.contextSwitchPending) {
+      await this.disable();
+    }
+    if (this.initPromise) {
+      await this.initPromise;
+      await this.applyPostEnableOptions(options);
+      return;
+    }
+    this.initPromise = this.doEnable(options);
+    try {
+      await this.initPromise;
+    } finally {
+      this.initPromise = undefined;
+    }
+  }
+  private async doEnable(options?: {
+    enableNetwork?: boolean;
+    enableExceptions?: boolean;
+  }): Promise<void> {
+    if (this.playwrightPage) {
+      this.lastEnableOptions = { ...options };
+      return enablePlaywrightCore(this, options);
+    }
+    if (this.cdpSession) {
+      if (options?.enableNetwork && !this.networkMonitor) {
+        this.networkMonitor =
+          this.getManagedTargetNetworkMonitor() ?? new NetworkMonitor(this.cdpSession);
+        await this.networkMonitor.enable();
+        logger.info('Network monitoring added to existing ConsoleMonitor session');
+      }
+      return;
+    }
+    const { session, managed } = await this.createCdpSession();
+    await doEnableCdpCore(this, session, managed, options);
+  }
+  private async applyPostEnableOptions(options?: {
+    enableNetwork?: boolean;
+    enableExceptions?: boolean;
+  }): Promise<void> {
+    if (!options?.enableNetwork) {
+      return;
+    }
+    this.lastEnableOptions = { ...this.lastEnableOptions, ...options };
+    if (this.playwrightPage && this.playwrightConsoleHandler && !this.playwrightNetworkMonitor) {
+      await enablePlaywrightCore(this, options);
+      return;
+    }
+    if (this.cdpSession && !this.networkMonitor) {
+      this.networkMonitor =
+        this.getManagedTargetNetworkMonitor() ?? new NetworkMonitor(this.cdpSession);
+      await this.networkMonitor.enable();
+      logger.info('Network monitoring added to existing ConsoleMonitor session');
+    }
+  }
+  async disable(): Promise<void> {
+    try {
+      if (this.cdpSession && this.fetchInterceptor) {
+        await this.fetchInterceptor.disable();
+        this.fetchInterceptor = null;
+      }
+      await disableCore(this);
+    } finally {
+      this.fetchInterceptor = null;
+      this.initPromise = undefined;
+      this.contextSwitchPending = false;
+      this.objectCache.clear();
+    }
+  }
+  async ensureSession(): Promise<void> {
+    if (this.contextSwitchPending) {
+      logger.info('ConsoleMonitor context switched, rebinding on demand...');
+      const rebindOptions = { ...this.lastEnableOptions };
+      await this.disable();
+      await this.enable(rebindOptions);
+      return;
+    }
+    if (!this.cdpSession && !this.playwrightPage) {
+      logger.info('ConsoleMonitor CDP session lost, reinitializing...');
+      await this.enable(this.lastEnableOptions);
+      return;
+    }
+
+    // Pre-flight health check: verify the CDP session is actually responsive.
+    // The session reference may be non-null while the underlying WebSocket is in a
+    // zombie state (half-open / unresponsive) that does NOT fire the 'disconnected'
+    // event. Without this check, cdpSession.send() hangs indefinitely until the
+    // 30s timeout wrapper fires.
+    if (this.cdpSession) {
+      try {
+        // Use a short 3s timeout — if Runtime.enable doesn't respond quickly,
+        // the session is zombie and must be reinitialized.
+        await Promise.race([
+          this.cdpSession.send('Runtime.evaluate', { expression: '1', returnByValue: true }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('session_unreachable')), 3000),
+          ),
+        ]);
+        return; // Session is healthy
+      } catch {
+        logger.warn('ConsoleMonitor CDP session unresponsive (zombie), reinitializing...');
+        this.cdpSession = null;
+        this.networkMonitor = null;
+        this.fetchInterceptor = null;
+        this.usingManagedTargetSession = false;
+        await this.enable(this.lastEnableOptions);
+      }
+    }
+  }
+  isSessionActive(): boolean {
+    return !this.contextSwitchPending && (this.cdpSession !== null || this.playwrightPage !== null);
+  }
+  getLogs(filter?: {
+    type?: 'log' | 'warn' | 'error' | 'info' | 'debug';
+    limit?: number;
+    since?: number;
+  }): ConsoleMessage[] {
+    return getLogsCore(this, filter);
+  }
+  async execute(expression: string): Promise<unknown> {
+    await this.ensureSession();
+    try {
+      // Wrap with 30s timeout to avoid hanging on stale CDP sessions
+      const result = (await cdpSendWithTimeout(this.cdpSession!, 'Runtime.evaluate', {
+        expression,
+        returnByValue: true,
+      })) as RuntimeEvaluateResult;
+      if (result.exceptionDetails) {
+        logger.error('Console execute error:', result.exceptionDetails);
+        throw new Error(result.exceptionDetails.text);
+      }
+      logger.info('Console expression executed');
+      return result.result.value;
+    } catch (error) {
+      logger.error('Console execute failed:', error);
+      throw error;
+    }
+  }
+  clearLogs(): void {
+    clearLogsCore(this);
+  }
+  getStats(): {
+    totalMessages: number;
+    byType: Record<string, number>;
+  } {
+    return getStatsCore(this);
+  }
+  async close(): Promise<void> {
+    try {
+      await this.disable();
+    } finally {
+      this.initPromise = undefined;
+      this.objectCache.clear();
+    }
+  }
+  isNetworkEnabled(): boolean {
+    return isNetworkEnabledCore(this);
+  }
+  getNetworkStatus(): {
+    enabled: boolean;
+    requestCount: number;
+    responseCount: number;
+    listenerCount: number;
+    cdpSessionActive: boolean;
+  } {
+    return getNetworkStatusCore(this);
+  }
+  getNetworkRequests(filter?: { url?: string; method?: string; limit?: number }) {
+    return getNetworkRequestsCore(this, filter);
+  }
+  getNetworkResponses(filter?: { url?: string; status?: number; limit?: number }) {
+    return getNetworkResponsesCore(this, filter);
+  }
+  getNetworkActivity(requestId: string) {
+    return getNetworkActivityCore(this, requestId);
+  }
+  async getResponseBody(requestId: string): Promise<{
+    body: string;
+    base64Encoded: boolean;
+  } | null> {
+    return getResponseBodyCore(this, requestId);
+  }
+  async getAllJavaScriptResponses() {
+    return getAllJavaScriptResponsesCore(this);
+  }
+  clearNetworkRecords(): void {
+    clearNetworkRecordsCore(this);
+  }
+  async clearInjectedBuffers(): Promise<{
+    xhrCleared: number;
+    fetchCleared: number;
+    dynamicScriptsCleared: number;
+  }> {
+    return clearInjectedBuffersCore(this);
+  }
+  async resetInjectedInterceptors(): Promise<{
+    xhrReset: boolean;
+    fetchReset: boolean;
+    scriptMonitorReset: boolean;
+  }> {
+    return resetInjectedInterceptorsCore(this);
+  }
+  getNetworkStats() {
+    return getNetworkStatsCore(this);
+  }
+  async injectXHRInterceptor(options?: { persistent?: boolean }): Promise<void> {
+    return injectXHRInterceptorCore(this, options);
+  }
+  async injectFetchInterceptor(options?: { persistent?: boolean }): Promise<void> {
+    return injectFetchInterceptorCore(this, options);
+  }
+  async getXHRRequests(): Promise<unknown[]> {
+    return getXHRRequestsCore(this);
+  }
+  async getFetchRequests(): Promise<unknown[]> {
+    return getFetchRequestsCore(this);
+  }
+  getExceptions(filter?: { url?: string; limit?: number; since?: number }): ExceptionInfo[] {
+    return getExceptionsCore(this, filter);
+  }
+  clearExceptions(): void {
+    clearExceptionsCore(this);
+  }
+  async inspectObject(objectId: string): Promise<InspectedObjectProperties> {
+    return inspectObjectCore(this, objectId);
+  }
+  clearObjectCache(): void {
+    clearObjectCacheCore(this);
+  }
+  async enableDynamicScriptMonitoring(options?: { persistent?: boolean }): Promise<void> {
+    return enableDynamicScriptMonitoringCore(this, options);
+  }
+  private async clearDynamicScriptBuffer(): Promise<{ dynamicScriptsCleared: number }> {
+    return clearDynamicScriptBufferCore(this);
+  }
+  private async resetDynamicScriptMonitoring(): Promise<{ scriptMonitorReset: boolean }> {
+    return resetDynamicScriptMonitoringCore(this);
+  }
+  async getDynamicScripts(): Promise<unknown[]> {
+    return getDynamicScriptsCore(this);
+  }
+  async injectFunctionTracer(
+    functionName: string,
+    options?: { persistent?: boolean },
+  ): Promise<void> {
+    return injectFunctionTracerCore(this, functionName, options);
+  }
+  async injectPropertyWatcher(
+    objectPath: string,
+    propertyName: string,
+    options?: { persistent?: boolean },
+  ): Promise<void> {
+    return injectPropertyWatcherCore(this, objectPath, propertyName, options);
+  }
+
+  // ── Fetch Interception ──
+
+  async enableFetchIntercept(rules: FetchInterceptRuleInput[]): Promise<FetchInterceptRule[]> {
+    await this.ensureSession();
+    if (!this.cdpSession) {
+      throw new Error('No CDP session available for Fetch interception');
+    }
+    if (!this.fetchInterceptor) {
+      this.fetchInterceptor = new FetchInterceptor(this.cdpSession);
+    }
+    return this.fetchInterceptor.enable(rules);
+  }
+
+  async disableFetchIntercept(): Promise<{ removedRules: number }> {
+    if (!this.fetchInterceptor) {
+      return { removedRules: 0 };
+    }
+    const result = await this.fetchInterceptor.disable();
+    this.fetchInterceptor = null;
+    return result;
+  }
+
+  async removeFetchInterceptRule(ruleId: string): Promise<boolean> {
+    if (!this.fetchInterceptor) {
+      return false;
+    }
+    const removed = await this.fetchInterceptor.removeRule(ruleId);
+    if (!this.fetchInterceptor.isEnabled()) {
+      this.fetchInterceptor = null;
+    }
+    return removed;
+  }
+
+  getFetchInterceptStatus(): {
+    enabled: boolean;
+    rules: FetchInterceptRule[];
+    totalHits: number;
+  } {
+    if (!this.fetchInterceptor) {
+      return { enabled: false, rules: [], totalHits: 0 };
+    }
+    return this.fetchInterceptor.listRules();
+  }
+  private formatRemoteObject(obj: CdpRemoteObject): string {
+    if (obj.value !== undefined) {
+      return String(obj.value);
+    }
+    if (obj.description) {
+      return obj.description;
+    }
+    if (obj.type === 'undefined') {
+      return 'undefined';
+    }
+    if (obj.type === 'object' && obj.subtype === 'null') {
+      return 'null';
+    }
+    return `[${obj.type}]`;
+  }
+  private extractValue(obj: CdpRemoteObject): unknown {
+    if (obj.value !== undefined) {
+      return obj.value;
+    }
+    if (obj.type === 'undefined') {
+      return undefined;
+    }
+    if (obj.type === 'object' && obj.subtype === 'null') {
+      return null;
+    }
+    if (obj.objectId) {
+      return {
+        __objectId: obj.objectId,
+        __type: obj.type,
+        __description: obj.description,
+      };
+    }
+    return obj.description || `[${obj.type}]`;
+  }
+}

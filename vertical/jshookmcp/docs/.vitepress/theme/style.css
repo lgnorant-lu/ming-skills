@@ -1,0 +1,226 @@
+/**
+ * JSHookMCP Custom Theme
+ * Designed for AI-assisted JavaScript analysis & security research aesthetics.
+ */
+
+:root {
+  /* Brand Fonts */
+  --vp-font-family-base:
+    'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
+    'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  --vp-font-family-mono:
+    'Fira Code', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+
+  /* Brand Colors - Neon Cyan and Vibrant Purple */
+  --vp-c-brand-1: #00e5ff; /* Bright Cyan */
+  --vp-c-brand-2: #00bfff; /* Deep Sky Blue */
+  --vp-c-brand-3: #8a2be2; /* Blue Violet */
+  --vp-c-brand-soft: rgba(0, 229, 255, 0.16);
+
+  /* Overrides for Light Theme to make it feel more "coder" focused but clean */
+  --vp-c-bg: #f8f9fa;
+  --vp-c-bg-alt: #ffffff;
+  --vp-c-border: #e2e8f0;
+  --vp-c-gutter: #e2e8f0;
+
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: -webkit-linear-gradient(120deg, #00e5ff 30%, #8a2be2);
+
+  --vp-home-hero-image-background-image: linear-gradient(-45deg, #00bfff 50%, #8a2be2 50%);
+  --vp-home-hero-image-filter: blur(44px);
+
+  /* Customize Code blocks (Light Mode) */
+  --vp-code-bg: rgba(27, 31, 35, 0.05); /* Light gray for inline code */
+  --vp-c-text-code: #8a2be2; /* Blue Violet for better contrast in light mode */
+}
+
+.dark {
+  /* Deep Dark Theme for the typical hacker/reverse-engineering vibe */
+  --vp-c-bg: rgba(5, 5, 5, 0.65); /* Semi-transparent Black */
+  --vp-c-bg-alt: rgba(10, 10, 10, 0.65);
+  --vp-c-border: rgba(31, 41, 55, 0.6);
+  --vp-c-gutter: rgba(31, 41, 55, 0.6);
+
+  /* Adjust text colors */
+  --vp-c-text-1: #f3f4f6;
+  --vp-c-text-2: #d1d5db;
+  --vp-c-text-3: #9ca3af;
+
+  /* Code block background */
+  --vp-code-bg: #0a0a0a;
+  --vp-c-text-code: #00e5ff;
+
+  /* Button Overrides */
+  --vp-button-brand-bg: var(--vp-c-brand-1);
+  --vp-button-brand-text: #050505;
+  --vp-button-brand-hover-bg: #00bfff;
+  --vp-button-brand-hover-text: #ffffff;
+}
+
+/* High-end black gradient background for dark mode */
+.dark body {
+  background: radial-gradient(
+    circle at top right,
+    #111827 0%,
+    #050505 40%,
+    #000000 100%
+  ) !important;
+  background-attachment: fixed !important;
+}
+
+/* Cyberpunk 2077 Seamless Glass & Neon Borders via Native Structural Variables */
+.dark .VPNav,
+.dark .VPSidebar,
+.dark .VPLocalNav {
+  background-color: rgba(5, 5, 5, 0.65) !important;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* Unify Navbar and Hero Glows safely */
+.dark .VPNav {
+  box-shadow: 0 0 20px rgba(0, 229, 255, 0.15) !important;
+  /* Prevent native divider from showing */
+  border-bottom: none !important;
+}
+
+/* Force a single, unbroken glowing line across the entire navbar */
+.dark .VPNav::after {
+  content: '';
+  position: absolute;
+  bottom: 0px;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background-color: var(--vp-c-brand-1);
+  box-shadow: 0 0 8px var(--vp-c-brand-1);
+  z-index: 10; /* Lower than dropdown menus (typically z-index 100+) */
+  pointer-events: none;
+}
+
+/* Hide native VitePress split dividers */
+.dark .VPNav .divider,
+.dark .VPLocalNav .divider {
+  display: none !important;
+  opacity: 0 !important;
+}
+
+/* Optional: Since the sidebar is a massive panel, we soften its right border from full neon back to subtle */
+.dark .VPSidebar {
+  border-right: 1px solid rgba(0, 229, 255, 0.15) !important;
+}
+
+/* Add a glowing effect to the hero image or specific key elements */
+.vp-doc h1,
+.vp-doc h2 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.VPHero .name {
+  background-clip: text;
+}
+
+/* Sharp rectangular rendering for Cyberpunk aesthetic */
+.vp-doc div[class*='language-'],
+.vp-doc pre,
+.vp-doc code,
+.vp-doc .custom-block {
+  border-radius: 0 !important;
+}
+
+/* Cyberpunk accent lines for code blocks */
+.vp-doc div[class*='language-'] {
+  border-left: 2px solid var(--vp-c-brand-1) !important;
+}
+
+/* Circular faded mask for Hero Favicon */
+.VPHero .image-src {
+  border-radius: 50%;
+  -webkit-mask-image: radial-gradient(circle, rgba(0, 0, 0, 1) 40%, rgba(0, 0, 0, 0) 70%);
+  mask-image: radial-gradient(circle, rgba(0, 0, 0, 1) 40%, rgba(0, 0, 0, 0) 70%);
+}
+
+/* Cyberpunk Dropdown Menu (VPMenu - i18n/Themes) */
+.dark .VPFlyout .VPMenu,
+.dark .VPMenu {
+  border-radius: 0 !important;
+  background-color: rgba(10, 10, 10, 0.95) !important;
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  /* A subtle border so it doesn't look like a cheap cyan box */
+  border: 1px solid rgba(0, 229, 255, 0.15) !important;
+  /* Top accent linking to the navbar */
+  border-top: 2px solid var(--vp-c-brand-1) !important;
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.8),
+    0 0 20px rgba(0, 229, 255, 0.05) !important;
+}
+
+.dark .VPMenu .item,
+.dark .VPMenu .VPLink,
+.dark .VPMenuLink {
+  border-radius: 0 !important;
+}
+
+.dark .VPMenu .item:hover,
+.dark .VPMenu .VPLink:hover,
+.dark .VPMenuLink:hover {
+  background-color: rgba(0, 229, 255, 0.1) !important;
+  color: var(--vp-c-brand-1) !important;
+  box-shadow: inset 2px 0 0 0 var(--vp-c-brand-1) !important;
+  transition: all 0.2s ease;
+}
+
+/* Cyberpunk DocSearch Button */
+.dark .DocSearch-Button {
+  border-radius: 0 !important;
+  border: 1px solid rgba(0, 229, 255, 0.3) !important;
+  background-color: rgba(5, 5, 5, 0.4) !important;
+  transition: all 0.3s ease;
+}
+
+.dark .DocSearch-Button:hover {
+  border-color: var(--vp-c-brand-1) !important;
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.25) !important;
+  background-color: rgba(0, 229, 255, 0.1) !important;
+}
+
+/* Strip native inner key wrappers */
+.dark .DocSearch-Button-Keys {
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.dark .DocSearch-Button-Key {
+  border-radius: 0 !important;
+  border: 1px solid rgba(0, 229, 255, 0.5) !important;
+  color: var(--vp-c-brand-1) !important;
+  background: rgba(0, 229, 255, 0.1) !important;
+  box-shadow: none !important;
+  top: 0 !important;
+  padding: 0 4px !important;
+}
+
+/* Cyberpunk Top Navbar Vertical Dividers */
+.dark .VPNavBar .menu + .translations::before,
+.dark .VPNavBar .menu + .appearance::before,
+.dark .VPNavBar .menu + .social-links::before,
+.dark .VPNavBar .translations + .appearance::before,
+.dark .VPNavBar .appearance + .social-links::before {
+  background-color: var(--vp-c-brand-1) !important;
+  box-shadow: 0 0 5px var(--vp-c-brand-1) !important;
+}
+
+/* Cyberpunk Top Nav Dropdown & Icon Hovers */
+.dark .VPNavBarTranslations:hover .text,
+.dark .VPNavBarTranslations:hover .vpi-languages,
+.dark .VPNavBarTranslations:hover .vpi-chevron-down,
+.dark .VPNavBarAppearance:hover .vpi-sun,
+.dark .VPNavBarAppearance:hover .vpi-moon,
+.dark .VPNavBarSocialLinks:hover .vpi-social-github {
+  color: var(--vp-c-brand-1) !important;
+  filter: drop-shadow(0 0 5px rgba(0, 229, 255, 0.8)) !important;
+}

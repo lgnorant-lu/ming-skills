@@ -1,0 +1,370 @@
+/**
+ * EventBus — type-safe publish/subscribe event bus for decoupling MCPServer internals.
+ *
+ * Replaces direct domain-to-server coupling with a central event dispatch.
+ * Supports async listeners, one-time subscriptions, and wildcard listeners.
+ */
+
+import { getToolRequestContext } from '@server/runtime/ToolRequestContext';
+
+export type EventHandler<T = unknown> = (payload: T) => void | Promise<void>;
+
+/** Core event map — extend via module augmentation for domain-specific events. */
+export interface ServerEventMap {
+  [key: string]: unknown;
+  'tool:activated': { toolName: string; domain: string; timestamp: string };
+  'tool:deactivated': { toolName: string; domain: string; timestamp: string };
+  'tool:called': {
+    toolName: string;
+    domain: string | null;
+    sessionId?: string | null;
+    timestamp: string;
+    success: boolean;
+    args?: Record<string, unknown>;
+    result?: {
+      success?: boolean;
+      isError?: boolean;
+    };
+  };
+  'domain:loaded': { domain: string; toolCount: number; timestamp: string };
+  'domain:unloaded': { domain: string; timestamp: string };
+  'extension:loaded': { pluginId: string; toolCount: number; source: string; timestamp: string };
+  'extension:unloaded': { pluginId: string; timestamp: string };
+  'session:browser_launched': { mode: string; timestamp: string };
+  'session:browser_closed': { reason: string; timestamp: string };
+  'debugger:breakpoint_hit': { scriptId: string; lineNumber: number; timestamp: string };
+  'browser:navigated': { url: string; timestamp: string };
+  'memory:scan_completed': { scanType: string; resultCount: number; timestamp: string };
+  'activation:domain_boosted': { domain: string; reason: string; timestamp: string };
+  'activation:domain_pruned': { domain: string; reason: string; timestamp: string };
+  'tool:progress': {
+    progressToken: string | number;
+    progress: number;
+    total?: number;
+    timestamp: string;
+  };
+  'evidence:updated': { timestamp: string; reason: string };
+  'network:intercept_started': { interceptType: string; timestamp: string };
+  'network:dns_resolved': { hostname: string; count: number; timestamp: string };
+  'network:dns_reversed': { address: string; count: number; timestamp: string };
+  'network:http_request_built': {
+    method: string;
+    target: string;
+    byteLength: number;
+    timestamp: string;
+  };
+  'network:http_plain_request_completed': {
+    host: string;
+    port: number;
+    statusCode: number | null;
+    byteLength: number;
+    timestamp: string;
+  };
+  'network:http2_probe_completed': {
+    url: string;
+    statusCode: number | null;
+    alpnProtocol: string | null;
+    success: boolean;
+    timestamp: string;
+  };
+  'network:http2_frame_parsed': {
+    frameType: string;
+    typeCode: number;
+    streamId: number;
+    payloadBytes: number;
+    timestamp: string;
+  };
+  'network:http2_fingerprint_computed': {
+    hash: string;
+    frameCount: number;
+    timestamp: string;
+  };
+  'network:grpc_frame_parsed': {
+    messageCount: number;
+    totalBytes: number;
+    timestamp: string;
+  };
+  'network:grpc_frame_built': {
+    messageCount: number;
+    bytes: number;
+    timestamp: string;
+  };
+  'v8:heap_captured': { snapshotId: string; sizeBytes: number; timestamp: string };
+  'tls:keylog_started': { filePath: string; timestamp: string };
+  'tls:probe_completed': { host: string; port: number; success: boolean; timestamp: string };
+  'tls:session_opened': { sessionId: string; host: string; port: number; timestamp: string };
+  'tls:session_closed': { sessionId: string; reason: string | null; timestamp: string };
+  'tls:session_written': { sessionId: string; byteLength: number; timestamp: string };
+  'tls:session_read': {
+    sessionId: string;
+    byteLength: number;
+    matched: boolean;
+    timestamp: string;
+  };
+  'websocket:session_opened': {
+    sessionId: string;
+    scheme: 'ws' | 'wss';
+    host: string;
+    port: number;
+    path: string;
+    timestamp: string;
+  };
+  'websocket:session_written': {
+    sessionId: string;
+    frameType: 'text' | 'binary' | 'close' | 'ping' | 'pong';
+    byteLength: number;
+    automatic: boolean;
+    timestamp: string;
+  };
+  'websocket:frame_read': {
+    sessionId: string;
+    frameType: 'text' | 'binary' | 'close' | 'ping' | 'pong';
+    byteLength: number;
+    timestamp: string;
+  };
+  'websocket:session_closed': {
+    sessionId: string;
+    reason: string | null;
+    timestamp: string;
+  };
+  'tcp:session_opened': { sessionId: string; host: string; port: number; timestamp: string };
+  'tcp:session_closed': { sessionId: string; reason: string | null; timestamp: string };
+  'tcp:session_written': { sessionId: string; byteLength: number; timestamp: string };
+  'tcp:session_read': {
+    sessionId: string;
+    byteLength: number;
+    matched: boolean;
+    timestamp: string;
+  };
+  'skia:scene_captured': { canvasId: string; nodeCount: number; timestamp: string };
+  'frida:attached': { target: string; sessionId: string; timestamp: string };
+  'adb:device_connected': { serial: string; model: string; timestamp: string };
+  'mojo:message_captured': { messageCount: number; timestamp: string };
+  'syscall:trace_started': { backend: string; pid?: number; simulate?: boolean; timestamp: string };
+  'protocol:pattern_detected': { patternName: string; confidence: number; timestamp: string };
+  'protocol:payload_built': { byteLength: number; fieldCount: number; timestamp: string };
+  'protocol:payload_mutated': { byteLength: number; mutationCount: number; timestamp: string };
+  'protocol:ethernet_frame_built': {
+    byteLength: number;
+    etherType: string;
+    timestamp: string;
+  };
+  'protocol:arp_built': {
+    operation: 'request' | 'reply';
+    byteLength: number;
+    timestamp: string;
+  };
+  'protocol:ip_packet_built': {
+    version: 'ipv4' | 'ipv6';
+    protocol: number;
+    byteLength: number;
+    timestamp: string;
+  };
+  'protocol:icmp_echo_built': {
+    operation: 'request' | 'reply';
+    byteLength: number;
+    checksumHex: string;
+    timestamp: string;
+  };
+  'protocol:checksum_applied': {
+    checksumHex: string;
+    byteLength: number;
+    timestamp: string;
+  };
+  'protocol:pcap_written': {
+    path: string;
+    packetCount: number;
+    byteLength: number;
+    timestamp: string;
+  };
+  'protocol:pcap_read': { path: string; packetCount: number; timestamp: string };
+  'protocol:pcapng_written': {
+    path: string;
+    packetCount: number;
+    interfaceCount: number;
+    byteLength: number;
+    timestamp: string;
+  };
+  'protocol:pcapng_read': {
+    path: string;
+    blockCount: number;
+    packetCount: number;
+    timestamp: string;
+  };
+  'protocol:dns_dissected': {
+    byteLength: number;
+    questionCount: number;
+    answerCount: number;
+    timestamp: string;
+  };
+  'protocol:http_dissected': {
+    byteLength: number;
+    kind: 'request' | 'response';
+    headerCount: number;
+    timestamp: string;
+  };
+}
+
+interface Subscription {
+  handler: EventHandler<unknown>;
+  once: boolean;
+}
+
+export class EventBus<TMap extends Record<string, unknown> = ServerEventMap> {
+  private readonly listeners = new Map<keyof TMap, Subscription[]>();
+  private readonly wildcardListeners: Subscription[] = [];
+
+  /**
+   * Subscribe to a specific event.
+   * Returns an unsubscribe function.
+   */
+  on<K extends keyof TMap>(event: K, handler: EventHandler<TMap[K]>): () => void {
+    const subs = this.listeners.get(event) ?? [];
+    const subscription: Subscription = { handler: handler as EventHandler<unknown>, once: false };
+    subs.push(subscription);
+    this.listeners.set(event, subs);
+
+    return () => {
+      const list = this.listeners.get(event);
+      if (list) {
+        const idx = list.indexOf(subscription);
+        if (idx >= 0) list.splice(idx, 1);
+      }
+    };
+  }
+
+  /**
+   * Subscribe to a specific event, auto-unsubscribing after the first fire.
+   */
+  once<K extends keyof TMap>(event: K, handler: EventHandler<TMap[K]>): () => void {
+    const subs = this.listeners.get(event) ?? [];
+    const subscription: Subscription = { handler: handler as EventHandler<unknown>, once: true };
+    subs.push(subscription);
+    this.listeners.set(event, subs);
+
+    return () => {
+      const list = this.listeners.get(event);
+      if (list) {
+        const idx = list.indexOf(subscription);
+        if (idx >= 0) list.splice(idx, 1);
+      }
+    };
+  }
+
+  /**
+   * Subscribe to all events (wildcard listener).
+   */
+  onAny(handler: EventHandler<{ event: string; payload: unknown }>): () => void {
+    const subscription: Subscription = {
+      handler: handler as EventHandler<unknown>,
+      once: false,
+    };
+    this.wildcardListeners.push(subscription);
+
+    return () => {
+      const idx = this.wildcardListeners.indexOf(subscription);
+      if (idx >= 0) this.wildcardListeners.splice(idx, 1);
+    };
+  }
+
+  /**
+   * Emit an event to all registered listeners.
+   *
+   * Named listeners run sequentially (preserving ordering semantics).
+   * Wildcard listeners run in parallel via Promise.allSettled since they
+   * are observability/telemetry side-effects whose ordering does not matter.
+   * Errors in one listener never prevent others from running.
+   */
+  async emit<K extends keyof TMap>(event: K, payload: TMap[K]): Promise<void> {
+    const subs = this.listeners.get(event);
+    if (subs) {
+      const toRemove: number[] = [];
+      for (let i = 0; i < subs.length; i++) {
+        const sub = subs[i];
+        if (!sub) continue;
+        try {
+          await sub.handler(payload);
+        } catch {
+          // Swallow listener errors to prevent cascading failures
+        }
+        if (sub.once) toRemove.push(i);
+      }
+      // Remove once-listeners in reverse order to preserve indices
+      for (let i = toRemove.length - 1; i >= 0; i--) {
+        subs.splice(toRemove[i]!, 1);
+      }
+    }
+
+    // Wildcard listeners run in parallel — they are telemetry/observability
+    // side-effects whose completion order is irrelevant.
+    if (this.wildcardListeners.length > 0) {
+      const sessionId = getToolRequestContext()?.sessionId;
+      const wildcardPayload =
+        sessionId && typeof payload === 'object' && payload !== null && !Array.isArray(payload)
+          ? { ...(payload as Record<string, unknown>), mcpSessionId: sessionId }
+          : payload;
+      const wildPayload = { event, payload: wildcardPayload };
+      const promises = this.wildcardListeners.map((sub) => {
+        try {
+          return Promise.resolve(sub.handler(wildPayload));
+        } catch {
+          return Promise.resolve();
+        }
+      });
+      await Promise.allSettled(promises);
+    }
+  }
+
+  /**
+   * Remove all listeners for a specific event, or all listeners if no event specified.
+   */
+  removeAllListeners(event?: keyof TMap): void {
+    if (event) {
+      this.listeners.delete(event);
+    } else {
+      this.listeners.clear();
+      this.wildcardListeners.length = 0;
+    }
+  }
+
+  /**
+   * Get the number of listeners for a specific event.
+   */
+  listenerCount(event: keyof TMap): number {
+    return this.listeners.get(event)?.length ?? 0;
+  }
+}
+
+/**
+ * Singleton-style factory for the server event bus.
+ * Call `createServerEventBus()` once during server init.
+ */
+export function createServerEventBus(): EventBus<ServerEventMap> {
+  return new EventBus<ServerEventMap>();
+}
+
+/**
+ * Creates a debounced progress emitter for tool handlers.
+ * @param eventBus The server event bus
+ * @param progressToken The progress token from args._meta.progressToken
+ * @param debounceMs Minimum time between emissions (defaults to 500ms)
+ */
+export function createProgressDebouncer(
+  eventBus: EventBus<ServerEventMap>,
+  progressToken: string | number,
+  debounceMs = 500,
+): (progress: number, total?: number) => void {
+  let lastEmit = 0;
+  return (progress: number, total?: number) => {
+    const now = Date.now();
+    if (now - lastEmit >= debounceMs || progress === total) {
+      lastEmit = now;
+      void eventBus.emit('tool:progress', {
+        progressToken,
+        progress,
+        total,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  };
+}

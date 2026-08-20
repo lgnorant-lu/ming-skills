@@ -1,0 +1,47 @@
+import { describe, expect, it } from 'vitest';
+import { behaviorTools } from '@server/domains/browser/definitions.tools.behavior';
+
+function getTool(name: string) {
+  const tool = behaviorTools.find((entry) => entry.name === name);
+  expect(tool).toBeDefined();
+  return tool!;
+}
+
+describe('behaviorTools', () => {
+  it('describes captcha_solver_capabilities as an availability probe', async () => {
+    const tool = getTool('captcha_solver_capabilities');
+
+    expect(tool.description).toContain('availability');
+    expect(tool.description).not.toContain('AntiCaptcha');
+    expect(tool.description).not.toContain('CapSolver');
+  });
+
+  it('describes captcha_vision_solve with challenge type fields', async () => {
+    const tool = getTool('captcha_vision_solve');
+    const props = tool.inputSchema.properties as Record<string, { description?: string }>;
+
+    expect(tool.description).toContain('CAPTCHA');
+    expect(tool.description).toContain('manual');
+    expect(tool.description).toContain('external service');
+    expect(tool.description).not.toContain('2captcha');
+    expect(tool.description).not.toContain('reCAPTCHA');
+    expect(tool.description).not.toContain('hCaptcha');
+    expect(tool.description).not.toContain('AI');
+    expect(props.mode).toBeDefined();
+    expect(props.challengeType).toBeDefined();
+  });
+
+  it('exposes a generic widget_challenge_solve tool without product branding', async () => {
+    const tool = getTool('widget_challenge_solve');
+    const props = tool.inputSchema.properties as Record<string, { description?: string }>;
+
+    expect(tool.description).toContain('widget');
+    expect(tool.description).toContain('manual');
+    expect(tool.description).toContain('hook');
+    expect(tool.description).not.toContain('Turnstile');
+    expect(tool.description).not.toContain('Cloudflare');
+    expect(tool.description).not.toContain('capsolver');
+    expect(props.mode).toBeDefined();
+    expect(props.provider).toBeDefined();
+  });
+});

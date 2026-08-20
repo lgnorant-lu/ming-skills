@@ -1,0 +1,813 @@
+import type { Browser, Page, CDPSession, Target } from 'rebrowser-puppeteer-core';
+import type {
+  CollectCodeOptions,
+  CollectCodeResult,
+  CodeFile,
+  PuppeteerConfig,
+} from '@internal-types/index';
+import { logger } from '@utils/logger';
+import { toChromeCompatibleWaitUntil } from '@modules/browser/navigation-wait-until';
+import { PrerequisiteError } from '@errors/PrerequisiteError';
+import { CodeCache } from '@modules/collector/CodeCache';
+import { SmartCodeCollector } from '@modules/collector/SmartCodeCollector';
+import { CodeCompressor } from '@modules/collector/CodeCompressor';
+import { BrowserTargetSessionManager } from '@modules/browser/BrowserTargetSessionManager';
+import type { DumpTargetScriptsResult } from '@modules/browser/BrowserTargetSessionManager';
+import type { BrowserTargetInfo } from '@modules/browser/BrowserTargetSessionManager.shared';
+import type { CDPSessionLike } from '@modules/browser/CDPSessionLike';
+import { collectInnerImpl } from '@modules/collector/CodeCollectorCollectInternal';
+import {
+  shouldCollectUrlImpl,
+  navigateWithRetryImpl,
+  getPerformanceMetricsImpl,
+  collectPageMetadataImpl,
+} from '@modules/collector/CodeCollectorUtilsInternal';
+import {
+  resolveConnectOptionsImpl,
+  connectWithTimeoutImpl,
+} from '@modules/collector/CodeCollectorConnectionInternal';
+import {
+  getCollectedFilesSummaryImpl,
+  getFileByUrlImpl,
+  getFilesByPatternImpl,
+  getTopPriorityFilesImpl,
+} from '@modules/collector/CodeCollectorFileQueryInternal';
+import type { ChromeLaunchOverrides } from '@modules/collector/CodeCollectorLaunchOptions';
+import {
+  BrowserLifecycleManager,
+  type CodeCollectorLaunchResult,
+} from '@modules/collector/BrowserLifecycleManager';
+
+interface ChromeLike {
+  runtime: Record<string, unknown>;
+  loadTimes: () => void;
+  csi: () => void;
+  app: Record<string, unknown>;
+}
+
+interface WindowWithChrome extends Window {
+  chrome?: ChromeLike;
+}
+
+export interface ChromeConnectOptions {
+  browserURL?: string;
+  wsEndpoint?: string;
+  autoConnect?: boolean;
+  channel?: 'stable' | 'beta' | 'dev' | 'canary';
+  userDataDir?: string;
+}
+
+export interface ResolvedPageDescriptor {
+  index: number;
+  url: string;
+  title: string;
+  page: Page;
+}
+
+interface CollectionScope {
+  collectedUrls: Set<string>;
+  collectedFilesCache: Map<string, CodeFile>;
+}
+
+const DEFAULT_COLLECTION_SCOPE = 'default';
+const MAX_COLLECTION_SCOPES = 256;
+
+function chromeConnectRequestKey(endpointOrOptions: string | ChromeConnectOptions): string {
+  if (typeof endpointOrOptions === 'string') {
+    return `endpoint:${endpointOrOptions.trim()}`;
+  }
+
+  if (endpointOrOptions.wsEndpoint) {
+    return `ws:${endpointOrOptions.wsEndpoint.trim()}`;
+  }
+  if (endpointOrOptions.browserURL) {
+    return `url:${endpointOrOptions.browserURL.trim()}`;
+  }
+
+  const channel = endpointOrOptions.channel ?? 'stable';
+  const userDataDir = endpointOrOptions.userDataDir?.trim() ?? '';
+  return `auto:${channel}:${userDataDir}`;
+}
+
+export class CodeCollector {
+  protected config: PuppeteerConfig;
+  private lifecycleManager: BrowserLifecycleManager;
+  private readonly collectionScopes = new Map<string, CollectionScope>();
+  private sessionIdResolver: () => string | null | undefined = () => null;
+  private initPromise: Promise<void> | null = null;
+  private collectLock: Promise<CollectCodeResult> | null = null;
+  private connectAttemptRef = { current: 0 };
+  protected readonly MAX_COLLECTED_URLS: number;
+  protected readonly MAX_FILES_PER_COLLECT: number;
+  protected readonly MAX_RESPONSE_SIZE: number;
+  protected readonly MAX_SINGLE_FILE_SIZE: number;
+  private readonly CONNECT_TIMEOUT_MS: number;
+  protected readonly viewport: { width: number; height: number };
+  protected readonly userAgent: string;
+  private cache: CodeCache;
+  public cacheEnabled: boolean = true;
+  public smartCollector: SmartCodeCollector;
+  private compressor: CodeCompressor;
+  private cdpSession: CDPSession | null = null;
+  private browserTargetSessionManager: BrowserTargetSessionManager | null = null;
+  public cdpListeners: {
+    responseReceived?: (params: unknown) => void;
+  } = {};
+  private activePageIndex: number | null = null;
+  /** Cached Puppeteer Page for the selected tab, to avoid repeated CDP target.page() calls
+   *  which can hang on WebGL/Canvas-heavy tabs (e.g. games). */
+  private cachedActivePage: Page | null = null;
+  private explicitlyClosed: boolean = false;
+  private currentConnectRequestKey: string | null = null;
+  private connectGuard: Promise<void> | null = null;
+  private connectGuardKey: string | null = null;
+  constructor(config: PuppeteerConfig) {
+    this.config = config;
+    this.MAX_COLLECTED_URLS = config.maxCollectedUrls ?? 10000;
+    this.MAX_FILES_PER_COLLECT = config.maxFilesPerCollect ?? 200;
+    this.MAX_RESPONSE_SIZE = config.maxTotalContentSize ?? 512 * 1024;
+    this.MAX_SINGLE_FILE_SIZE = config.maxSingleFileSize ?? 200 * 1024;
+    this.CONNECT_TIMEOUT_MS = Number(process.env.JSHOOK_CONNECT_TIMEOUT_MS) || 60000;
+    this.viewport = config.viewport ?? { width: 1920, height: 1080 };
+    this.userAgent =
+      config.userAgent ??
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    this.cache = new CodeCache();
+    this.smartCollector = new SmartCodeCollector();
+    this.compressor = new CodeCompressor();
+    this.lifecycleManager = new BrowserLifecycleManager(
+      this.config,
+      this.viewport,
+      this.handleBrowserDisconnected.bind(this),
+    );
+    logger.info(
+      ` CodeCollector limits: maxCollect=${this.MAX_FILES_PER_COLLECT} files, maxResponse=` +
+        `${(this.MAX_RESPONSE_SIZE / 1024).toFixed(0)}KB, maxSingle=${(this.MAX_SINGLE_FILE_SIZE / 1024).toFixed(0)}KB`,
+    );
+    logger.info(
+      ` Strategy: Collect ALL files -> Cache -> Return summary/partial data to fit MCP limits`,
+    );
+  }
+
+  private normalizeCollectionScope(sessionId: string | null | undefined): string {
+    return typeof sessionId === 'string' && sessionId.trim().length > 0
+      ? sessionId.trim()
+      : DEFAULT_COLLECTION_SCOPE;
+  }
+
+  private getCollectionScope(): CollectionScope {
+    const scopeId = this.normalizeCollectionScope(this.sessionIdResolver());
+    let scope = this.collectionScopes.get(scopeId);
+    if (!scope) {
+      if (this.collectionScopes.size >= MAX_COLLECTION_SCOPES) {
+        const oldest = this.collectionScopes.keys().next().value as string | undefined;
+        if (oldest) this.collectionScopes.delete(oldest);
+      }
+      scope = { collectedUrls: new Set(), collectedFilesCache: new Map() };
+      this.collectionScopes.set(scopeId, scope);
+    }
+    return scope;
+  }
+
+  protected get collectedUrls(): Set<string> {
+    return this.getCollectionScope().collectedUrls;
+  }
+
+  protected set collectedUrls(value: Set<string>) {
+    this.getCollectionScope().collectedUrls = value;
+  }
+
+  protected get collectedFilesCache(): Map<string, CodeFile> {
+    return this.getCollectionScope().collectedFilesCache;
+  }
+
+  protected set collectedFilesCache(value: Map<string, CodeFile>) {
+    this.getCollectionScope().collectedFilesCache = value;
+  }
+
+  setSessionIdResolver(resolver: () => string | null | undefined): void {
+    this.sessionIdResolver = resolver;
+  }
+
+  dropSessionState(sessionId: string): boolean {
+    return this.collectionScopes.delete(this.normalizeCollectionScope(sessionId));
+  }
+
+  clearSessionData(): void {
+    const scopeId = this.normalizeCollectionScope(this.sessionIdResolver());
+    this.collectionScopes.delete(scopeId);
+    logger.info(`Cleared collected-code view for MCP session ${scopeId}`);
+  }
+
+  setCacheEnabled(enabled: boolean): void {
+    this.cacheEnabled = enabled;
+    logger.info(`Code cache ${enabled ? 'enabled' : 'disabled'}`);
+  }
+  async clearFileCache(): Promise<void> {
+    await this.cache.clear();
+  }
+  async getFileCacheStats() {
+    return await this.cache.getStats();
+  }
+  async clearAllData(): Promise<void> {
+    logger.info('Clearing all collected data...');
+    await this.cache.clear();
+    this.compressor.clearCache();
+    this.compressor.resetStats();
+    this.collectionScopes.clear();
+    logger.success('All data cleared');
+  }
+  async getAllStats() {
+    const cacheStats = await this.cache.getStats();
+    const compressionStats = this.compressor.getStats();
+    return {
+      cache: cacheStats,
+      compression: {
+        ...compressionStats,
+        cacheSize: this.compressor.getCacheSize(),
+      },
+      collector: {
+        collectedUrls: this.collectedUrls.size,
+        maxCollectedUrls: this.MAX_COLLECTED_URLS,
+      },
+    };
+  }
+  public getCache(): CodeCache {
+    return this.cache;
+  }
+  public getCompressor(): CodeCompressor {
+    return this.compressor;
+  }
+  public cleanupCollectedUrls(): void {
+    if (this.collectedUrls.size > this.MAX_COLLECTED_URLS) {
+      logger.warn(`Collected URLs exceeded ${this.MAX_COLLECTED_URLS}, clearing...`);
+      const urls = Array.from(this.collectedUrls);
+      this.collectedUrls.clear();
+      urls
+        .slice(-Math.floor(this.MAX_COLLECTED_URLS / 2))
+        .forEach((url) => this.collectedUrls.add(url));
+    }
+  }
+  private initGuard: Promise<void> | null = null;
+  async init(headless?: boolean): Promise<void> {
+    if (this.initGuard) return this.initGuard;
+    this.initGuard = this.initInner(headless);
+    try {
+      await this.initGuard;
+    } finally {
+      this.initGuard = null;
+    }
+  }
+
+  private async initInner(headless?: boolean): Promise<void> {
+    await this.launch(headless === undefined ? undefined : { headless });
+  }
+
+  async launch(overrides?: ChromeLaunchOverrides): Promise<CodeCollectorLaunchResult> {
+    this.explicitlyClosed = false;
+    const result = await this.lifecycleManager.launch(overrides, this.initPromise);
+    if (result.action !== 'reused') this.currentConnectRequestKey = null;
+    this.lifecycleManager.touch();
+    return result;
+  }
+
+  async close(): Promise<void> {
+    this.currentConnectRequestKey = null;
+    await this.lifecycleManager.close(this.clearAllData.bind(this));
+    this.explicitlyClosed = true;
+    this.activePageIndex = null;
+    this.cachedActivePage = null;
+    void this.browserTargetSessionManager?.dispose();
+    this.browserTargetSessionManager = null;
+    if (this.cdpSession) {
+      this.cdpSession = null;
+      this.cdpListeners = {};
+    }
+  }
+
+  /** Get the tracked Chrome child process PID (null if not launched or already closed). */
+  getChromePid(): number | null {
+    return this.lifecycleManager.getChromePid();
+  }
+
+  isExistingBrowserConnection(): boolean {
+    return this.lifecycleManager.isExistingBrowserConnection();
+  }
+
+  /** Force-kill a process by PID. Safe to call with null/invalid PIDs. */
+  static forceKillPid(pid: number | null): void {
+    return BrowserLifecycleManager.forceKillPid(pid);
+  }
+
+  private handleBrowserDisconnected(): void {
+    this.currentConnectRequestKey = null;
+    this.activePageIndex = null;
+    this.cachedActivePage = null;
+    void this.browserTargetSessionManager?.dispose();
+    this.browserTargetSessionManager = null;
+    if (this.cdpSession) {
+      this.cdpSession = null;
+      this.cdpListeners = {};
+    }
+  }
+  private getPageTargets(): Target[] {
+    this.lifecycleManager.touch();
+    const browser = this.lifecycleManager.getBrowser();
+    if (!browser) {
+      return [];
+    }
+    return browser.targets().filter((target) => target.type() === 'page');
+  }
+  private async resolvePageTargetHandle(target: Target, timeoutMs = 5000): Promise<Page> {
+    const page = await Promise.race<Page | null>([
+      target.page(),
+      new Promise<null>((_, reject) => {
+        setTimeout(() => {
+          reject(
+            new PrerequisiteError(
+              `Timed out after ${timeoutMs}ms while resolving a Puppeteer Page handle from the attached Chrome target.`,
+            ),
+          );
+        }, timeoutMs);
+      }),
+    ]);
+
+    if (!page) {
+      throw new PrerequisiteError(
+        'Attached browser target does not expose a Puppeteer Page handle in the current Chrome remote debugging mode.',
+      );
+    }
+
+    return page;
+  }
+  async getActivePage(): Promise<Page> {
+    this.lifecycleManager.touch();
+    if (this.cachedActivePage) {
+      return this.cachedActivePage;
+    }
+    const browser = this.lifecycleManager.getBrowser();
+    if (!browser) {
+      if (this.explicitlyClosed) {
+        throw new PrerequisiteError(
+          'Browser was explicitly closed. Call browser_launch or browser_attach first.',
+        );
+      }
+      try {
+        await this.init();
+      } catch (error) {
+        throw new PrerequisiteError(
+          `Browser not available: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    const pageTargets = this.getPageTargets();
+    if (pageTargets.length === 0) {
+      return await this.lifecycleManager.getBrowser()!.newPage();
+    }
+    if (this.activePageIndex !== null && this.activePageIndex < pageTargets.length) {
+      return await this.resolvePageTargetHandle(pageTargets[this.activePageIndex]!);
+    }
+    const lastTarget = pageTargets[pageTargets.length - 1];
+    if (!lastTarget) {
+      throw new Error('Failed to get active page');
+    }
+    return await this.resolvePageTargetHandle(lastTarget);
+  }
+  async getActivePageIndex(): Promise<number | null> {
+    const activePage = await this.getActivePage();
+    const resolvedPages = await this.listResolvedPages();
+    const exactMatch = resolvedPages.find((entry) => entry.page === activePage);
+    if (exactMatch) {
+      return exactMatch.index;
+    }
+
+    const activeUrl = activePage.url();
+    const urlMatch = resolvedPages.find((entry) => entry.url === activeUrl);
+    return urlMatch?.index ?? null;
+  }
+  async listPages(): Promise<Array<{ index: number; url: string; title: string }>> {
+    this.lifecycleManager.touch();
+    const browser = this.lifecycleManager.getBrowser();
+    if (!browser) {
+      return [];
+    }
+    const targets = this.getPageTargets();
+    return targets.map((target, index) => ({
+      index,
+      url: target.url(),
+      title: '',
+    }));
+  }
+  async listResolvedPages(timeoutMs = 1500): Promise<ResolvedPageDescriptor[]> {
+    this.lifecycleManager.touch();
+    const browser = this.lifecycleManager.getBrowser();
+    if (!browser) {
+      return [];
+    }
+
+    const targets = this.getPageTargets();
+    const pages: Array<ResolvedPageDescriptor | null> = await Promise.all(
+      targets.map(async (target, index): Promise<ResolvedPageDescriptor | null> => {
+        try {
+          const page = await this.resolvePageTargetHandle(target, timeoutMs);
+          let title = '';
+          try {
+            title = await Promise.race<string>([
+              page.title(),
+              new Promise<string>((resolve) => {
+                setTimeout(() => resolve(''), timeoutMs);
+              }),
+            ]);
+          } catch {
+            title = '';
+          }
+
+          return {
+            index,
+            url: target.url(),
+            title,
+            page,
+          };
+        } catch {
+          return null;
+        }
+      }),
+    );
+
+    return pages.filter((page): page is ResolvedPageDescriptor => page !== null);
+  }
+  async selectResolvedPageByTargetId(targetId: string): Promise<ResolvedPageDescriptor | null> {
+    this.lifecycleManager.touch();
+    const browser = this.lifecycleManager.getBrowser();
+    if (!browser) return null;
+
+    const targets = this.getPageTargets();
+    for (const target of targets) {
+      let session: CDPSession | null = null;
+      try {
+        session = await target.createCDPSession();
+        const { targetInfo } = (await session.send('Target.getTargetInfo')) as {
+          targetInfo: { targetId: string };
+        };
+        if (targetInfo.targetId === targetId) {
+          const resolvedPages = await this.listResolvedPages();
+          const match = resolvedPages.find((entry) => entry.url === target.url()) ?? null;
+          if (!match) return null;
+          this.activePageIndex = match.index;
+          this.cachedActivePage = match.page;
+          return match;
+        }
+      } catch {
+        continue;
+      } finally {
+        if (session) {
+          try {
+            await session.detach();
+          } catch {
+            // Best-effort detach — session may already be closed
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+  async selectPage(index: number): Promise<void> {
+    this.lifecycleManager.touch();
+    const browser = this.lifecycleManager.getBrowser();
+    if (!browser) {
+      throw new Error('Browser not connected');
+    }
+    const pages = await this.listPages();
+    if (index < 0 || index >= pages.length) {
+      throw new Error(`Page index ${index} out of range (0-${pages.length - 1})`);
+    }
+    this.activePageIndex = index;
+
+    // Resolve and cache the selected page immediately. This avoids repeated
+    // target.page() calls on WebGL/Canvas-heavy tabs (each call hangs).
+    // Only this one target is resolved — no cascade thanks to listPages()
+    // being used in syncTabRegistryWithCollectorPages instead of listResolvedPages().
+    try {
+      const pageTargets = this.getPageTargets();
+      this.cachedActivePage = await this.resolvePageTargetHandle(
+        pageTargets[index]!,
+        8000, // 8s timeout — WebGL tabs typically hang, this lets us fail fast
+      );
+      logger.info(`Active page index set to ${index}: ${pages[index]!.url} (cached)`);
+    } catch (error) {
+      // WebGL / game tabs: resolvePageTargetHandle times out. Leave cache null
+      // so getActivePage() falls through to the lazy path (which will also timeout,
+      // but callers that use CDP directly via browser_evaluate_cdp_target are unaffected).
+      this.cachedActivePage = null;
+      logger.warn(
+        `Failed to cache page handle for index ${index}: ` +
+          `${error instanceof Error ? error.message : String(error)}. ` +
+          `Falling back to lazy resolve on next use.`,
+      );
+    }
+  }
+  async createPage(url?: string): Promise<Page> {
+    this.lifecycleManager.touch();
+    let browser = this.lifecycleManager.getBrowser();
+    if (!browser) {
+      await this.init();
+      browser = this.lifecycleManager.getBrowser();
+    }
+    const page = await browser!.newPage();
+    await page.setUserAgent(this.userAgent);
+    await this.applyAntiDetection(page);
+    if (url) {
+      await page.goto(url, {
+        waitUntil: toChromeCompatibleWaitUntil(),
+        timeout: this.config.timeout,
+      });
+    }
+    logger.info(`New page created${url ? `: ${url}` : ''}`);
+    return page;
+  }
+  private async applyAntiDetection(page: Page): Promise<void> {
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => false,
+      });
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5],
+      });
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+      });
+      const win = window as WindowWithChrome;
+      if (!win.chrome) {
+        win.chrome = {
+          runtime: {},
+          loadTimes: function () {},
+          csi: function () {},
+          app: {},
+        };
+      }
+      const originalQuery = window.navigator.permissions.query;
+      window.navigator.permissions.query = (parameters: PermissionDescriptor) => {
+        if (parameters.name === 'notifications') {
+          return Promise.resolve({ state: 'denied' } as PermissionStatus);
+        }
+        return originalQuery(parameters);
+      };
+    });
+  }
+  async getStatus(): Promise<{
+    running: boolean;
+    pagesCount: number;
+    version?: string;
+    effectiveHeadless?: boolean;
+    launchSource?: 'launched' | 'attached';
+    v8NativeSyntaxEnabled?: boolean;
+    launchArgs?: string[];
+  }> {
+    this.lifecycleManager.touch();
+    const browser = this.lifecycleManager.getBrowser();
+    if (!browser) {
+      return {
+        running: false,
+        pagesCount: 0,
+      };
+    }
+    try {
+      const version = await browser.version();
+      const pages = this.getPageTargets();
+      const currentHeadless = this.lifecycleManager.getCurrentHeadless();
+      const currentLaunchOptions = this.lifecycleManager.getCurrentLaunchOptions();
+      const connectedToExistingBrowser = this.lifecycleManager.isExistingBrowserConnection();
+      return {
+        running: true,
+        pagesCount: pages.length,
+        version,
+        effectiveHeadless: currentHeadless ?? undefined,
+        launchSource: connectedToExistingBrowser ? 'attached' : 'launched',
+        v8NativeSyntaxEnabled: currentLaunchOptions?.v8NativeSyntaxEnabled,
+        launchArgs: currentLaunchOptions?.args ? [...currentLaunchOptions.args] : [],
+      };
+    } catch (error) {
+      logger.debug('Browser not running or disconnected:', error);
+      return {
+        running: false,
+        pagesCount: 0,
+      };
+    }
+  }
+  async collect(options: CollectCodeOptions): Promise<CollectCodeResult> {
+    // Serialize concurrent collect calls to avoid cdpSession race conditions
+    while (this.collectLock) {
+      try {
+        await this.collectLock;
+      } catch {
+        /* ignore predecessor failures */
+      }
+    }
+    let resolve!: (v: CollectCodeResult) => void;
+    let reject!: (e: unknown) => void;
+    this.collectLock = new Promise<CollectCodeResult>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    try {
+      const result = await this.collectInner(options);
+      resolve(result);
+      return result;
+    } catch (e) {
+      reject(e);
+      throw e;
+    } finally {
+      this.collectLock = null;
+    }
+  }
+  private async collectInner(options: CollectCodeOptions): Promise<CollectCodeResult> {
+    return collectInnerImpl(this, options);
+  }
+  shouldCollectUrl(url: string, filterRules?: string[]): boolean {
+    return shouldCollectUrlImpl(url, filterRules);
+  }
+  async navigateWithRetry(
+    page: Page,
+    url: string,
+    options: NonNullable<Parameters<Page['goto']>[1]>,
+    maxRetries = 3,
+  ): Promise<void> {
+    return navigateWithRetryImpl(page, url, options, maxRetries);
+  }
+  async getPerformanceMetrics(page: Page): Promise<Record<string, number>> {
+    return getPerformanceMetricsImpl(page);
+  }
+  async collectPageMetadata(page: Page): Promise<Record<string, unknown>> {
+    return collectPageMetadataImpl(page);
+  }
+  private async resolveConnectOptions(
+    endpointOrOptions: string | ChromeConnectOptions,
+  ): Promise<{ browserWSEndpoint?: string; browserURL?: string }> {
+    return resolveConnectOptionsImpl(endpointOrOptions);
+  }
+
+  private async connectWithTimeout(
+    connectOptions: { browserWSEndpoint?: string; browserURL?: string },
+    target: string,
+    endpointOrOptions: string | ChromeConnectOptions,
+  ): Promise<Browser> {
+    return connectWithTimeoutImpl(
+      connectOptions,
+      target,
+      endpointOrOptions,
+      this.CONNECT_TIMEOUT_MS,
+      this.connectAttemptRef,
+    );
+  }
+
+  async connect(endpointOrOptions: string | ChromeConnectOptions): Promise<void> {
+    this.explicitlyClosed = false;
+    const requestKey = chromeConnectRequestKey(endpointOrOptions);
+    const existingBrowser = this.lifecycleManager.getBrowser();
+    if (
+      requestKey === this.currentConnectRequestKey &&
+      existingBrowser &&
+      existingBrowser.isConnected()
+    ) {
+      this.lifecycleManager.touch();
+      return;
+    }
+
+    if (this.connectGuard) {
+      if (this.connectGuardKey === requestKey) return await this.connectGuard;
+      await this.connectGuard;
+      return await this.connect(endpointOrOptions);
+    }
+
+    const connectRun = (async () => {
+      const connectOptions = await this.resolveConnectOptions(endpointOrOptions);
+      const target =
+        connectOptions.browserWSEndpoint ??
+        connectOptions.browserURL ??
+        'auto-detected Chrome debugging endpoint';
+      this.currentConnectRequestKey = null;
+      await this.lifecycleManager.connect(
+        connectOptions,
+        (opts, tgt) => this.connectWithTimeout(opts, tgt, endpointOrOptions),
+        target,
+      );
+      this.currentConnectRequestKey = requestKey;
+      this.lifecycleManager.touch();
+    })();
+    this.connectGuard = connectRun;
+    this.connectGuardKey = requestKey;
+    try {
+      await connectRun;
+    } finally {
+      if (this.connectGuard === connectRun) {
+        this.connectGuard = null;
+        this.connectGuardKey = null;
+      }
+    }
+  }
+
+  getSelectedPageHandle(): { index: number; page: Page } | null {
+    if (this.activePageIndex === null || !this.cachedActivePage) return null;
+    return { index: this.activePageIndex, page: this.cachedActivePage };
+  }
+  getBrowser(): Browser | null {
+    this.lifecycleManager.touch();
+    return this.lifecycleManager.getBrowser();
+  }
+
+  getBrowserTargetSessionManager(): BrowserTargetSessionManager {
+    if (!this.browserTargetSessionManager) {
+      this.browserTargetSessionManager = new BrowserTargetSessionManager(() => this.getBrowser());
+    }
+    return this.browserTargetSessionManager;
+  }
+
+  async listCdpTargets(filters?: {
+    type?: string;
+    types?: string[];
+    targetId?: string;
+    urlPattern?: string;
+    titlePattern?: string;
+    attachedOnly?: boolean;
+    discoverOOPIF?: boolean;
+  }): Promise<BrowserTargetInfo[]> {
+    return await this.getBrowserTargetSessionManager().listTargets(filters);
+  }
+
+  async attachCdpTarget(targetId: string): Promise<BrowserTargetInfo> {
+    return await this.getBrowserTargetSessionManager().attach(targetId);
+  }
+
+  async dumpTargetScripts(
+    targetId: string,
+    options?: { includeSource?: boolean; maxScripts?: number },
+  ): Promise<DumpTargetScriptsResult> {
+    return await this.getBrowserTargetSessionManager().dumpTargetScripts(targetId, options);
+  }
+
+  async detachCdpTarget(): Promise<boolean> {
+    return await this.getBrowserTargetSessionManager().detach();
+  }
+
+  getAttachedTargetSession(): CDPSessionLike | null {
+    return this.browserTargetSessionManager?.getAttachedTargetSession() ?? null;
+  }
+
+  getAttachedTargetInfo(): BrowserTargetInfo | null {
+    return this.browserTargetSessionManager?.getAttachedTargetInfo() ?? null;
+  }
+  getCollectionStats(): {
+    totalCollected: number;
+    uniqueUrls: number;
+  } {
+    return {
+      totalCollected: this.collectedUrls.size,
+      uniqueUrls: this.collectedUrls.size,
+    };
+  }
+  clearCache(): void {
+    this.collectedUrls.clear();
+    logger.info('Collection cache cleared');
+  }
+  getCollectedFilesSummary(): Array<{
+    url: string;
+    size: number;
+    type: string;
+    truncated?: boolean;
+    originalSize?: number;
+  }> {
+    return getCollectedFilesSummaryImpl(this.collectedFilesCache);
+  }
+  getFileByUrl(url: string): CodeFile | null {
+    return getFileByUrlImpl(this.collectedFilesCache, url);
+  }
+  getFilesByPattern(
+    pattern: string,
+    limit: number = 20,
+    maxTotalSize: number = this.MAX_RESPONSE_SIZE,
+  ): {
+    files: CodeFile[];
+    totalSize: number;
+    matched: number;
+    returned: number;
+    truncated: boolean;
+  } {
+    return getFilesByPatternImpl(this.collectedFilesCache, pattern, limit, maxTotalSize);
+  }
+  getTopPriorityFiles(
+    topN: number = 10,
+    maxTotalSize: number = this.MAX_RESPONSE_SIZE,
+  ): {
+    files: CodeFile[];
+    totalSize: number;
+    totalFiles: number;
+  } {
+    return getTopPriorityFilesImpl(this.collectedFilesCache, topN, maxTotalSize);
+  }
+  clearCollectedFilesCache(): void {
+    const count = this.collectedFilesCache.size;
+    this.collectedFilesCache.clear();
+    logger.info(`Cleared collected files cache (${count} files)`);
+  }
+}

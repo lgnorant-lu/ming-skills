@@ -1,0 +1,652 @@
+/**
+ * TraceDB unit tests — SQLite storage engine for time-travel tracing.
+ */
+
+import { join } from 'node:path';
+import { rm, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { TraceDB } from '@modules/trace/TraceDB';
+import type { TraceEvent, MemoryDelta } from '@modules/trace/TraceDB.types';
+import { TEST_URLS, withPath } from '@tests/shared/test-urls';
+
+function makeEvent(overrides?: Partial<TraceEvent>): TraceEvent {
+  return {
+    timestamp: Date.now(),
+    category: 'test',
+    eventType: 'test_event',
+    data: '{"key": "value"}',
+    scriptId: null,
+    lineNumber: null,
+    ...overrides,
+  };
+}
+
+function makeDelta(overrides?: Partial<MemoryDelta>): MemoryDelta {
+  return {
+    timestamp: Date.now(),
+    address: '0x1000',
+    oldValue: '0x00',
+    newValue: '0xFF',
+    size: 4,
+    valueType: 'int32',
+    ...overrides,
+  };
+}
+
+describe('TraceDB', () => {
+  let dbPath: string;
+  let testDir: string;
+  let db: TraceDB;
+
+  beforeEach(async () => {
+    testDir = await mkdtemp(join(tmpdir(), 'trace-db-test-'));
+    dbPath = join(testDir, 'trace.db');
+    db = new TraceDB({ dbPath });
+  });
+
+  afterEach(async () => {
+    try {
+      db.close();
+    } catch {
+      /* already closed */
+    }
+    await rm(testDir, { recursive: true, force: true });
+  });
+
+  it('creates database with correct schema — trace and network tables', () => {
+    const result = db.query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    );
+    const tableNames = result.rows.map((r) => r[0]);
+    expect(tableNames).toContain('console_logs');
+    expect(tableNames).toContain('events');
+    expect(tableNames).toContain('exceptions');
+    expect(tableNames).toContain('network_resources');
+    expect(tableNames).toContain('network_chunks');
+    expect(tableNames).toContain('samples');
+    expect(tableNames).toContain('memory_deltas');
+    expect(tableNames).toContain('heap_snapshots');
+    expect(tableNames).toContain('metadata');
+  });
+
+  it('creates indexes for seek-critical tables', () => {
+    const result = db.query(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%' ORDER BY name",
+    );
+    const indexNames = result.rows.map((r) => r[0]);
+    expect(indexNames).toContain('idx_console_logs_timestamp');
+    expect(indexNames).toContain('idx_console_logs_monotonic_time');
+    expect(indexNames).toContain('idx_console_logs_level');
+    expect(indexNames).toContain('idx_events_timestamp');
+    expect(indexNames).toContain('idx_events_category_type');
+    expect(indexNames).toContain('idx_events_script_id');
+    expect(indexNames).toContain('idx_exceptions_timestamp');
+    expect(indexNames).toContain('idx_exceptions_monotonic_time');
+    expect(indexNames).toContain('idx_exceptions_exception_id');
+    expect(indexNames).toContain('idx_exceptions_script_id');
+    expect(indexNames).toContain('idx_memory_timestamp');
+    expect(indexNames).toContain('idx_memory_address');
+    expect(indexNames).toContain('idx_samples_timestamp');
+    expect(indexNames).toContain('idx_samples_function');
+  });
+
+  it('inserts and retrieves events after flush', () => {
+    db.insertEvent(makeEvent({ category: 'debugger', eventType: 'paused' }));
+    db.insertEvent(makeEvent({ category: 'network', eventType: 'request' }));
+    db.insertEvent(makeEvent({ category: 'runtime', eventType: 'exception' }));
+    db.flush();
+
+    const result = db.query('SELECT * FROM events');
+    expect(result.rowCount).toBe(3);
+  });
+
+  it('batch flushes automatically at buffer size', () => {
+    const smallDbPath = join(testDir, 'small.db');
+    const smallDb = new TraceDB({ dbPath: smallDbPath, batchSize: 3 });
+    try {
+      smallDb.insertEvent(makeEvent());
+      smallDb.insertEvent(makeEvent());
+      // After 2 events, should not be flushed yet
+      const before = smallDb.query('SELECT COUNT(*) as cnt FROM events');
+      expect(before.rows[0]![0]).toBe(0);
+
+      // Third event triggers auto-flush
+      smallDb.insertEvent(makeEvent());
+      const after = smallDb.query('SELECT COUNT(*) as cnt FROM events');
+      expect(after.rows[0]![0]).toBe(3);
+    } finally {
+      smallDb.close();
+    }
+  });
+
+  it('inserts memory deltas', () => {
+    db.insertMemoryDelta(
+      makeDelta({
+        address: '0xABCD',
+        oldValue: '0x00000000',
+        newValue: '0xDEADBEEF',
+        size: 4,
+        valueType: 'int32',
+      }),
+    );
+    db.flush();
+
+    const result = db.query('SELECT * FROM memory_deltas');
+    expect(result.rowCount).toBe(1);
+    expect(result.rows[0]![2]).toBe('0xABCD'); // address column
+  });
+
+  it('inserts and queries profiler samples', () => {
+    db.insertSample({
+      timestamp: 1000,
+      selfTime: 4.5,
+      aggregateTime: 7.5,
+      functionName: 'hotFn',
+      scriptId: '12',
+      url: 'app.js',
+      lineNumber: 10,
+      columnNumber: 2,
+    });
+
+    const byFunction = db.querySamplesByFunction('hotFn');
+    const inWindow = db.getSamplesInWindow(1000, 25);
+
+    expect(byFunction).toHaveLength(1);
+    expect(byFunction[0]?.selfTime).toBe(4.5);
+    expect(inWindow[0]?.functionName).toBe('hotFn');
+  });
+
+  it('aggregates profiler samples into per-function rollups ordered by self time', () => {
+    db.insertSample({
+      timestamp: 1000,
+      selfTime: 4,
+      aggregateTime: 10,
+      functionName: 'a',
+      scriptId: '1',
+      url: 'a.js',
+      lineNumber: 1,
+      columnNumber: 0,
+    });
+    db.insertSample({
+      timestamp: 1010,
+      selfTime: 6,
+      aggregateTime: 12,
+      functionName: 'a',
+      scriptId: '1',
+      url: 'a.js',
+      lineNumber: 1,
+      columnNumber: 0,
+    });
+    db.insertSample({
+      timestamp: 1020,
+      selfTime: 20,
+      aggregateTime: 30,
+      functionName: 'b',
+      scriptId: '2',
+      url: 'b.js',
+      lineNumber: 5,
+      columnNumber: 0,
+    });
+
+    const top = db.getTopFunctions(10);
+
+    expect(top).toHaveLength(2);
+    // 'b' (selfTime 20) outranks 'a' (selfTime 4 + 6 = 10)
+    expect(top[0]?.functionName).toBe('b');
+    expect(top[0]?.selfTime).toBe(20);
+    expect(top[0]?.sampleCount).toBe(1);
+    expect(top[1]?.functionName).toBe('a');
+    expect(top[1]?.selfTime).toBe(10);
+    expect(top[1]?.aggregateTime).toBe(22);
+    expect(top[1]?.sampleCount).toBe(2);
+  });
+
+  it('filters aggregated samples by an optional time window', () => {
+    db.insertSample({
+      timestamp: 100,
+      selfTime: 1,
+      aggregateTime: 1,
+      functionName: 'early',
+      scriptId: null,
+      url: null,
+      lineNumber: null,
+      columnNumber: null,
+    });
+    db.insertSample({
+      timestamp: 5000,
+      selfTime: 100,
+      aggregateTime: 100,
+      functionName: 'late',
+      scriptId: null,
+      url: null,
+      lineNumber: null,
+      columnNumber: null,
+    });
+
+    const top = db.getTopFunctions(10, 1000, 6000);
+
+    expect(top).toHaveLength(1);
+    expect(top[0]?.functionName).toBe('late');
+  });
+
+  it('omits unnamed samples and respects the limit', () => {
+    // NULL function_name sample must be excluded entirely
+    db.insertSample({
+      timestamp: 1000,
+      selfTime: 5,
+      aggregateTime: 5,
+      functionName: null,
+      scriptId: null,
+      url: null,
+      lineNumber: null,
+      columnNumber: null,
+    });
+    for (let i = 0; i < 3; i++) {
+      db.insertSample({
+        timestamp: 1000,
+        selfTime: i + 1,
+        aggregateTime: i + 1,
+        functionName: `fn${i}`,
+        scriptId: null,
+        url: null,
+        lineNumber: null,
+        columnNumber: null,
+      });
+    }
+
+    const top = db.getTopFunctions(2);
+
+    // NULL excluded → only 3 named functions exist; limit 2 returns hottest two
+    expect(top).toHaveLength(2);
+    expect(top[0]?.functionName).toBe('fn2');
+    expect(top[1]?.functionName).toBe('fn1');
+  });
+
+  it('inserts and queries structured runtime console logs and exceptions', () => {
+    db.insertConsoleLog({
+      timestamp: 2000,
+      wallTime: 2000,
+      monotonicTime: 20,
+      level: 'error',
+      text: 'failed',
+      args: '[{"value":"failed"}]',
+      stackTrace: '{"callFrames":[]}',
+      scriptId: 'script-1',
+      lineNumber: 7,
+      columnNumber: 3,
+      executionContextId: 1,
+    });
+    db.insertException({
+      timestamp: 2010,
+      wallTime: 2010,
+      monotonicTime: 21,
+      text: 'Uncaught Error: boom',
+      exceptionId: 42,
+      url: 'app.js',
+      scriptId: 'script-2',
+      lineNumber: 9,
+      columnNumber: 4,
+      description: 'Error: boom',
+      stackTrace: '{"callFrames":[]}',
+      executionContextId: 1,
+    });
+
+    const wallLogs = db.getConsoleLogsByTimeRange(1990, 2020);
+    const monotonicExceptions = db.getExceptionsByTimeRange(20, 22, 'monotonic');
+
+    expect(wallLogs).toHaveLength(1);
+    expect(wallLogs[0]?.level).toBe('error');
+    expect(wallLogs[0]?.scriptId).toBe('script-1');
+    expect(monotonicExceptions).toHaveLength(1);
+    expect(monotonicExceptions[0]?.exceptionId).toBe(42);
+    expect(monotonicExceptions[0]?.description).toBe('Error: boom');
+  });
+
+  it('inserts heap snapshots immediately (no flush needed)', () => {
+    db.insertHeapSnapshot({
+      timestamp: Date.now(),
+      snapshotData: Buffer.from('{"snapshot": "data"}'),
+      summary: '{"totalSize": 1024, "nodeCount": 10}',
+    });
+
+    // Query without flushing — snapshot is immediately inserted
+    const result = db.query('SELECT id, timestamp, summary FROM heap_snapshots');
+    expect(result.rowCount).toBe(1);
+
+    // Also test getHeapSnapshots() coverage
+    const snapshots = db.getHeapSnapshots();
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]!.summary).toBe('{"totalSize": 1024, "nodeCount": 10}');
+    expect(snapshots[0]!.snapshotData.toString()).toBe('{"snapshot": "data"}');
+  });
+
+  it('sets and retrieves metadata', () => {
+    db.setMetadata('url', TEST_URLS.root);
+    db.setMetadata('platform', 'darwin');
+
+    const metadata = db.getMetadata();
+    expect(metadata['url']).toBe(TEST_URLS.root);
+    expect(metadata['platform']).toBe('darwin');
+  });
+
+  it('metadata upsert updates existing keys', () => {
+    db.setMetadata('count', '1');
+    db.setMetadata('count', '2');
+
+    const metadata = db.getMetadata();
+    expect(metadata['count']).toBe('2');
+  });
+
+  it('query enforces read-only — rejects INSERT', () => {
+    expect(() => db.query("INSERT INTO events VALUES (1, 1, 'a', 'b', '{}', null, null)")).toThrow(
+      /Write operations are not allowed/,
+    );
+  });
+
+  it('query enforces read-only — rejects DROP', () => {
+    expect(() => db.query('DROP TABLE events')).toThrow(/Write operations are not allowed/);
+  });
+
+  it('query enforces read-only — rejects UPDATE', () => {
+    expect(() => db.query("UPDATE events SET category = 'x'")).toThrow(
+      /Write operations are not allowed/,
+    );
+  });
+
+  it('query returns columns even when no rows match', () => {
+    db.insertEvent(makeEvent());
+    db.flush();
+
+    const result = db.query('SELECT timestamp, category FROM events WHERE id = -999');
+    expect(result.rowCount).toBe(0);
+    expect(result.columns).toEqual(['timestamp', 'category']);
+  });
+
+  it('queryWithParams binds positional values without string interpolation', () => {
+    db.insertEvent(makeEvent({ timestamp: 123, category: 'debugger' }));
+    db.insertEvent(makeEvent({ timestamp: 456, category: 'network' }));
+    db.flush();
+
+    const result = db.queryWithParams(
+      'SELECT timestamp, category FROM events WHERE timestamp >= ? AND category = ?',
+      [100, 'debugger'],
+    );
+    expect(result.rowCount).toBe(1);
+    expect(result.rows[0]).toEqual([123, 'debugger']);
+  });
+
+  it('getEventsByTimeRange filters correctly', () => {
+    db.insertEvent(makeEvent({ timestamp: 100 }));
+    db.insertEvent(makeEvent({ timestamp: 200 }));
+    db.insertEvent(makeEvent({ timestamp: 300 }));
+    db.flush();
+
+    const events = db.getEventsByTimeRange(150, 250);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.timestamp).toBe(200);
+  });
+
+  it('getMemoryDeltasByAddress filters correctly', () => {
+    // Re-initialize with a smaller batch size to test auto-flushing logic
+    const smallBatchDb = new TraceDB({
+      dbPath: join(testDir, 'small_batch.db'),
+      batchSize: 2,
+    });
+
+    // 3 inserts with batchSize=2 will trigger `this.flush()` internally
+    smallBatchDb.insertMemoryDelta(makeDelta({ address: '0xAAAA' }));
+    smallBatchDb.insertMemoryDelta(makeDelta({ address: '0xBBBB' }));
+    smallBatchDb.insertMemoryDelta(makeDelta({ address: '0xAAAA' }));
+    // We don't call manual flush() to rely on the side-effect flush that covers line 148
+
+    const deltas = smallBatchDb.getMemoryDeltasByAddress('0xAAAA');
+    expect(deltas).toHaveLength(2);
+    expect(deltas.every((d) => d.address === '0xAAAA')).toBe(true);
+    smallBatchDb.close();
+  });
+
+  it('throws mapped error when db path is invalid', () => {
+    expect(() => {
+      void new TraceDB({ dbPath: '/invalid/path/that/cannot/exist/trace.db' });
+    }).toThrow(/Cannot open database/);
+  });
+
+  it('close flushes pending buffer', () => {
+    const closePath = join(testDir, 'close.db');
+    const closeDb = new TraceDB({ dbPath: closePath });
+
+    closeDb.insertEvent(makeEvent());
+    closeDb.insertEvent(makeEvent());
+    expect(closeDb.isClosed).toBe(false);
+    closeDb.close(); // Should flush before closing
+    expect(closeDb.isClosed).toBe(true);
+
+    // Reopen and verify data was persisted
+    const reopened = new TraceDB({ dbPath: closePath });
+    try {
+      const result = reopened.query('SELECT COUNT(*) as cnt FROM events');
+      expect(result.rows[0]![0]).toBe(2);
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it('uses WAL journal mode (wal file exists)', async () => {
+    // WAL mode creates a -wal file alongside the DB
+    // We can't query PRAGMA via the public query() API since it blocks PRAGMA
+    // Instead verify the WAL sidecar file is created
+    db.insertEvent(makeEvent());
+    db.flush();
+    const { existsSync } = await import('node:fs');
+    expect(existsSync(dbPath + '-wal')).toBe(true);
+  });
+
+  it('throws when accessing closed database', () => {
+    db.close();
+    expect(() => db.insertEvent(makeEvent())).toThrow(/TraceDB is closed/);
+  });
+
+  it('dbPath returns the correct path', () => {
+    expect(db.dbPath).toBe(dbPath);
+  });
+
+  // ── Error path coverage ────────────────────────────────────────────────────
+
+  it('flush() returns early when db is closed (no-op)', () => {
+    db.close();
+    // Should not throw — flush() checks `if (closed) return` first
+    expect(() => db.flush()).not.toThrow();
+  });
+
+  it('insertEvent() throws when db is closed', () => {
+    db.close();
+    expect(() => db.insertEvent(makeEvent())).toThrow(/TraceDB is closed/);
+  });
+
+  it('insertMemoryDelta() throws when db is closed', () => {
+    db.close();
+    expect(() => db.insertMemoryDelta(makeDelta())).toThrow(/TraceDB is closed/);
+  });
+
+  it('insertHeapSnapshot() throws when db is closed', () => {
+    db.close();
+    expect(() =>
+      db.insertHeapSnapshot({
+        timestamp: Date.now(),
+        snapshotData: Buffer.alloc(0),
+        summary: '{}',
+      }),
+    ).toThrow(/TraceDB is closed/);
+  });
+
+  it('insertConsoleLog() throws when db is closed', () => {
+    db.close();
+    expect(() =>
+      db.insertConsoleLog({
+        timestamp: 1000,
+        wallTime: 1000,
+        monotonicTime: null,
+        level: 'log',
+        text: 'hello',
+        args: '[]',
+        stackTrace: null,
+        scriptId: null,
+        lineNumber: null,
+        columnNumber: null,
+        executionContextId: null,
+      }),
+    ).toThrow(/TraceDB is closed/);
+  });
+
+  it('insertException() throws when db is closed', () => {
+    db.close();
+    expect(() =>
+      db.insertException({
+        timestamp: 1000,
+        wallTime: 1000,
+        monotonicTime: null,
+        text: 'boom',
+        exceptionId: null,
+        url: null,
+        scriptId: null,
+        lineNumber: null,
+        columnNumber: null,
+        description: null,
+        stackTrace: null,
+        executionContextId: null,
+      }),
+    ).toThrow(/TraceDB is closed/);
+  });
+
+  it('setMetadata() throws when db is closed', () => {
+    db.close();
+    expect(() => db.setMetadata('k', 'v')).toThrow(/TraceDB is closed/);
+  });
+
+  it('getMetadata() throws when db is closed', () => {
+    db.close();
+    expect(() => db.getMetadata()).toThrow(/TraceDB is closed/);
+  });
+
+  it('getHeapSnapshots() throws when db is closed', () => {
+    db.close();
+    expect(() => db.getHeapSnapshots()).toThrow(/TraceDB is closed/);
+  });
+
+  it('query() throws when db is closed', () => {
+    db.close();
+    expect(() => db.query('SELECT 1')).toThrow(/TraceDB is closed/);
+  });
+
+  it('getEventsByTimeRange() throws when db is closed', () => {
+    db.close();
+    expect(() => db.getEventsByTimeRange(0, 1000)).toThrow(/TraceDB is closed/);
+  });
+
+  it('getConsoleLogsByTimeRange() throws when db is closed', () => {
+    db.close();
+    expect(() => db.getConsoleLogsByTimeRange(0, 1000)).toThrow(/TraceDB is closed/);
+  });
+
+  it('getExceptionsByTimeRange() throws when db is closed', () => {
+    db.close();
+    expect(() => db.getExceptionsByTimeRange(0, 1000)).toThrow(/TraceDB is closed/);
+  });
+
+  it('getMemoryDeltasByAddress() throws when db is closed', () => {
+    db.close();
+    expect(() => db.getMemoryDeltasByAddress('0x1000')).toThrow(/TraceDB is closed/);
+  });
+
+  it('query enforces read-only — rejects DELETE', () => {
+    expect(() => db.query('DELETE FROM events WHERE id = 1')).toThrow(
+      /Write operations are not allowed/,
+    );
+  });
+
+  it('query enforces read-only — rejects REPLACE', () => {
+    expect(() => db.query('REPLACE INTO events VALUES (1, 1, 1, 1, 1, 1, 1)')).toThrow(
+      /Write operations are not allowed/,
+    );
+  });
+
+  it('query returns empty result with columns when events table is empty', () => {
+    const result = db.query('SELECT timestamp, category, event_type FROM events');
+    expect(result.rowCount).toBe(0);
+    expect(result.columns).toEqual(['timestamp', 'category', 'event_type']);
+    expect(result.rows).toEqual([]);
+  });
+
+  it('getMetadata() returns empty object when no metadata exists', () => {
+    const metadata = db.getMetadata();
+    expect(metadata).toEqual({});
+  });
+
+  it('getHeapSnapshots() returns empty array when no snapshots exist', () => {
+    const snapshots = db.getHeapSnapshots();
+    expect(snapshots).toEqual([]);
+  });
+
+  it('stores and retrieves network flow state and chunks', () => {
+    db.upsertNetworkResource({
+      requestId: 'req-1',
+      url: withPath(TEST_URLS.root, 'api'),
+      method: 'GET',
+      resourceType: 'XHR',
+      requestHeaders: '{"accept":"application/json"}',
+      requestPostData: null,
+      status: 200,
+      statusText: 'OK',
+      responseHeaders: '{"content-type":"application/json"}',
+      mimeType: 'application/json',
+      protocol: 'h2',
+      remoteAddress: '127.0.0.1:443',
+      fromDiskCache: false,
+      fromServiceWorker: false,
+      startedWallTime: 1000,
+      responseWallTime: 1100,
+      finishedWallTime: 1200,
+      startedMonotonicTime: 10,
+      responseMonotonicTime: 20,
+      finishedMonotonicTime: 30,
+      encodedDataLength: 12,
+      receivedDataLength: 12,
+      receivedEncodedDataLength: 12,
+      chunkCount: 1,
+      streamingEnabled: true,
+      streamingSupported: true,
+      streamingError: null,
+      bodyCaptureState: 'inline',
+      bodyInline: '{"ok":true}',
+      bodyArtifactPath: null,
+      bodyBase64Encoded: false,
+      bodySize: 11,
+      bodyTruncated: false,
+      bodyError: null,
+      failed: false,
+      errorText: null,
+    });
+    db.insertNetworkChunk({
+      requestId: 'req-1',
+      sequence: 1,
+      timestamp: 1150,
+      monotonicTime: 25,
+      dataLength: 12,
+      encodedDataLength: 12,
+      chunkData: Buffer.from('{"ok":true}').toString('base64'),
+      chunkIsBase64: true,
+    });
+    db.flush();
+
+    const resource = db.getNetworkResource('req-1');
+    const chunks = db.getNetworkChunks('req-1');
+
+    expect(resource).not.toBeNull();
+    expect(resource?.protocol).toBe('h2');
+    expect(resource?.bodyCaptureState).toBe('inline');
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.sequence).toBe(1);
+    expect(chunks[0]?.chunkIsBase64).toBe(true);
+  });
+});

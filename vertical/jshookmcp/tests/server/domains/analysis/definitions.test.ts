@@ -1,0 +1,151 @@
+import { describe, expect, it } from 'vitest';
+import { coreTools } from '@server/domains/analysis/definitions';
+
+describe('server/domains/analysis/definitions', () => {
+  it('exports coreTools as a non-empty array', async () => {
+    expect(Array.isArray(coreTools)).toBe(true);
+    expect(coreTools.length).toBeGreaterThan(0);
+  });
+
+  it('every tool has name, description, and inputSchema', async () => {
+    coreTools.forEach((tool) => {
+      expect(tool).toEqual(
+        expect.objectContaining({
+          name: expect.any(String),
+          description: expect.any(String),
+          inputSchema: expect.objectContaining({
+            type: 'object',
+          }),
+        }),
+      );
+    });
+  });
+
+  it('has no duplicate tool names', async () => {
+    const names = coreTools.map((t) => t.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it('includes expected core tools', async () => {
+    const names = coreTools.map((t) => t.name);
+
+    expect(names).toContain('collect_code');
+    expect(names).toContain('search_in_scripts');
+    expect(names).toContain('extract_function_tree');
+    expect(names).toContain('deobfuscate');
+    expect(names).toContain('understand_code');
+    expect(names).toContain('detect_crypto');
+    expect(names).toContain('manage_hooks');
+    expect(names).toContain('detect_obfuscation');
+    expect(names).toContain('webcrack_unpack');
+    expect(names).toContain('clear_collected_data');
+    expect(names).toContain('get_collection_stats');
+    expect(names).toContain('webpack_enumerate');
+    expect(names).toContain('analysis_decode_string_array');
+    expect(names).toContain('analysis_deflat_control_flow');
+  });
+
+  it('collect_code requires url parameter', async () => {
+    const tool = coreTools.find((t) => t.name === 'collect_code')!;
+    expect(tool.inputSchema.required).toContain('url');
+    expect(tool.inputSchema.properties).toHaveProperty('url');
+    expect(tool.inputSchema.properties).toHaveProperty('smartMode');
+    expect(tool.inputSchema.properties).toHaveProperty('compress');
+  });
+
+  it('search_in_scripts requires keyword parameter', async () => {
+    const tool = coreTools.find((t) => t.name === 'search_in_scripts')!;
+    expect(tool.inputSchema.required).toContain('keyword');
+    expect(tool.inputSchema.properties).toHaveProperty('isRegex');
+    expect(tool.inputSchema.properties).toHaveProperty('caseSensitive');
+    expect(tool.inputSchema.properties).toHaveProperty('maxMatches');
+  });
+
+  it('extract_function_tree requires scriptId and functionName', async () => {
+    const tool = coreTools.find((t) => t.name === 'extract_function_tree')!;
+    expect(tool.inputSchema.required).toContain('scriptId');
+    expect(tool.inputSchema.required).toContain('functionName');
+  });
+
+  it('deobfuscate requires code and has webcrack options', async () => {
+    const tool = coreTools.find((t) => t.name === 'deobfuscate')!;
+    expect(tool.inputSchema.required).toContain('code');
+    expect(tool.inputSchema.properties).toHaveProperty('unpack');
+    expect(tool.inputSchema.properties).toHaveProperty('unminify');
+    expect(tool.inputSchema.properties).toHaveProperty('jsx');
+    expect(tool.inputSchema.properties).toHaveProperty('mangle');
+    expect(tool.inputSchema.properties).toHaveProperty('outputDir');
+    expect(tool.inputSchema.properties).toHaveProperty('mappings');
+  });
+
+  it('understand_code requires code and has focus enum', async () => {
+    const tool = coreTools.find((t) => t.name === 'understand_code')!;
+    expect(tool.inputSchema.required).toContain('code');
+    const focusProp = tool.inputSchema.properties!.focus as { enum?: string[] };
+    expect(focusProp.enum).toContain('structure');
+    expect(focusProp.enum).toContain('business');
+    expect(focusProp.enum).toContain('security');
+    expect(focusProp.enum).toContain('all');
+  });
+
+  it('manage_hooks requires action and has correct enums', async () => {
+    const tool = coreTools.find((t) => t.name === 'manage_hooks')!;
+    expect(tool.inputSchema.required).toContain('action');
+    const actionProp = tool.inputSchema.properties!.action as { enum?: string[] };
+    expect(actionProp.enum).toEqual(['create', 'list', 'records', 'clear']);
+  });
+
+  it('deobfuscate supports engine parameter and webcrack options', async () => {
+    const tool = coreTools.find((t) => t.name === 'deobfuscate')!;
+    expect(tool.inputSchema.required).toContain('code');
+    expect(tool.inputSchema.properties).toHaveProperty('engine');
+    expect(tool.inputSchema.properties).toHaveProperty('detectOnly');
+    expect(tool.inputSchema.properties).toHaveProperty('unpack');
+  });
+
+  it('webcrack_unpack requires code and has extraction options', async () => {
+    const tool = coreTools.find((t) => t.name === 'webcrack_unpack')!;
+    expect(tool.inputSchema.required).toContain('code');
+    expect(tool.inputSchema.properties).toHaveProperty('includeModuleCode');
+    expect(tool.inputSchema.properties).toHaveProperty('maxBundleModules');
+    expect(tool.inputSchema.properties).toHaveProperty('mappings');
+  });
+
+  it('js_deobfuscate_pipeline does not expose an unused timeout parameter', async () => {
+    const tool = coreTools.find((t) => t.name === 'js_deobfuscate_pipeline')!;
+    expect(tool.inputSchema.required).toContain('code');
+    expect(tool.inputSchema.properties).not.toHaveProperty('timeout');
+  });
+
+  it('clear_collected_data and get_collection_stats have no required params', async () => {
+    const clearTool = coreTools.find((t) => t.name === 'clear_collected_data')!;
+    const statsTool = coreTools.find((t) => t.name === 'get_collection_stats')!;
+
+    expect(clearTool.inputSchema.required ?? []).toHaveLength(0);
+    expect(statsTool.inputSchema.required ?? []).toHaveLength(0);
+  });
+
+  it('webpack_enumerate has optional searchKeyword', async () => {
+    const tool = coreTools.find((t) => t.name === 'webpack_enumerate')!;
+    expect(tool.inputSchema.properties).toHaveProperty('searchKeyword');
+    expect(tool.inputSchema.properties).toHaveProperty('maxResults');
+    // No required params
+    expect(tool.inputSchema.required ?? []).toHaveLength(0);
+  });
+
+  it('deobfuscate mappings items have required path and pattern', async () => {
+    const tool = coreTools.find((t) => t.name === 'deobfuscate')!;
+    const mappings = tool.inputSchema.properties!.mappings as {
+      items?: { required?: string[] };
+    };
+    expect(mappings.items?.required).toContain('path');
+    expect(mappings.items?.required).toContain('pattern');
+  });
+
+  it('analysis_decode_string_array requires code and exposes narrow options', async () => {
+    const tool = coreTools.find((t) => t.name === 'analysis_decode_string_array')!;
+    expect(tool.inputSchema.required).toContain('code');
+    expect(tool.inputSchema.properties).toHaveProperty('removeRotation');
+    expect(tool.inputSchema.properties).toHaveProperty('maxReplacements');
+  });
+});

@@ -1,0 +1,429 @@
+import * as parser from '@babel/parser';
+import traverse from '@babel/traverse';
+import { existsSync } from 'fs';
+import type {
+  EnvironmentEmulatorOptions,
+  EnvironmentEmulatorResult,
+  DetectedEnvironmentVariables,
+  MissingAPI,
+} from '@internal-types/index';
+import { logger } from '@utils/logger';
+import { getConfig } from '@utils/config';
+import { chromeEnvironmentTemplate } from '@modules/emulator/templates/chrome-env';
+import type { Browser } from 'rebrowser-puppeteer-core';
+import { generateEmulationCode, generateRecommendations } from '@modules/emulator/EmulatorCodeGen';
+import { findBrowserExecutableAsync } from '@utils/browserExecutable';
+import { fetchRealEnvironmentData } from '@modules/emulator/EnvironmentEmulatorFetch';
+
+type UnknownRecord = Record<string, unknown>;
+
+interface IdentifierNodeLike {
+  type: 'Identifier';
+  name: string;
+}
+
+interface StringLiteralNodeLike {
+  type: 'StringLiteral';
+  value: string;
+}
+
+interface MemberExpressionNodeLike {
+  type: 'MemberExpression';
+  object: unknown;
+  property: unknown;
+}
+
+/** Browser globals whose bare use is recorded as an environment access. */
+const BROWSER_GLOBAL_NAMES = [
+  'window',
+  'document',
+  'navigator',
+  'location',
+  'screen',
+  'console',
+  'localStorage',
+  'sessionStorage',
+];
+/** Top-level globals treated as environment roots when building paths. */
+const ENV_ROOT_NAMES = ['window', 'document', 'navigator', 'location', 'screen'];
+
+export class EnvironmentEmulator {
+  private browser?: Browser;
+
+  constructor(legacyDependency?: unknown) {
+    void legacyDependency;
+  }
+
+  async analyze(options: EnvironmentEmulatorOptions): Promise<EnvironmentEmulatorResult> {
+    const startTime = Date.now();
+    logger.info(' ...');
+
+    const {
+      code,
+      targetRuntime = 'both',
+      autoFetch = false,
+      browserUrl,
+      browserType = 'chrome',
+      includeComments = true,
+      extractDepth = 3,
+    } = options;
+
+    try {
+      logger.info(' ...');
+      const { detected: detectedVariables, functionPaths } = this.detectEnvironmentVariables(code);
+
+      let variableManifest: UnknownRecord = {};
+      if (autoFetch && browserUrl) {
+        logger.info(' ...');
+        variableManifest = await this.fetchRealEnvironment(
+          browserUrl,
+          detectedVariables,
+          extractDepth,
+        );
+      } else {
+        variableManifest = this.buildManifestFromTemplate(detectedVariables, browserType);
+      }
+
+      const missingAPIs = this.identifyMissingAPIs(
+        detectedVariables,
+        variableManifest,
+        functionPaths,
+      );
+
+      logger.info(' ...');
+      const emulationCode = generateEmulationCode(variableManifest, targetRuntime, includeComments);
+
+      const recommendations = generateRecommendations(detectedVariables, missingAPIs);
+
+      const totalVariables = Object.values(detectedVariables).reduce(
+        (sum, arr) => sum + arr.length,
+        0,
+      );
+      const autoFilledVariables = Object.keys(variableManifest).length;
+      const manualRequiredVariables = missingAPIs.length;
+
+      const result: EnvironmentEmulatorResult = {
+        detectedVariables,
+        emulationCode,
+        missingAPIs,
+        variableManifest,
+        recommendations,
+        stats: {
+          totalVariables,
+          autoFilledVariables,
+          manualRequiredVariables,
+        },
+      };
+
+      const processingTime = Date.now() - startTime;
+      logger.info(`Environment emulation complete in ${processingTime}ms`);
+      logger.info(`  Detected ${totalVariables} variables, auto-filled ${autoFilledVariables}`);
+
+      return result;
+    } catch (error) {
+      logger.error('', error);
+      throw error;
+    }
+  }
+
+  private detectEnvironmentVariables(code: string): {
+    detected: DetectedEnvironmentVariables;
+    functionPaths: Set<string>;
+  } {
+    const detected: DetectedEnvironmentVariables = {
+      window: [],
+      document: [],
+      navigator: [],
+      location: [],
+      screen: [],
+      other: [],
+    };
+
+    const accessedPaths = new Set<string>();
+    // Paths that are actually invoked (window.fetch()) — detected paths are
+    // bare `window.fetch` strings, so the old `path.includes('()')` check in
+    // identifyMissingAPIs could never match.
+    const functionPaths = new Set<string>();
+
+    try {
+      const ast = parser.parse(code, {
+        sourceType: 'unambiguous',
+        plugins: ['jsx', 'typescript'],
+      });
+
+      traverse(ast, {
+        MemberExpression: (path) => {
+          const fullPath = this.getMemberExpressionPath(path.node);
+          if (fullPath) {
+            accessedPaths.add(fullPath);
+            if (path.parentPath?.isCallExpression() && path.parentPath.node.callee === path.node) {
+              functionPaths.add(fullPath);
+            }
+          }
+        },
+
+        Identifier: (path) => {
+          const name = path.node.name;
+          if (BROWSER_GLOBAL_NAMES.includes(name)) {
+            if (path.scope.hasBinding(name)) {
+              return;
+            }
+            accessedPaths.add(name);
+          }
+        },
+      });
+
+      for (const path of accessedPaths) {
+        if (path.startsWith('window.')) {
+          detected.window.push(path);
+        } else if (path.startsWith('document.')) {
+          detected.document.push(path);
+        } else if (path.startsWith('navigator.')) {
+          detected.navigator.push(path);
+        } else if (path.startsWith('location.')) {
+          detected.location.push(path);
+        } else if (path.startsWith('screen.')) {
+          detected.screen.push(path);
+        } else {
+          detected.other.push(path);
+        }
+      }
+
+      for (const key of Object.keys(detected) as Array<keyof DetectedEnvironmentVariables>) {
+        detected[key] = Array.from(new Set(detected[key])).toSorted();
+      }
+    } catch (error) {
+      logger.warn('AST analysis failed', error);
+      this.detectWithRegex(code, detected);
+    }
+
+    return { detected, functionPaths };
+  }
+
+  private getMemberExpressionPath(node: unknown): string | null {
+    const parts: string[] = [];
+
+    let current: unknown = node;
+    while (current) {
+      if (this.isMemberExpressionNode(current)) {
+        if (this.isIdentifierNode(current.property)) {
+          parts.unshift(current.property.name);
+        } else if (this.isStringLiteralNode(current.property)) {
+          parts.unshift(current.property.value);
+        }
+        current = current.object;
+      } else if (this.isIdentifierNode(current)) {
+        parts.unshift(current.name);
+        break;
+      } else {
+        break;
+      }
+    }
+
+    if (parts.length > 0 && parts[0] && ENV_ROOT_NAMES.includes(parts[0])) {
+      return parts.join('.');
+    }
+
+    return null;
+  }
+
+  private detectWithRegex(code: string, detected: DetectedEnvironmentVariables): void {
+    const patterns = [
+      { regex: /window\.[a-zA-Z_$][a-zA-Z0-9_$]*/g, category: 'window' as const },
+      { regex: /document\.[a-zA-Z_$][a-zA-Z0-9_$]*/g, category: 'document' as const },
+      { regex: /navigator\.[a-zA-Z_$][a-zA-Z0-9_$]*/g, category: 'navigator' as const },
+      { regex: /location\.[a-zA-Z_$][a-zA-Z0-9_$]*/g, category: 'location' as const },
+      { regex: /screen\.[a-zA-Z_$][a-zA-Z0-9_$]*/g, category: 'screen' as const },
+    ];
+
+    for (const { regex, category } of patterns) {
+      const matches = code.match(regex) || [];
+      detected[category].push(...matches);
+    }
+
+    for (const key of Object.keys(detected) as Array<keyof DetectedEnvironmentVariables>) {
+      detected[key] = Array.from(new Set(detected[key])).toSorted();
+    }
+  }
+
+  private buildManifestFromTemplate(
+    detected: DetectedEnvironmentVariables,
+    _browserType: string,
+  ): UnknownRecord {
+    const manifest: UnknownRecord = {};
+    const template = chromeEnvironmentTemplate;
+
+    const allPaths = [
+      ...detected.window,
+      ...detected.document,
+      ...detected.navigator,
+      ...detected.location,
+      ...detected.screen,
+      ...detected.other,
+    ];
+
+    for (const path of allPaths) {
+      const value = this.getValueFromTemplate(path, template);
+      if (value !== undefined) {
+        manifest[path] = value;
+      }
+    }
+
+    return manifest;
+  }
+
+  private getValueFromTemplate(path: string, template: unknown): unknown {
+    if (!this.isRecord(template)) {
+      return undefined;
+    }
+
+    const parts = path.split('.');
+    let current: unknown = template;
+
+    for (const part of parts) {
+      if (part === 'window') {
+        current = template.window;
+      } else if (part === 'document') {
+        current = template.document;
+      } else if (part === 'navigator') {
+        current = template.navigator;
+      } else if (part === 'location') {
+        current = template.location;
+      } else if (part === 'screen') {
+        current = template.screen;
+      } else if (this.isRecord(current) && part in current) {
+        current = current[part];
+      } else {
+        return undefined;
+      }
+    }
+
+    return current;
+  }
+
+  private async fetchRealEnvironment(
+    url: string,
+    detected: DetectedEnvironmentVariables,
+    depth: number,
+  ): Promise<UnknownRecord> {
+    const { manifest, browser } = await fetchRealEnvironmentData({
+      browser: this.browser ?? undefined,
+      url,
+      detected,
+      depth,
+      resolveExecutablePath: async () => this.resolveExecutablePath(),
+      buildManifestFromTemplate: (vars, browserType) =>
+        this.buildManifestFromTemplate(vars, browserType),
+    });
+
+    if (browser) {
+      this.browser = browser;
+    }
+
+    return manifest;
+  }
+
+  private async resolveExecutablePath(): Promise<string | undefined> {
+    // Reuse the config-level env merge (PUPPETEER_EXECUTABLE_PATH /
+    // CHROME_PATH / BROWSER_EXECUTABLE_PATH) instead of re-implementing it.
+    const configuredPath = getConfig().puppeteer.executablePath;
+
+    if (configuredPath) {
+      if (existsSync(configuredPath)) {
+        return configuredPath;
+      }
+      throw new Error(
+        `Configured browser executable was not found: ${configuredPath}. ` +
+          'Set a valid executablePath or configure CHROME_PATH / PUPPETEER_EXECUTABLE_PATH / BROWSER_EXECUTABLE_PATH.',
+      );
+    }
+
+    const detectedPath = await findBrowserExecutableAsync();
+    if (detectedPath) {
+      return detectedPath;
+    }
+
+    logger.info(
+      'No explicit browser executable configured. Falling back to Puppeteer-managed browser resolution.',
+    );
+    return undefined;
+  }
+
+  private identifyMissingAPIs(
+    detected: DetectedEnvironmentVariables,
+    manifest: UnknownRecord,
+    functionPaths: ReadonlySet<string> = new Set(),
+  ): MissingAPI[] {
+    const missing: MissingAPI[] = [];
+
+    const allPaths = [
+      ...detected.window,
+      ...detected.document,
+      ...detected.navigator,
+      ...detected.location,
+      ...detected.screen,
+      ...detected.other,
+    ];
+
+    for (const path of allPaths) {
+      if (!(path in manifest) || manifest[path] === undefined) {
+        // Detected paths are bare `window.fetch` strings (no parens) — the
+        // old `path.includes('()')` could never match. Use the invocation
+        // set collected during AST analysis instead.
+        let type: 'function' | 'object' | 'property' = 'property';
+        if (functionPaths.has(path)) {
+          type = 'function';
+        } else if (path.endsWith('Element') || path.endsWith('List')) {
+          type = 'object';
+        }
+
+        missing.push({
+          name: path.split('.').pop() || path,
+          type,
+          path,
+          suggestion: this.getSuggestionForMissingAPI(path, type),
+        });
+      }
+    }
+
+    return missing;
+  }
+
+  private getSuggestionForMissingAPI(path: string, type: string): string {
+    if (type === 'function') {
+      return `: ${path} = function() {}`;
+    } else if (type === 'object') {
+      return `: ${path} = {}`;
+    } else {
+      return `null: ${path} = null`;
+    }
+  }
+
+  async cleanup(): Promise<void> {
+    if (this.browser) {
+      await this.browser.close();
+      this.browser = undefined;
+    }
+  }
+
+  private isRecord(value: unknown): value is UnknownRecord {
+    return typeof value === 'object' && value !== null;
+  }
+
+  private isIdentifierNode(node: unknown): node is IdentifierNodeLike {
+    return this.isRecord(node) && node.type === 'Identifier' && typeof node.name === 'string';
+  }
+
+  private isStringLiteralNode(node: unknown): node is StringLiteralNodeLike {
+    return this.isRecord(node) && node.type === 'StringLiteral' && typeof node.value === 'string';
+  }
+
+  private isMemberExpressionNode(node: unknown): node is MemberExpressionNodeLike {
+    return (
+      this.isRecord(node) &&
+      node.type === 'MemberExpression' &&
+      'object' in node &&
+      'property' in node
+    );
+  }
+}

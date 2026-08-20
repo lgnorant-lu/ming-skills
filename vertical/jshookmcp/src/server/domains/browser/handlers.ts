@@ -1,0 +1,16 @@
+export {
+  BrowserToolHandlers,
+  BrowserControlHandlers,
+  CamoufoxBrowserHandlers,
+  PageNavigationHandlers,
+  PageInteractionHandlers,
+  PageEvaluationHandlers,
+  PageDataHandlers,
+  ConsoleHandlers,
+  ScriptManagementHandlers,
+  CaptchaHandlers,
+  StealthInjectionHandlers,
+  FrameworkStateHandlers,
+  IndexedDBDumpHandlers,
+  DetailedDataHandlers,
+} from '@server/domains/browser/handlers.impl';

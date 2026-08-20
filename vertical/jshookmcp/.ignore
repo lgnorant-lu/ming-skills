@@ -1,0 +1,12 @@
+# .ignore — read by fd/rg but NOT by git
+# Override .gitignore to let agent search tools index these directories
+!.context/
+!.github/prompts/
+!.github/skills/
+!CLAUDE.md
+!DESIGN.md
+!.planning/
+!.claude/
+!.serena/
+!AGENTS.md
+!.ccg/

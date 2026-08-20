@@ -1,0 +1,212 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { cleanupArtifacts } from '@utils/artifactRetention';
+
+describe('artifactRetention', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'jshook-artifacts-'));
+    await mkdir(join(root, 'artifacts', 'har'), { recursive: true });
+    await mkdir(join(root, 'screenshots', 'manual'), { recursive: true });
+    await mkdir(join(root, 'debugger-sessions'), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('removes files older than retention window', async () => {
+    const oldFile = join(root, 'artifacts', 'har', 'old.har');
+    await writeFile(oldFile, 'old');
+    const oldTime = new Date('2024-01-01T00:00:00.000Z');
+    await import('node:fs/promises').then(({ utimes }) => utimes(oldFile, oldTime, oldTime));
+
+    const result = await cleanupArtifacts({
+      retentionDays: 1,
+      dryRun: false,
+      now: new Date('2024-01-10T00:00:00.000Z').getTime(),
+      directories: [
+        join(root, 'artifacts'),
+        join(root, 'screenshots'),
+        join(root, 'debugger-sessions'),
+      ],
+    });
+
+    expect(result.removedFiles).toBe(1);
+    expect(result.removedByAge).toBeGreaterThan(0);
+  });
+
+  it('trims oldest files when size cap is exceeded', async () => {
+    const older = join(root, 'screenshots', 'manual', 'older.png');
+    const newer = join(root, 'screenshots', 'manual', 'newer.png');
+    await writeFile(older, '1234567890');
+    await writeFile(newer, 'abcdefghij');
+    const oldTime = new Date('2024-01-01T00:00:00.000Z');
+    const newTime = new Date('2024-01-02T00:00:00.000Z');
+    const { utimes } = await import('node:fs/promises');
+    await utimes(older, oldTime, oldTime);
+    await utimes(newer, newTime, newTime);
+
+    const result = await cleanupArtifacts({
+      maxTotalBytes: 10,
+      dryRun: false,
+      directories: [
+        join(root, 'artifacts'),
+        join(root, 'screenshots'),
+        join(root, 'debugger-sessions'),
+      ],
+    });
+
+    expect(result.removedFiles).toBe(1);
+    expect(result.removedBySize).toBeGreaterThan(0);
+    expect(result.remainingBytes).toBeLessThanOrEqual(10);
+  });
+
+  it('tolerates filesystem access errors gracefully', async () => {
+    // Attempting to scan non-existent or restricted paths should return gracefully
+    const result = await cleanupArtifacts({
+      directories: [join(root, 'non-existent-dir')],
+    });
+    expect(result.success).toBe(true);
+    expect(result.scannedFiles).toBe(0);
+  });
+
+  it('computes default directories and runs safely in dry_run mode', async () => {
+    const artifacts = await import('@utils/artifacts');
+    const outputPaths = await import('@utils/outputPaths');
+    const originalScreenshotDir = process.env.MCP_SCREENSHOT_DIR;
+    const originalDebuggerDir = process.env.MCP_DEBUGGER_SESSIONS_DIR;
+
+    try {
+      process.env.MCP_SCREENSHOT_DIR = join(root, 'screenshots');
+      process.env.MCP_DEBUGGER_SESSIONS_DIR = join(root, 'debugger-sessions');
+      vi.spyOn(outputPaths, 'getProjectRoot').mockReturnValue(root);
+      vi.spyOn(artifacts, 'getArtifactsRoot').mockReturnValue(join(root, 'artifacts'));
+      vi.spyOn(artifacts, 'getArtifactDir').mockImplementation((category) =>
+        join(root, 'artifacts', category),
+      );
+
+      const result = await cleanupArtifacts({
+        directories: undefined,
+        dryRun: true,
+      });
+      expect(result.success).toBe(true);
+      expect(result.directories.length).toBeGreaterThan(0);
+      expect(result.directories).toContain(join(root, 'artifacts'));
+      expect(result.directories).toContain(join(root, 'screenshots'));
+    } finally {
+      if (originalScreenshotDir === undefined) {
+        delete process.env.MCP_SCREENSHOT_DIR;
+      } else {
+        process.env.MCP_SCREENSHOT_DIR = originalScreenshotDir;
+      }
+      if (originalDebuggerDir === undefined) {
+        delete process.env.MCP_DEBUGGER_SESSIONS_DIR;
+      } else {
+        process.env.MCP_DEBUGGER_SESSIONS_DIR = originalDebuggerDir;
+      }
+    }
+  });
+
+  it('limits cleanup to selected artifact categories', async () => {
+    const artifacts = await import('@utils/artifacts');
+    const outputPaths = await import('@utils/outputPaths');
+    vi.spyOn(outputPaths, 'getProjectRoot').mockReturnValue(root);
+    vi.spyOn(artifacts, 'getArtifactDir').mockImplementation((category) =>
+      join(root, 'artifacts', category),
+    );
+
+    const harFile = join(root, 'artifacts', 'har', 'old.har');
+    const traceDir = join(root, 'artifacts', 'traces');
+    const traceFile = join(traceDir, 'old.trace');
+    await mkdir(traceDir, { recursive: true });
+    await writeFile(harFile, 'old har');
+    await writeFile(traceFile, 'old trace');
+    const oldTime = new Date('2024-01-01T00:00:00.000Z');
+    const { stat, utimes } = await import('node:fs/promises');
+    await utimes(harFile, oldTime, oldTime);
+    await utimes(traceFile, oldTime, oldTime);
+
+    const result = await cleanupArtifacts({
+      retentionDays: 1,
+      dryRun: false,
+      now: new Date('2024-01-10T00:00:00.000Z').getTime(),
+      categories: ['har'],
+    });
+
+    expect(result.categories).toEqual(['har']);
+    expect(result.directories).toEqual([join(root, 'artifacts', 'har')]);
+    expect(result.removedFiles).toBe(1);
+    await expect(stat(harFile)).rejects.toThrow();
+    await expect(stat(traceFile)).resolves.toBeDefined();
+  });
+
+  it('keeps pruning cwd debugger sessions when MCP_PROJECT_ROOT is overridden', async () => {
+    const artifacts = await import('@utils/artifacts');
+    const outputPaths = await import('@utils/outputPaths');
+    const originalProjectRoot = process.env.MCP_PROJECT_ROOT;
+    const originalScreenshotDir = process.env.MCP_SCREENSHOT_DIR;
+    const originalDebuggerDir = process.env.MCP_DEBUGGER_SESSIONS_DIR;
+    const cwdRoot = join(root, 'runtime-cwd');
+    const projectRoot = join(root, 'project-root');
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(cwdRoot);
+
+    try {
+      process.env.MCP_PROJECT_ROOT = 'custom-root';
+      process.env.MCP_SCREENSHOT_DIR = join(projectRoot, 'screenshots');
+      process.env.MCP_DEBUGGER_SESSIONS_DIR = join(projectRoot, 'debugger-sessions');
+      vi.spyOn(outputPaths, 'getProjectRoot').mockReturnValue(projectRoot);
+      vi.spyOn(artifacts, 'getArtifactsRoot').mockReturnValue(join(projectRoot, 'artifacts'));
+      vi.spyOn(artifacts, 'getArtifactDir').mockImplementation((category) =>
+        join(projectRoot, 'artifacts', category),
+      );
+
+      const result = await cleanupArtifacts({
+        directories: undefined,
+        dryRun: true,
+      });
+
+      expect(result.directories).toContain(join(projectRoot, 'debugger-sessions'));
+      expect(result.directories).toContain(join(cwdRoot, 'debugger-sessions'));
+    } finally {
+      cwdSpy.mockRestore();
+      if (originalProjectRoot === undefined) {
+        delete process.env.MCP_PROJECT_ROOT;
+      } else {
+        process.env.MCP_PROJECT_ROOT = originalProjectRoot;
+      }
+      if (originalScreenshotDir === undefined) {
+        delete process.env.MCP_SCREENSHOT_DIR;
+      } else {
+        process.env.MCP_SCREENSHOT_DIR = originalScreenshotDir;
+      }
+      if (originalDebuggerDir === undefined) {
+        delete process.env.MCP_DEBUGGER_SESSIONS_DIR;
+      } else {
+        process.env.MCP_DEBUGGER_SESSIONS_DIR = originalDebuggerDir;
+      }
+    }
+  });
+});
+
+describe('artifactRetention Scheduler', () => {
+  it('skips scheduling if interval is 0', async () => {
+    const { startArtifactRetentionScheduler } = await import('@utils/artifactRetention');
+    process.env.MCP_ARTIFACT_CLEANUP_INTERVAL_MINUTES = '0';
+    const stopFn = startArtifactRetentionScheduler();
+    expect(stopFn).toBeNull();
+  });
+
+  it('spawns and stops interval scheduling bounds correctly', async () => {
+    const { startArtifactRetentionScheduler } = await import('@utils/artifactRetention');
+    process.env.MCP_ARTIFACT_CLEANUP_INTERVAL_MINUTES = '1';
+    const stopFn = startArtifactRetentionScheduler();
+    expect(stopFn).toBeDefined();
+    if (stopFn) {
+      expect(() => stopFn()).not.toThrow();
+    }
+  });
+});

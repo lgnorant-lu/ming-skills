@@ -1,0 +1,857 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as testUrls from '@tests/shared/test-urls';
+import type {
+  CodeCollectorMirror,
+  ConsoleMonitorMirror,
+} from '@tests/server/domains/shared/mock-factories';
+import {
+  createCodeCollectorMock,
+  createConsoleMonitorMock,
+  parseJson,
+} from '@tests/server/domains/shared/mock-factories';
+import type {
+  NetworkRequestsResponse,
+  NetworkResponseBodyResponse,
+  NetworkStatsResponse,
+} from '@tests/shared/common-test-types';
+
+vi.mock('@src/utils/DetailedDataManager', () => ({
+  DetailedDataManager: {
+    getInstance: () => ({
+      smartHandle: (payload: any) => payload,
+    }),
+  },
+}));
+
+vi.mock('@src/server/domains/shared/modules', () => ({
+  PerformanceMonitor: vi.fn(),
+  ConsoleMonitor: vi.fn(),
+  CodeCollector: vi.fn(),
+}));
+
+import { AdvancedHandlersBase } from '@server/domains/network/handlers.base';
+import { TEST_URLS, withPath } from '@tests/shared/test-urls';
+
+describe('AdvancedHandlersBase (requests)', () => {
+  let collector: CodeCollectorMirror;
+  let consoleMonitor: ConsoleMonitorMirror;
+  let handler: AdvancedHandlersBase;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    collector = createCodeCollectorMock();
+    consoleMonitor = createConsoleMonitorMock();
+    handler = new AdvancedHandlersBase(collector as any, consoleMonitor as any);
+  });
+
+  // ---------- handleNetworkGetRequests ----------
+
+  describe('handleNetworkGetRequests', () => {
+    it('returns failure when monitoring disabled and autoEnable is false', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(false);
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ autoEnable: false }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.message).toContain('not enabled');
+      expect(body.tip).toContain('autoEnable=true');
+    });
+
+    it('reports auto-enable failure with error detail', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(false);
+      consoleMonitor.enable.mockRejectedValue(new Error('CDP error'));
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ autoEnable: true }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.message).toContain('Failed to auto-enable');
+      expect(body.detail).toBe('CDP error');
+    });
+
+    it('auto-enables and returns empty request set with hints', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValueOnce(false).mockReturnValueOnce(true);
+      consoleMonitor.enable.mockResolvedValue(undefined);
+      consoleMonitor.getNetworkRequests.mockReturnValue([]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ autoEnable: true }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.total).toBe(0);
+      expect(body.possibleReasons).toBeDefined();
+      expect(body.recommended_actions).toBeDefined();
+      // @ts-expect-error — auto-suppressed [TS18048]
+      expect(body.monitoring.autoEnabled).toBe(true);
+    });
+
+    it('returns injected fetch/xhr requests even when CDP request list is empty', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([]);
+      consoleMonitor.getFetchRequests.mockResolvedValue([
+        {
+          url: `${testUrls.TEST_URLS.root}/api/fetch-only`,
+          method: 'POST',
+          status: 200,
+          timestamp: 1234,
+        },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(await handler.handleNetworkGetRequests({}));
+      expect(body.success).toBe(true);
+      expect(body.total).toBe(1);
+      expect(body.requests[0]).toMatchObject({
+        url: `${testUrls.TEST_URLS.root}/api/fetch-only`,
+        method: 'POST',
+        type: 'Fetch',
+        injected: true,
+      });
+    });
+
+    it('merges injected requests with CDP requests without duplicating identical entries', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        {
+          requestId: 'cdp-1',
+          url: `${testUrls.TEST_URLS.root}/api/one`,
+          method: 'GET',
+          type: 'XHR',
+          timestamp: 111,
+        },
+        {
+          requestId: 'dup-1',
+          url: `${testUrls.TEST_URLS.root}/api/dup`,
+          method: 'POST',
+          type: 'Fetch',
+          timestamp: 222,
+        },
+      ]);
+      consoleMonitor.getFetchRequests.mockResolvedValue([
+        {
+          requestId: 'dup-1',
+          url: `${testUrls.TEST_URLS.root}/api/dup`,
+          method: 'POST',
+          timestamp: 222,
+          status: 201,
+        },
+      ]);
+      consoleMonitor.getXHRRequests.mockResolvedValue([
+        {
+          url: `${testUrls.TEST_URLS.root}/api/two`,
+          method: 'GET',
+          timestamp: 333,
+        },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ url: 'api' }),
+      );
+
+      expect(body.total).toBe(3);
+      expect(
+        body.requests.filter((req: any) => req.url === `${testUrls.TEST_URLS.root}/api/dup`),
+      ).toHaveLength(1);
+      expect(
+        body.requests.find((req: any) => req.url === `${testUrls.TEST_URLS.root}/api/two`),
+      ).toMatchObject({
+        type: 'XHR',
+        injected: true,
+      });
+    });
+
+    it('deduplicates same method/url when timestamps are close but from different clocks', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        {
+          requestId: 'cdp-near',
+          url: `${testUrls.TEST_URLS.root}/api/near`,
+          method: 'GET',
+          type: 'Fetch',
+          timestamp: 1000,
+        },
+      ]);
+      consoleMonitor.getFetchRequests.mockResolvedValue([
+        {
+          url: `${testUrls.TEST_URLS.root}/api/near`,
+          method: 'GET',
+          timestamp: 2200,
+          status: 200,
+        },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ url: 'near' }),
+      );
+
+      expect(body.total).toBe(1);
+      expect(body.requests[0]).toMatchObject({
+        requestId: 'cdp-near',
+        url: `${testUrls.TEST_URLS.root}/api/near`,
+        method: 'GET',
+      });
+    });
+
+    it('does not merge repeated requests that only share method and url when timestamps are far apart', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        {
+          requestId: 'cdp-first',
+          url: `${testUrls.TEST_URLS.root}/api/poll`,
+          method: 'GET',
+          type: 'Fetch',
+          timestamp: 1_000,
+        },
+        {
+          requestId: 'cdp-second',
+          url: `${testUrls.TEST_URLS.root}/api/poll`,
+          method: 'GET',
+          type: 'Fetch',
+          timestamp: 8_000,
+        },
+      ]);
+      consoleMonitor.getFetchRequests.mockResolvedValue([
+        {
+          url: `${testUrls.TEST_URLS.root}/api/poll`,
+          method: 'GET',
+          timestamp: 20_000,
+          status: 200,
+        },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ url: 'poll' }),
+      );
+
+      expect(body.total).toBe(3);
+      expect(
+        body.requests.filter((req: any) => req.url === `${testUrls.TEST_URLS.root}/api/poll`),
+      ).toHaveLength(3);
+      expect(body.requests.map((req: any) => req.requestId)).toEqual(
+        expect.arrayContaining(['cdp-first', 'cdp-second']),
+      );
+    });
+
+    it('returns all requests when no filter is specified', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/api/a`, method: 'GET', type: 'XHR' },
+        { requestId: '2', url: `${testUrls.TEST_URLS.root}/api/b`, method: 'POST', type: 'Fetch' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(await handler.handleNetworkGetRequests({}));
+      expect(body.success).toBe(true);
+      expect(body.total).toBe(2);
+      expect(body.requests).toHaveLength(2);
+      expect(body.filtered).toBe(false);
+    });
+
+    it('excludes static resource types by default when no filters are set', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/api/data`, method: 'GET', type: 'XHR' },
+        {
+          requestId: '2',
+          url: `${testUrls.TEST_URLS.root}/logo.png`,
+          method: 'GET',
+          type: 'Image',
+        },
+        {
+          requestId: '3',
+          url: `${testUrls.TEST_URLS.root}/style.css`,
+          method: 'GET',
+          type: 'Stylesheet',
+        },
+        {
+          requestId: '4',
+          url: `${testUrls.TEST_URLS.root}/font.woff2`,
+          method: 'GET',
+          type: 'Font',
+        },
+        {
+          requestId: '5',
+          url: `${testUrls.TEST_URLS.root}/video.mp4`,
+          method: 'GET',
+          type: 'Media',
+        },
+        {
+          requestId: '6',
+          url: `${testUrls.TEST_URLS.root}/api/users`,
+          method: 'POST',
+          type: 'Fetch',
+        },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(await handler.handleNetworkGetRequests({}));
+      expect(body.success).toBe(true);
+      expect(body.total).toBe(2);
+      expect(body.requests).toHaveLength(2);
+      expect(body.requests.map((r: any) => r.requestId)).toEqual(['1', '6']);
+      expect(body.staticResourcesExcluded).toBe(4);
+      expect(body.staticFilterNote).toContain('4 static resources');
+    });
+
+    it('includes static resources when an explicit filter is set', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/api/data`, method: 'GET', type: 'XHR' },
+        {
+          requestId: '2',
+          url: `${testUrls.TEST_URLS.root}/logo.png`,
+          method: 'GET',
+          type: 'Image',
+        },
+      ]);
+
+      // With url filter set, Image type should NOT be excluded
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ url: testUrls.TEST_HOSTS.root }),
+      );
+      expect(body.total).toBe(2);
+      expect(body.requests).toHaveLength(2);
+      expect(body.staticResourcesExcluded).toBeUndefined();
+    });
+
+    it('sorts results by type priority (XHR > Fetch > Document > Script)', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/app.js`, method: 'GET', type: 'Script' },
+        { requestId: '2', url: `${testUrls.TEST_URLS.root}/`, method: 'GET', type: 'Document' },
+        { requestId: '3', url: `${testUrls.TEST_URLS.root}/api/data`, method: 'GET', type: 'XHR' },
+        {
+          requestId: '4',
+          url: `${testUrls.TEST_URLS.root}/api/users`,
+          method: 'POST',
+          type: 'Fetch',
+        },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ url: testUrls.TEST_HOSTS.root }),
+      );
+      const types = body.requests.map((r: any) => r.type);
+      expect(types).toEqual(['XHR', 'Fetch', 'Document', 'Script']);
+    });
+
+    it('injects optimizationHint when more than 100 unfiltered requests', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      const manyRequests = Array.from({ length: 110 }, (_, i) => ({
+        requestId: String(i),
+        url: withPath(TEST_URLS.root, `api/${i}`),
+        method: 'GET',
+        type: 'XHR',
+      }));
+      consoleMonitor.getNetworkRequests.mockReturnValue(manyRequests);
+
+      const body = parseJson<NetworkRequestsResponse>(await handler.handleNetworkGetRequests({}));
+      expect(body.optimizationHint).toContain('110 requests captured');
+      expect(body.optimizationHint).toContain('url/method filters');
+    });
+
+    it('filters requests by URL substring (case-insensitive)', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/api/users`, method: 'GET' },
+        { requestId: '2', url: `${testUrls.TEST_URLS.root}/cdn/image.png`, method: 'GET' },
+        { requestId: '3', url: `${testUrls.TEST_URLS.root}/API/orders`, method: 'GET' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ url: 'api' }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.total).toBe(2);
+      expect(body.requests.every((r: any) => r.url.toLowerCase().includes('api'))).toBe(true);
+    });
+
+    it('filters requests by URL regex', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/api/v1/users`, method: 'GET' },
+        { requestId: '2', url: `${testUrls.TEST_URLS.root}/api/v2/orders`, method: 'GET' },
+        { requestId: '3', url: `${testUrls.TEST_URLS.root}/cdn/image.png`, method: 'GET' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ urlRegex: '/api/v[12]/' }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.total).toBe(2);
+    });
+
+    it('urlRegex takes precedence over url substring', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/api/v1/users`, method: 'GET' },
+        { requestId: '2', url: `${testUrls.TEST_URLS.root}/api/v2/orders`, method: 'GET' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ url: 'v2', urlRegex: 'v1' }),
+      );
+      // urlRegex 'v1' should match only the first request
+      expect(body.total).toBe(1);
+      // @ts-expect-error — auto-suppressed [TS2532]
+      expect(body.requests[0].requestId).toBe('1');
+    });
+
+    it('returns error for invalid urlRegex pattern', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/api`, method: 'GET' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ urlRegex: '[invalid' }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('Invalid urlRegex');
+    });
+
+    it('returns error for urlRegex exceeding 500 characters', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/api`, method: 'GET' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ urlRegex: 'a'.repeat(501) }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.error).toContain('urlRegex too long');
+    });
+
+    it('filters requests by HTTP method', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/api/a`, method: 'GET' },
+        { requestId: '2', url: `${testUrls.TEST_URLS.root}/api/b`, method: 'POST' },
+        { requestId: '3', url: `${testUrls.TEST_URLS.root}/api/c`, method: 'GET' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ method: 'post' }),
+      );
+      expect(body.total).toBe(1);
+      // @ts-expect-error — auto-suppressed [TS2532]
+      expect(body.requests[0].method).toBe('POST');
+    });
+
+    it('method=ALL does not filter by method', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/a`, method: 'GET' },
+        { requestId: '2', url: `${testUrls.TEST_URLS.root}/b`, method: 'POST' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ method: 'ALL' }),
+      );
+      expect(body.total).toBe(2);
+    });
+
+    it('filters by sinceRequestId (excludes up to and including the ID)', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/a`, method: 'GET' },
+        { requestId: '2', url: `${testUrls.TEST_URLS.root}/b`, method: 'GET' },
+        { requestId: '3', url: `${testUrls.TEST_URLS.root}/c`, method: 'GET' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ sinceRequestId: '1' }),
+      );
+      expect(body.total).toBe(2);
+      expect(body.requests[0]?.requestId).toBe('2');
+    });
+
+    it('sinceRequestId that does not match keeps all requests', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/a`, method: 'GET' },
+        { requestId: '2', url: `${testUrls.TEST_URLS.root}/b`, method: 'GET' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ sinceRequestId: 'nonexistent' }),
+      );
+      expect(body.total).toBe(2);
+    });
+
+    it('filters by sinceTimestamp', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/a`, method: 'GET', timestamp: 1000 },
+        { requestId: '2', url: `${testUrls.TEST_URLS.root}/b`, method: 'GET', timestamp: 2000 },
+        { requestId: '3', url: `${testUrls.TEST_URLS.root}/c`, method: 'GET', timestamp: 3000 },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ sinceTimestamp: 1500 }),
+      );
+      expect(body.total).toBe(2);
+      expect(body.requests[0]?.requestId).toBe('2');
+    });
+
+    it('applies tail filter to return only the last N results', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/a`, method: 'GET' },
+        { requestId: '2', url: `${testUrls.TEST_URLS.root}/b`, method: 'GET' },
+        { requestId: '3', url: `${testUrls.TEST_URLS.root}/c`, method: 'GET' },
+        { requestId: '4', url: `${testUrls.TEST_URLS.root}/d`, method: 'GET' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ tail: 2 }),
+      );
+      expect(body.total).toBe(2);
+      expect(body.requests[0]?.requestId).toBe('3');
+      expect(body.requests[1]?.requestId).toBe('4');
+    });
+
+    it('paginates results with offset and limit', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/a`, method: 'GET' },
+        { requestId: '2', url: `${testUrls.TEST_URLS.root}/b`, method: 'GET' },
+        { requestId: '3', url: `${testUrls.TEST_URLS.root}/c`, method: 'GET' },
+        { requestId: '4', url: `${testUrls.TEST_URLS.root}/d`, method: 'GET' },
+        { requestId: '5', url: `${testUrls.TEST_URLS.root}/e`, method: 'GET' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ limit: 2, offset: 1 }),
+      );
+      expect(body.page?.returned).toBe(2);
+      expect(body.page?.offset).toBe(1);
+      expect(body.page?.hasMore).toBe(true);
+      expect(body.page?.nextOffset).toBe(3);
+      expect(body.requests[0]?.requestId).toBe('2');
+      expect(body.requests[1]?.requestId).toBe('3');
+    });
+
+    it('reports hasMore=false on last page', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/a`, method: 'GET' },
+        { requestId: '2', url: `${testUrls.TEST_URLS.root}/b`, method: 'GET' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ limit: 10, offset: 0 }),
+      );
+      expect(body.page?.hasMore).toBe(false);
+      expect(body.page?.nextOffset).toBeNull();
+    });
+
+    it('provides filterMiss hint when URL filter matches nothing', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/cdn/img.png`, method: 'GET' },
+        { requestId: '2', url: `${testUrls.TEST_URLS.root}/cdn/style.css`, method: 'GET' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ url: 'api' }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.filterMiss).toBe(true);
+      expect(body.hint).toContain('api');
+      expect(body.urlSamples).toBeDefined();
+    });
+
+    it('skips non-request payloads that lack url/method', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/a`, method: 'GET' },
+        { broken: true },
+        null,
+        42,
+        'string',
+        { url: 'no-method' },
+        { method: 'no-url' },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(await handler.handleNetworkGetRequests({}));
+      expect(body.total).toBe(1);
+      // @ts-expect-error — auto-suppressed [TS2532]
+      expect(body.requests[0].requestId).toBe('1');
+    });
+
+    it('combines multiple filters together', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { requestId: '1', url: `${testUrls.TEST_URLS.root}/api/v1`, method: 'GET', timestamp: 100 },
+        {
+          requestId: '2',
+          url: `${testUrls.TEST_URLS.root}/api/v1`,
+          method: 'POST',
+          timestamp: 200,
+        },
+        {
+          requestId: '3',
+          url: `${testUrls.TEST_URLS.root}/api/v1`,
+          method: 'POST',
+          timestamp: 300,
+        },
+        { requestId: '4', url: `${testUrls.TEST_URLS.root}/cdn/x`, method: 'GET', timestamp: 400 },
+      ]);
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({
+          url: 'api',
+          method: 'POST',
+          sinceTimestamp: 150,
+        }),
+      );
+      expect(body.total).toBe(2);
+      expect(body.requests[0]?.requestId).toBe('2');
+      expect(body.requests[1]?.requestId).toBe('3');
+    });
+  });
+
+  // ---------- handleNetworkGetResponseBody ----------
+
+  describe('handleNetworkGetResponseBody', () => {
+    it('returns error when requestId is missing', async () => {
+      const body = parseJson<NetworkResponseBodyResponse>(
+        await handler.handleNetworkGetResponseBody({}),
+      );
+      expect(body.success).toBe(false);
+      expect(body.message).toContain('requestId parameter is required');
+    });
+
+    it('returns error when requestId is empty string', async () => {
+      const body = parseJson<NetworkResponseBodyResponse>(
+        await handler.handleNetworkGetResponseBody({ requestId: '' }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.message).toContain('requestId parameter is required');
+    });
+
+    it('returns error when network monitoring is disabled', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(false);
+      const body = parseJson<NetworkResponseBodyResponse>(
+        await handler.handleNetworkGetResponseBody({
+          requestId: 'req-1',
+          autoEnable: false,
+        }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.message).toContain('not enabled');
+    });
+
+    it('returns full body when response is found', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getResponseBody.mockResolvedValue({
+        body: '{"data": "value"}',
+        base64Encoded: false,
+      });
+
+      const body = parseJson<NetworkResponseBodyResponse>(
+        await handler.handleNetworkGetResponseBody({ requestId: 'req-1' }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.body).toBe('{"data": "value"}');
+      expect(body.base64Encoded).toBe(false);
+      expect(body.requestId).toBe('req-1');
+      expect(body.attempts).toBe(1);
+    });
+
+    it('retries when response body is not immediately available', async () => {
+      vi.useFakeTimers();
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getResponseBody
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ body: 'data', base64Encoded: false });
+
+      const promise = handler.handleNetworkGetResponseBody({
+        requestId: 'req-1',
+        retries: 3,
+        retryIntervalMs: 100,
+      });
+
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(100);
+
+      const body = parseJson<NetworkResponseBodyResponse>(await promise);
+      expect(body.success).toBe(true);
+      expect(body.attempts).toBe(3);
+      vi.useRealTimers();
+    });
+
+    it('returns failure after exhausting retries', async () => {
+      vi.useFakeTimers();
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getResponseBody.mockResolvedValue(null);
+
+      const promise = handler.handleNetworkGetResponseBody({
+        requestId: 'req-1',
+        retries: 2,
+        retryIntervalMs: 50,
+      });
+
+      await vi.advanceTimersByTimeAsync(50);
+      await vi.advanceTimersByTimeAsync(50);
+
+      const body = parseJson<NetworkResponseBodyResponse>(await promise);
+      expect(body.success).toBe(false);
+      expect(body.message).toContain('No response body found');
+      expect(body.attempts).toBe(3); // 1 initial + 2 retries
+      vi.useRealTimers();
+    });
+
+    it('returns summary for large responses exceeding maxSize', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      const largeBody = 'x'.repeat(200_000);
+      consoleMonitor.getResponseBody.mockResolvedValue({
+        body: largeBody,
+        base64Encoded: false,
+      });
+
+      const body = parseJson<NetworkResponseBodyResponse>(
+        await handler.handleNetworkGetResponseBody({
+          requestId: 'req-1',
+          maxSize: 100_000,
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.summary).toBeDefined();
+      expect(body.summary?.truncated).toBe(true);
+      expect(body.summary?.preview.length).toBeLessThanOrEqual(504); // 500 + '...'
+      expect(body.body).toBeUndefined();
+    });
+
+    it('returns summary when returnSummary is true even for small responses', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getResponseBody.mockResolvedValue({
+        body: 'small',
+        base64Encoded: false,
+      });
+
+      const body = parseJson<NetworkResponseBodyResponse>(
+        await handler.handleNetworkGetResponseBody({
+          requestId: 'req-1',
+          returnSummary: true,
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.summary).toBeDefined();
+      expect(body.summary?.truncated).toBe(false);
+      expect(body.summary?.reason).toContain('Summary mode');
+    });
+
+    it('clamps maxSize within bounds', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getResponseBody.mockResolvedValue({
+        body: 'x'.repeat(2000),
+        base64Encoded: false,
+      });
+
+      // maxSize below minimum (1024) should be clamped to 1024
+      const body = parseJson<NetworkResponseBodyResponse>(
+        await handler.handleNetworkGetResponseBody({
+          requestId: 'req-1',
+          maxSize: 100,
+        }),
+      );
+      expect(body.success).toBe(true);
+      // Response of 2000 chars > 1024 min, so it should be truncated
+      expect(body.summary).toBeDefined();
+      expect(body.summary?.truncated).toBe(true);
+    });
+  });
+
+  // ---------- handleNetworkGetStats ----------
+
+  describe('handleNetworkGetStats', () => {
+    it('returns error when network monitoring is disabled', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(false);
+      const body = parseJson<NetworkStatsResponse>(await handler.handleNetworkGetStats({}));
+      expect(body.success).toBe(false);
+      expect(body.hint).toContain('network_enable');
+    });
+
+    it('computes method and status distribution stats', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { url: testUrls.TEST_URLS.a, method: 'GET', type: 'Document' },
+        { url: testUrls.TEST_URLS.b, method: 'GET', type: 'Script' },
+        { url: testUrls.TEST_URLS.c, method: 'POST', type: 'XHR' },
+      ]);
+      consoleMonitor.getNetworkResponses.mockReturnValue([
+        { status: 200 },
+        { status: 200 },
+        { status: 404 },
+      ]);
+
+      const body = parseJson<NetworkStatsResponse>(await handler.handleNetworkGetStats({}));
+      expect(body.success).toBe(true);
+      expect(body.stats.totalRequests).toBe(3);
+      expect(body.stats.totalResponses).toBe(3);
+      expect(body.stats.byMethod).toEqual({ GET: 2, POST: 1 });
+      expect(body.stats.byStatus).toEqual({ '200': 2, '404': 1 });
+      expect(body.stats.byType).toEqual({ Document: 1, Script: 1, XHR: 1 });
+    });
+
+    it('handles empty request and response sets', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([]);
+      consoleMonitor.getNetworkResponses.mockReturnValue([]);
+
+      const body = parseJson<NetworkStatsResponse>(await handler.handleNetworkGetStats({}));
+      expect(body.success).toBe(true);
+      expect(body.stats.totalRequests).toBe(0);
+      expect(body.stats.totalResponses).toBe(0);
+      expect(body.stats.timeStats).toBeNull();
+    });
+
+    it('computes time stats from timestamps', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { url: testUrls.TEST_URLS.a, method: 'GET', timestamp: 1000 },
+        { url: testUrls.TEST_URLS.b, method: 'GET', timestamp: 2000 },
+        { url: testUrls.TEST_URLS.c, method: 'GET', timestamp: 3000 },
+      ]);
+      consoleMonitor.getNetworkResponses.mockReturnValue([]);
+
+      const body = parseJson<NetworkStatsResponse>(await handler.handleNetworkGetStats({}));
+      expect(body.stats.timeStats).toEqual({
+        earliest: 1000,
+        latest: 3000,
+        duration: 2000,
+      });
+    });
+
+    it('uses "unknown" type for requests without type field', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { url: testUrls.TEST_URLS.a, method: 'GET' },
+      ]);
+      consoleMonitor.getNetworkResponses.mockReturnValue([]);
+
+      const body = parseJson<NetworkStatsResponse>(await handler.handleNetworkGetStats({}));
+      expect(body.stats.byType).toEqual({ unknown: 1 });
+    });
+
+    it('filters out non-request and non-response payloads', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        { url: testUrls.TEST_URLS.a, method: 'GET' },
+        null,
+        42,
+        { broken: true },
+      ]);
+      consoleMonitor.getNetworkResponses.mockReturnValue([
+        { status: 200 },
+        null,
+        { noStatus: true },
+      ]);
+
+      const body = parseJson<NetworkStatsResponse>(await handler.handleNetworkGetStats({}));
+      expect(body.stats.totalRequests).toBe(1);
+      expect(body.stats.totalResponses).toBe(1);
+    });
+  });
+});

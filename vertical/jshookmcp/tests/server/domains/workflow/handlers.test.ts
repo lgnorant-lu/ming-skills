@@ -1,0 +1,452 @@
+import { parseJson } from '@tests/server/domains/shared/mock-factories';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { TEST_URLS, TEST_HTTP_URLS, withPath } from '@tests/shared/test-urls';
+
+const {
+  mockIsSsrfTarget,
+  mockIsPrivateHost,
+  mockIsLoopbackHost,
+  mockIsLoopbackHttpUrl,
+  mockIsLocalSsrfBypassEnabled,
+  mockLookup,
+} = vi.hoisted(() => ({
+  mockIsSsrfTarget: vi.fn(async () => false),
+  mockIsPrivateHost: vi.fn(() => false),
+  mockIsLoopbackHost: vi.fn(() => false),
+  mockIsLoopbackHttpUrl: vi.fn(() => false),
+  mockIsLocalSsrfBypassEnabled: vi.fn(() => false),
+  mockLookup: vi.fn(),
+}));
+
+vi.mock('@src/server/domains/network/ssrf-policy', () => ({
+  isSsrfTarget: mockIsSsrfTarget,
+  isPrivateHost: mockIsPrivateHost,
+  isLoopbackHost: mockIsLoopbackHost,
+  isLoopbackHttpUrl: mockIsLoopbackHttpUrl,
+  isLocalSsrfBypassEnabled: mockIsLocalSsrfBypassEnabled,
+}));
+
+vi.mock('node:dns/promises', () => ({
+  lookup: mockLookup,
+}));
+
+vi.mock('@src/server/extensions/ExtensionManager', () => ({
+  ensureWorkflowsLoaded: vi.fn(async () => {}),
+}));
+
+import { WorkflowHandlers } from '@server/domains/workflow/handlers';
+import {
+  defineWorkflow,
+  toolStep,
+  type WorkflowContract,
+} from '@server/workflows/WorkflowContract';
+
+interface PageScriptResponse {
+  success: boolean;
+  error?: string;
+  name?: string;
+  action?: string;
+  description?: string;
+  available?: string[];
+  script?: string;
+  value?: any;
+}
+
+interface ApiProbeResponse {
+  success: boolean;
+  error?: string;
+  probed?: number;
+  results?: Record<string, unknown>;
+}
+
+interface ListWorkflowsResponse {
+  success: boolean;
+  count: number;
+  workflows: Array<{ id: string }>;
+}
+
+interface RunWorkflowResponse {
+  success: boolean;
+  workflowId: string;
+  stepResults: Record<string, unknown>;
+}
+
+interface BundleSearchResponse {
+  success: boolean;
+  error?: string;
+}
+
+function buildReservedDocIpv4(): string {
+  return [203, 0, 113, 10].map(String).join('.');
+}
+
+describe('WorkflowHandlers', () => {
+  const fetchMock = vi.fn();
+  const deps = {
+    browserHandlers: {
+      handlePageEvaluate: vi.fn(),
+      handlePageNavigate: vi.fn(),
+      handlePageClick: vi.fn(),
+      handlePageType: vi.fn(),
+      handleNetworkGetRequests: vi.fn(),
+    },
+    advancedHandlers: {
+      handleNetworkEnable: vi.fn(),
+      handleConsoleInjectFetchInterceptor: vi.fn(),
+      handleConsoleInjectXhrInterceptor: vi.fn(),
+      handleNetworkGetStats: vi.fn(),
+      handleNetworkGetRequests: vi.fn(),
+      handleNetworkExtractAuth: vi.fn(),
+      handleNetworkExportHar: vi.fn(),
+    },
+    serverContext: {
+      extensionWorkflowsById: new Map(),
+      extensionWorkflowRuntimeById: new Map(),
+      executeToolWithTracking: vi.fn(),
+      baseTier: 'workflow',
+      config: {},
+    },
+  };
+
+  let handlers: WorkflowHandlers;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal('fetch', fetchMock);
+    mockIsSsrfTarget.mockResolvedValue(false);
+    mockIsPrivateHost.mockReturnValue(false);
+    mockIsLoopbackHost.mockReturnValue(false);
+    mockIsLoopbackHttpUrl.mockReturnValue(false);
+    mockIsLocalSsrfBypassEnabled.mockReturnValue(false);
+    mockLookup.mockResolvedValue({ address: buildReservedDocIpv4(), family: 4 });
+    (deps.advancedHandlers.handleNetworkGetStats as any).mockResolvedValue({
+      content: [
+        { type: 'text', text: JSON.stringify({ success: true, stats: { totalRequests: 3 } }) },
+      ],
+    });
+    (deps.advancedHandlers.handleNetworkGetRequests as any).mockResolvedValue({
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            success: true,
+            requests: [{ url: withPath(TEST_URLS.root, 'api') }],
+          }),
+        },
+      ],
+    });
+    (deps.advancedHandlers.handleNetworkExtractAuth as any).mockResolvedValue({
+      content: [{ type: 'text', text: JSON.stringify({ success: true, findings: [] }) }],
+    });
+    handlers = new WorkflowHandlers(
+      deps as unknown as ConstructorParameters<typeof WorkflowHandlers>[0],
+    );
+  });
+
+  it('validates page_script_register required fields', async () => {
+    const body = parseJson<PageScriptResponse>(
+      await handlers.handlePageScriptRegister({ name: '', code: '' }),
+    );
+    expect(body.success).toBe(false);
+    expect(body.error).toContain('name and code are required');
+  });
+
+  it('registers a custom page script', async () => {
+    const body = parseJson<PageScriptResponse>(
+      await handlers.handlePageScriptRegister({
+        name: 'my_script',
+        code: '(() => 123)()',
+        description: 'demo',
+      }),
+    );
+    expect(body.success).toBe(true);
+    expect(body.name).toBe('my_script');
+    expect(body.action).toBe('registered');
+  });
+
+  it('returns available scripts when script is missing', async () => {
+    const body = parseJson<PageScriptResponse>(
+      await handlers.handlePageScriptRun({ name: 'nope' }),
+    );
+    expect(body.success).toBe(false);
+    expect(body.error).toContain('not found');
+    expect(Array.isArray(body.available)).toBe(true);
+  });
+
+  it('runs registered script through browser handlePageEvaluate', async () => {
+    (deps.browserHandlers.handlePageEvaluate as any).mockResolvedValue({
+      content: [{ type: 'text', text: JSON.stringify({ success: true, value: 123 }) }],
+    });
+
+    await handlers.handlePageScriptRegister({
+      name: 'script_ok',
+      code: '(function(){ return { ok: true }; })()',
+    });
+
+    const response = await handlers.handlePageScriptRun({
+      name: 'script_ok',
+      params: { a: 1 },
+    });
+    expect(deps.browserHandlers.handlePageEvaluate).toHaveBeenCalledOnce();
+    const payload = (deps.browserHandlers.handlePageEvaluate as any).mock.calls[0]![0] as Record<
+      string,
+      unknown
+    >;
+    expect(String(payload.code)).toContain('__params__');
+    expect(response.content[0]!.type).toBe('text');
+  });
+
+  it('returns execution error when page script run throws', async () => {
+    (deps.browserHandlers.handlePageEvaluate as any).mockRejectedValue(new Error('eval failed'));
+    await handlers.handlePageScriptRegister({
+      name: 'script_fail',
+      code: '(() => 1)()',
+    });
+
+    const body = parseJson<PageScriptResponse>(
+      await handlers.handlePageScriptRun({ name: 'script_fail' }),
+    );
+    expect(body.success).toBe(false);
+    expect(body.error).toContain('eval failed');
+    expect(body.script).toBe('script_fail');
+  });
+
+  it('validates api_probe_batch baseUrl', async () => {
+    const body = parseJson<ApiProbeResponse>(await handlers.handleApiProbeBatch({}));
+    expect(body.success).toBe(false);
+    expect(body.error).toContain('baseUrl is required');
+  });
+
+  it('builds api_probe_batch page code with concurrent probing', async () => {
+    (deps.browserHandlers.handlePageEvaluate as any).mockResolvedValue({
+      content: [{ type: 'text', text: JSON.stringify({ success: true, probed: 2, results: {} }) }],
+    });
+
+    await handlers.handleApiProbeBatch({
+      baseUrl: TEST_URLS.root,
+      paths: ['/a', '/b'],
+      method: 'GET',
+    });
+
+    expect(deps.browserHandlers.handlePageEvaluate).toHaveBeenCalledOnce();
+    const payload = (deps.browserHandlers.handlePageEvaluate as any).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(String(payload.code)).toContain('Promise.all');
+    expect(String(payload.code)).toContain('concurrency');
+    // probeSleep is always injected as a utility fn; with defaults (0)
+    // it is defined but the `if (jitterMs > 0)` guard keeps it uncalled.
+    expect(String(payload.code)).toContain('probeSleep');
+  });
+
+  it('injects concurrency/delayMs/jitterMs throttle knobs into api_probe_batch page code', async () => {
+    (deps.browserHandlers.handlePageEvaluate as any).mockResolvedValue({
+      content: [{ type: 'text', text: JSON.stringify({ success: true, probed: 1, results: {} }) }],
+    });
+
+    await handlers.handleApiProbeBatch({
+      baseUrl: TEST_URLS.root,
+      paths: ['/a'],
+      concurrency: 2,
+      delayMs: 150,
+      jitterMs: 50,
+    });
+
+    const payload = (deps.browserHandlers.handlePageEvaluate as any).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    const code = String(payload.code);
+    expect(code).toContain('var concurrency');
+    expect(code).toContain('var delayMs');
+    expect(code).toContain('var jitterMs');
+    expect(code).toContain('Math.min(paths.length, 2)');
+    expect(code).toContain('delayMs = 150');
+    expect(code).toContain('jitterMs = 50');
+    expect(code).toContain('probeSleep');
+    expect(code).toContain('Math.random()');
+  });
+
+  it('lists loaded extension workflows', async () => {
+    deps.serverContext.extensionWorkflowsById.set('workflow.demo.v1', {
+      id: 'workflow.demo.v1',
+      displayName: 'Demo Workflow',
+      source: 'fixtures/demo.workflow.ts',
+      description: 'demo description',
+      tags: ['demo'],
+      timeoutMs: 5000,
+      defaultMaxConcurrency: 2,
+    });
+
+    const body = parseJson<ListWorkflowsResponse>(await handlers.handleListExtensionWorkflows());
+    expect(body.success).toBe(true);
+    expect(body.count).toBe(1);
+    // @ts-expect-error — auto-suppressed [TS2532]
+    expect(body.workflows[0].id).toBe('workflow.demo.v1');
+  });
+
+  it('keeps workflow wrapper responses un-nested', async () => {
+    deps.serverContext.extensionWorkflowsById.set('workflow.demo.v1', {
+      id: 'workflow.demo.v1',
+      displayName: 'Demo Workflow',
+      source: 'fixtures/demo.workflow.ts',
+      description: 'demo description',
+      tags: ['demo'],
+      timeoutMs: 5000,
+      defaultMaxConcurrency: 2,
+    });
+
+    const body = parseJson<ListWorkflowsResponse & { content?: unknown }>(
+      await handlers.handleListExtensionWorkflowsTool(),
+    );
+    expect(body.success).toBe(true);
+    expect(body.count).toBe(1);
+    expect(body.content).toBeUndefined();
+  });
+
+  it('executes a loaded extension workflow with node input overrides', async () => {
+    const workflow: WorkflowContract = defineWorkflow('workflow.demo.v1', 'Demo Workflow', (w) =>
+      w.buildGraph(() => toolStep('demo-node', 'demo_tool', { input: { value: 'base' } })),
+    );
+
+    deps.serverContext.extensionWorkflowsById.set('workflow.demo.v1', {
+      id: 'workflow.demo.v1',
+      displayName: 'Demo Workflow',
+      source: 'fixtures/demo.workflow.ts',
+    });
+    deps.serverContext.extensionWorkflowRuntimeById.set('workflow.demo.v1', {
+      workflow,
+      source: 'fixtures/demo.workflow.ts',
+    });
+    (deps.serverContext.executeToolWithTracking as any).mockResolvedValue({
+      content: [{ type: 'text', text: JSON.stringify({ success: true, echoed: true }) }],
+    });
+
+    const body = parseJson<RunWorkflowResponse>(
+      await handlers.handleRunExtensionWorkflow({
+        workflowId: 'workflow.demo.v1',
+        nodeInputOverrides: {
+          'demo-node': { value: 'override' },
+        },
+      }),
+    );
+
+    expect(body.success).toBe(true);
+    expect(body.workflowId).toBe('workflow.demo.v1');
+    expect(deps.serverContext.executeToolWithTracking).toHaveBeenCalledWith('demo_tool', {
+      value: 'override',
+    });
+    expect(body.stepResults['demo-node']).toBeDefined();
+  });
+
+  it('applies the stored retry policy to extension workflow execution', async () => {
+    const workflow: WorkflowContract = defineWorkflow('workflow.retry.v1', 'Retry Workflow', (w) =>
+      w.buildGraph(() => toolStep('retry-node', 'flaky_tool')),
+    );
+    deps.serverContext.extensionWorkflowsById.set('workflow.retry.v1', {
+      id: 'workflow.retry.v1',
+      displayName: 'Retry Workflow',
+      source: 'fixtures/retry.workflow.ts',
+    });
+    deps.serverContext.extensionWorkflowRuntimeById.set('workflow.retry.v1', {
+      workflow,
+      source: 'fixtures/retry.workflow.ts',
+    });
+    (deps.serverContext.executeToolWithTracking as any)
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'retry me' }) }],
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: JSON.stringify({ success: true, value: 'recovered' }) }],
+      });
+
+    await handlers.handleWorkflowRetryPolicy({ maxAttempts: 2, backoffMs: 0, multiplier: 2 });
+    const body = parseJson<RunWorkflowResponse>(
+      await handlers.handleRunExtensionWorkflow({ workflowId: 'workflow.retry.v1' }),
+    );
+
+    expect(body.success).toBe(true);
+    expect(deps.serverContext.executeToolWithTracking).toHaveBeenCalledTimes(2);
+    expect(body.stepResults['retry-node']).toBeDefined();
+  });
+
+  it('runs reverse_session through the workflow server context executor', async () => {
+    (deps.serverContext.executeToolWithTracking as any).mockResolvedValue({
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({ success: true, artifact: { kind: 'apk-intake' } }),
+        },
+      ],
+    });
+
+    const created = parseJson<any>(
+      await handlers.handleReverseSession({
+        action: 'create',
+        apkPath: 'C:/samples/app.apk',
+      }),
+    );
+    const run = parseJson<any>(
+      await handlers.handleReverseSession({
+        action: 'run',
+        sessionId: created.session.sessionId,
+        maxSteps: 1,
+      }),
+    );
+
+    expect(run.success).toBe(true);
+    expect(deps.serverContext.executeToolWithTracking).toHaveBeenCalledWith('apk_dex_intake', {
+      apkPath: 'C:/samples/app.apk',
+    });
+  });
+
+  it('keeps https bundle fetches on hostname to preserve TLS validation', async () => {
+    mockLookup.mockResolvedValue({ address: buildReservedDocIpv4(), family: 4 });
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: { get: vi.fn(() => null) },
+      text: vi.fn(async () => 'const token = "abc";'),
+    });
+
+    const body = parseJson<BundleSearchResponse>(
+      await handlers.handleJsBundleSearch({
+        url: withPath(TEST_URLS.root, 'assets/main.js'),
+        patterns: [{ name: 'auth', regex: 'token' }],
+      }),
+    );
+
+    expect(body.success).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      withPath(TEST_URLS.root, 'assets/main.js'),
+      expect.objectContaining({
+        redirect: 'manual',
+        headers: {},
+      }),
+    );
+  });
+
+  it('blocks remote http bundle fetches unless they are loopback', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      headers: { get: vi.fn(() => null) },
+      text: vi.fn(async () => 'const token = "abc";'),
+    });
+
+    const body = parseJson<BundleSearchResponse>(
+      await handlers.handleJsBundleSearch({
+        url: withPath(TEST_HTTP_URLS.root, 'assets/main.js'),
+        patterns: [{ name: 'auth', regex: 'token' }],
+      }),
+    );
+
+    expect(body.success).toBe(false);
+    expect(body.error).toContain('networkPolicy.allowInsecureHttp');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

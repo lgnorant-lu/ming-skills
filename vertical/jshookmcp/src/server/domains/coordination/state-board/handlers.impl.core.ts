@@ -1,0 +1,128 @@
+/**
+ * SharedStateBoard domain — composition facade.
+ *
+ * State store and utilities in ./handlers/shared.ts.
+ * Handler methods delegated to StoreHandlers, WatchHandlers, IOHandlers.
+ */
+
+export * from './definitions';
+
+import { StateBoardStore } from './handlers/shared';
+import { StoreHandlers } from './handlers/store-handlers';
+import { WatchHandlers } from './handlers/watch-handlers';
+import { IOHandlers } from './handlers/io-handlers';
+import { ToolError } from '@errors/ToolError';
+import { handleSafe, type ToolResponse } from '@server/domains/shared/ResponseBuilder';
+import { asErrorResponse } from '@server/domains/shared/response';
+
+export type { StateEntry, StateChangeRecord, StateWatch, StateBoardStats } from './handlers/shared';
+
+export class SharedStateBoardHandlers {
+  private store: StateBoardStore;
+  private storeHandlers: StoreHandlers;
+  private watchHandlers: WatchHandlers;
+  private ioHandlers: IOHandlers;
+
+  constructor() {
+    this.store = new StateBoardStore();
+    this.storeHandlers = new StoreHandlers(this.store);
+    this.watchHandlers = new WatchHandlers(this.store);
+    this.ioHandlers = new IOHandlers(this.store);
+  }
+
+  setPersistNotifier(notify?: () => void): void {
+    this.store.setPersistNotifier(notify);
+  }
+
+  handleSet(args: Record<string, unknown>) {
+    return this.storeHandlers.handleSet(args);
+  }
+  handleGet(args: Record<string, unknown>) {
+    return this.storeHandlers.handleGet(args);
+  }
+  handleDelete(args: Record<string, unknown>) {
+    return this.storeHandlers.handleDelete(args);
+  }
+  handleList(args: Record<string, unknown>) {
+    return this.storeHandlers.handleList(args);
+  }
+  handleWatchDispatch(args: Record<string, unknown>) {
+    const action = String(args['action'] ?? '');
+    if (action === 'stop') return this.watchHandlers.handleUnwatch(args);
+    if (action === 'poll') return this.watchHandlers.handlePoll(args);
+    return this.watchHandlers.handleWatch(args);
+  }
+  handleIODispatch(args: Record<string, unknown>) {
+    const action = String(args['action'] ?? '');
+    if (action === 'import') return this.ioHandlers.handleImport(args);
+    return this.ioHandlers.handleExport(args);
+  }
+  handleWatch(args: Record<string, unknown>) {
+    return this.watchHandlers.handleWatch(args);
+  }
+  handleUnwatch(args: Record<string, unknown>) {
+    return this.watchHandlers.handleUnwatch(args);
+  }
+  handlePoll(args: Record<string, unknown>) {
+    return this.watchHandlers.handlePoll(args);
+  }
+  handleHistory(args: Record<string, unknown>) {
+    return this.ioHandlers.handleHistory(args);
+  }
+  handleExport(args: Record<string, unknown>) {
+    return this.ioHandlers.handleExport(args);
+  }
+  handleImport(args: Record<string, unknown>) {
+    return this.ioHandlers.handleImport(args);
+  }
+  handleClear(args: Record<string, unknown>) {
+    return this.storeHandlers.handleClear(args);
+  }
+  handleDispatchTool(args: Record<string, unknown>): Promise<ToolResponse> {
+    return handleSafe(async () => await this.handleDispatch(args));
+  }
+  handleDispatch(args: Record<string, unknown>) {
+    const action = String(args['action'] ?? '');
+    switch (action) {
+      case 'set':
+        return this.storeHandlers.handleSet(args);
+      case 'get':
+        return this.storeHandlers.handleGet(args);
+      case 'delete':
+        return this.storeHandlers.handleDelete(args);
+      case 'list':
+        return this.storeHandlers.handleList(args);
+      case 'history':
+        return this.ioHandlers.handleHistory(args);
+      case 'clear':
+        return this.storeHandlers.handleClear(args);
+      default:
+        return Promise.resolve(
+          asErrorResponse(
+            new ToolError(
+              'VALIDATION',
+              `Invalid action: "${action}". Expected one of: set, get, delete, list, history, clear`,
+              { toolName: 'state_board' },
+            ),
+          ),
+        );
+    }
+  }
+  handleWatchDispatchTool(args: Record<string, unknown>): Promise<ToolResponse> {
+    return handleSafe(async () => await this.handleWatchDispatch(args));
+  }
+  handleIODispatchTool(args: Record<string, unknown>): Promise<ToolResponse> {
+    return handleSafe(async () => await this.handleIODispatch(args));
+  }
+  handleStats() {
+    return this.storeHandlers.handleStats();
+  }
+
+  cleanupExpired(): number {
+    return this.store.cleanupExpired();
+  }
+
+  getStore(): StateBoardStore {
+    return this.store;
+  }
+}

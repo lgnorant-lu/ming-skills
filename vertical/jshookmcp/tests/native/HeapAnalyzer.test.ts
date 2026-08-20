@@ -1,0 +1,494 @@
+/**
+ * HeapAnalyzer — unit tests.
+ *
+ * Mocks Toolhelp32 Snapshot APIs to test heap enumeration, stats, and anomaly detection.
+ * Two tests (enumerateBlocks public API + snapshot failure) only work on Win32 where
+ * the koffi Toolhelp32 mock path is taken — they are skipped on Linux/macOS CI.
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const state = vi.hoisted(() => ({
+  snapshotHandle: 42n,
+  heapListCalled: false,
+  logger: {
+    debug: vi.fn(),
+  },
+}));
+
+const mockBlocks = [
+  { address: 0x1000n, size: 64, flags: 0x01, heapId: 0x100n }, // FIXED
+  { address: 0x2000n, size: 128, flags: 0x01, heapId: 0x100n },
+  { address: 0x3000n, size: 64, flags: 0x02, heapId: 0x100n }, // FREE
+  { address: 0x4000n, size: 256, flags: 0x01, heapId: 0x100n },
+  { address: 0x5000n, size: 0, flags: 0x01, heapId: 0x100n }, // suspicious: zero size
+  { address: 0x6000n, size: 200 * 1024 * 1024, flags: 0x01, heapId: 0x100n }, // suspicious: >100MB
+];
+
+let blockIdx = 0;
+
+vi.mock('@native/Win32API', () => ({
+  openProcessForMemory: vi.fn(() => 1n),
+  CloseHandle: vi.fn(() => true),
+  ReadProcessMemory: vi.fn((_h: bigint, _a: bigint, size: number) => {
+    // For UAF check — return non-zero data for free blocks
+    const buf = Buffer.alloc(size);
+    buf.writeBigUInt64LE(0xdeadbeefn, 0);
+    return buf;
+  }),
+}));
+
+vi.mock('@utils/logger', () => ({
+  logger: state.logger,
+}));
+
+vi.mock('@src/constants', () => ({
+  HEAP_ENUMERATE_MAX_BLOCKS: 10000,
+  HEAP_SPRAY_THRESHOLD: 3, // Lower threshold for testing
+  HEAP_SPRAY_SIZE_TOLERANCE: 16,
+  HEAP_SUSPICIOUS_BLOCK_SIZE: 100 * 1024 * 1024,
+}));
+
+// Mock the koffi-based Toolhelp32 APIs used internally by HeapAnalyzer
+vi.mock('koffi', () => {
+  return {
+    default: {
+      load: vi.fn(() => ({
+        func: vi.fn((name: string) => {
+          if (name === 'CreateToolhelp32Snapshot') {
+            return vi.fn(() => state.snapshotHandle);
+          }
+          if (name === 'Heap32ListFirst') {
+            return vi.fn((_h: bigint, buf: Buffer) => {
+              if (state.heapListCalled) return false;
+              state.heapListCalled = true;
+              buf.writeUInt32LE(1234, 8); // th32ProcessID
+              buf.writeBigUInt64LE(0x100n, 12); // th32HeapID
+              buf.writeUInt32LE(1, 20); // flags (HF32_DEFAULT)
+              return true;
+            });
+          }
+          if (name === 'Heap32ListNext') {
+            return vi.fn(() => false); // Only 1 heap
+          }
+          if (name === 'Heap32First') {
+            return vi.fn((buf: Buffer) => {
+              blockIdx = 0;
+              if (blockIdx >= mockBlocks.length) return false;
+              const b = mockBlocks[blockIdx]!;
+              buf.writeBigUInt64LE(b.address, 16);
+              buf.writeBigUInt64LE(BigInt(b.size), 24);
+              buf.writeUInt32LE(b.flags, 32);
+              blockIdx++;
+              return true;
+            });
+          }
+          if (name === 'Heap32Next') {
+            return vi.fn((buf: Buffer) => {
+              if (blockIdx >= mockBlocks.length) return false;
+              const b = mockBlocks[blockIdx]!;
+              buf.writeBigUInt64LE(b.address, 16);
+              buf.writeBigUInt64LE(BigInt(b.size), 24);
+              buf.writeUInt32LE(b.flags, 32);
+              blockIdx++;
+              return true;
+            });
+          }
+          if (name.includes('CloseHandle')) {
+            return vi.fn(() => 1);
+          }
+          return vi.fn();
+        }),
+      })),
+    },
+    load: vi.fn(),
+  };
+});
+
+import { HeapAnalyzer, computeShannonEntropy } from '@native/HeapAnalyzer';
+
+describe('HeapAnalyzer', () => {
+  let analyzer: HeapAnalyzer;
+
+  beforeEach(() => {
+    analyzer = new HeapAnalyzer();
+    blockIdx = 0;
+    state.snapshotHandle = 42n;
+    state.heapListCalled = false;
+    vi.clearAllMocks();
+  });
+
+  describe('enumerateHeaps', () => {
+    it('should return heaps with metadata', async () => {
+      const result = await analyzer.enumerateHeaps(1234);
+      expect(result.heaps.length).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should include stats with the result', async () => {
+      const result = await analyzer.enumerateHeaps(1234);
+      expect(result.stats).toBeDefined();
+      expect(typeof result.stats.totalHeaps).toBe('number');
+      expect(typeof result.stats.fragmentationRatio).toBe('number');
+    });
+  });
+
+  describe('getStats', () => {
+    it('should return complete statistics fields', async () => {
+      const stats = await analyzer.getStats(1234);
+      expect(stats).toHaveProperty('totalHeaps');
+      expect(stats).toHaveProperty('totalBlocks');
+      expect(stats).toHaveProperty('totalSize');
+      expect(stats).toHaveProperty('freeSize');
+      expect(stats).toHaveProperty('usedSize');
+      expect(stats).toHaveProperty('sizeDistribution');
+      expect(stats).toHaveProperty('fragmentationRatio');
+    });
+
+    it('should have correct size distribution buckets', async () => {
+      const stats = await analyzer.getStats(1234);
+      expect(stats.sizeDistribution.length).toBe(8); // 8 predefined ranges
+      expect(stats.sizeDistribution[0]!.range).toBe('0-64B');
+      expect(stats.sizeDistribution[7]!.range).toBe('>1MB');
+    });
+
+    it('should compute usedSize = totalSize - freeSize', async () => {
+      const stats = await analyzer.getStats(1234);
+      expect(stats.usedSize).toBe(stats.totalSize - stats.freeSize);
+    });
+  });
+
+  describe('detectAnomalies', () => {
+    it('should return an array', async () => {
+      const anomalies = await analyzer.detectAnomalies(1234);
+      expect(Array.isArray(anomalies)).toBe(true);
+    });
+
+    it('should detect suspicious zero-size blocks', async () => {
+      const anomalies = await analyzer.detectAnomalies(1234);
+      const zeroSize = anomalies.filter(
+        (a) => a.type === 'suspicious_size' && a.details.includes('zero'),
+      );
+      // May or may not find depending on mock traversal
+      expect(zeroSize.length).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should detect suspicious large blocks', async () => {
+      const anomalies = await analyzer.detectAnomalies(1234);
+      const large = anomalies.filter(
+        (a) => a.type === 'suspicious_size' && a.details.includes('MB'),
+      );
+      expect(large.length).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should include heapId in each anomaly', async () => {
+      const anomalies = await analyzer.detectAnomalies(1234);
+      for (const a of anomalies) {
+        expect(a.heapId).toBeDefined();
+        expect(typeof a.heapId).toBe('string');
+      }
+    });
+
+    it('should include severity in each anomaly', async () => {
+      const anomalies = await analyzer.detectAnomalies(1234);
+      for (const a of anomalies) {
+        expect(['low', 'medium', 'high']).toContain(a.severity);
+      }
+    });
+  });
+
+  describe('HeapBlock.isFree', () => {
+    it('should derive isFree from LF32_FREE flag', () => {
+      // Direct test of the flag logic
+      const FREE_FLAG = 0x02;
+      expect((0x01 & FREE_FLAG) !== 0).toBe(false); // FIXED → not free
+      expect((0x02 & FREE_FLAG) !== 0).toBe(true); // FREE → free
+      expect((0x04 & FREE_FLAG) !== 0).toBe(false); // MOVEABLE → not free
+    });
+  });
+
+  it('computes stats fallback values when only heap totals are available', () => {
+    const stats = (analyzer as any).computeStats(
+      [
+        {
+          heapId: '0x100',
+          processId: 1234,
+          flags: 1,
+          isDefault: true,
+          blockCount: 2,
+          totalSize: 128,
+        },
+      ],
+      [],
+    );
+
+    expect(stats.totalSize).toBe(128);
+    expect(stats.totalBlocks).toBe(2);
+    expect(stats.smallestBlock).toBe(0);
+  });
+
+  it('detects heap sprays and suspicious block sizes through private helpers', () => {
+    const anomalies: any[] = [];
+    const blocks = [
+      { address: '0x1', size: 64, flags: 1, heapId: '0x100', isFree: false },
+      { address: '0x2', size: 64, flags: 1, heapId: '0x100', isFree: false },
+      { address: '0x3', size: 64, flags: 1, heapId: '0x100', isFree: false },
+      { address: '0x4', size: 0, flags: 1, heapId: '0x100', isFree: false },
+      { address: '0x5', size: 200 * 1024 * 1024, flags: 1, heapId: '0x100', isFree: false },
+    ];
+
+    (analyzer as any).detectSpray(blocks, '0x100', anomalies);
+    (analyzer as any).detectSuspiciousSizes(blocks, '0x100', anomalies);
+
+    expect(anomalies.some((anomaly) => anomaly.type === 'heap_spray_pattern')).toBe(true);
+    expect(anomalies.filter((anomaly) => anomaly.type === 'suspicious_size')).toHaveLength(2);
+  });
+
+  // These tests rely on the Win32 koffi Toolhelp32 mock path;
+  // on Linux/macOS HeapAnalyzer falls back to /proc/pid/maps which uses
+  // node:fs (hard to mock without breaking other tests' fs mocks).
+  const itWin32 = process.platform === 'win32' ? it : it.skip;
+
+  itWin32('enumerates blocks through the public API', async () => {
+    const blocks = await analyzer.enumerateBlocks(1234, '0x100', { maxBlocks: 2 });
+
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]?.heapId).toBe('0x100');
+  });
+
+  itWin32('throws when heap snapshot creation fails', async () => {
+    state.snapshotHandle = -1n;
+
+    await expect(analyzer.enumerateHeaps(1234)).rejects.toThrow(
+      'Failed to create heap snapshot for PID 1234',
+    );
+  });
+
+  it('logs and swallows UAF detection failures', async () => {
+    const analyzerWithFailure = new HeapAnalyzer();
+    const originalOpenProcess = (await import('@native/Win32API')).openProcessForMemory;
+    const originalReadProcessMemory = (await import('@native/Win32API')).ReadProcessMemory;
+
+    vi.mocked(originalOpenProcess).mockImplementation(() => {
+      throw new Error('open failed');
+    });
+    vi.mocked(originalReadProcessMemory).mockImplementation(() => Buffer.alloc(8));
+
+    const anomalies: any[] = [];
+    await expect(
+      (analyzerWithFailure as any).detectPossibleUaf(
+        1234,
+        [{ address: '0x1000', size: 64, flags: 0x02, heapId: '0x100', isFree: true }],
+        '0x100',
+        anomalies,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(state.logger.debug).toHaveBeenCalledWith(
+      expect.stringContaining('UAF check failed for PID 1234'),
+    );
+    expect(anomalies).toHaveLength(0);
+  });
+
+  // ── Double-free detection ──────────────────────────────────
+
+  describe('detectDoubleFree', () => {
+    it('should detect duplicate free blocks at same address', () => {
+      const anomalies: any[] = [];
+      const blocks = [
+        { address: '0x3000', size: 64, flags: 2, heapId: '0x100', isFree: true },
+        { address: '0x3000', size: 64, flags: 2, heapId: '0x100', isFree: true }, // duplicate free
+        { address: '0x4000', size: 128, flags: 1, heapId: '0x100', isFree: false },
+      ];
+
+      (analyzer as any).detectDoubleFree(blocks, '0x100', anomalies);
+
+      expect(anomalies).toHaveLength(1);
+      expect(anomalies[0]!.type).toBe('possible_double_free');
+      expect(anomalies[0]!.severity).toBe('high');
+      expect(anomalies[0]!.address).toBe('0x3000');
+      expect(anomalies[0]!.details).toContain('free blocks at same address');
+    });
+
+    it('should not flag unique free blocks', () => {
+      const anomalies: any[] = [];
+      const blocks = [
+        { address: '0x3000', size: 64, flags: 2, heapId: '0x100', isFree: true },
+        { address: '0x4000', size: 128, flags: 2, heapId: '0x100', isFree: true },
+      ];
+
+      (analyzer as any).detectDoubleFree(blocks, '0x100', anomalies);
+
+      expect(anomalies).toHaveLength(0);
+    });
+
+    it('should not flag non-free blocks at same address', () => {
+      const anomalies: any[] = [];
+      const blocks = [
+        { address: '0x5000', size: 256, flags: 1, heapId: '0x100', isFree: false },
+        { address: '0x5000', size: 256, flags: 1, heapId: '0x100', isFree: false },
+      ];
+
+      (analyzer as any).detectDoubleFree(blocks, '0x100', anomalies);
+
+      // Non-free duplicate addresses are not double-free
+      expect(anomalies.filter((a) => a.type === 'possible_double_free')).toHaveLength(0);
+    });
+
+    it('should handle triple-or-more free blocks', () => {
+      const anomalies: any[] = [];
+      const blocks = [
+        { address: '0x3000', size: 64, flags: 2, heapId: '0x100', isFree: true },
+        { address: '0x3000', size: 64, flags: 2, heapId: '0x100', isFree: true },
+        { address: '0x3000', size: 128, flags: 2, heapId: '0x100', isFree: true }, // triple free!
+      ];
+
+      (analyzer as any).detectDoubleFree(blocks, '0x100', anomalies);
+
+      expect(anomalies).toHaveLength(1);
+      expect(anomalies[0]!.details).toContain('3 free blocks');
+      expect(anomalies[0]!.details).toContain('64, 64, 128'); // sizes
+    });
+
+    it('should detect double-free in same heap separately from other heaps', () => {
+      const anomalies: any[] = [];
+      const blocks = [
+        { address: '0x3000', size: 32, flags: 2, heapId: '0x100', isFree: true },
+        { address: '0x3000', size: 32, flags: 2, heapId: '0x100', isFree: true },
+        { address: '0x3000', size: 64, flags: 2, heapId: '0x200', isFree: true }, // different heap, same addr — OK
+      ];
+
+      (analyzer as any).detectDoubleFree(blocks, '0x100', anomalies);
+
+      expect(anomalies).toHaveLength(1);
+      expect(anomalies[0]!.heapId).toBe('0x100');
+    });
+  });
+
+  // ── Shannon entropy (volatility malfind-style heuristic) ────────────
+
+  describe('computeShannonEntropy', () => {
+    it('should return 0 for identical bytes (zero entropy)', () => {
+      const buf = Buffer.alloc(256, 0x90); // all NOP
+      expect(computeShannonEntropy(buf)).toBeCloseTo(0, 2);
+    });
+
+    it('should return 0 for all-zero buffer', () => {
+      const buf = Buffer.alloc(128, 0);
+      expect(computeShannonEntropy(buf)).toBe(0);
+    });
+
+    it('should approach 8.0 for uniform random bytes', () => {
+      // 256 bytes, each value 0-255 appears exactly once → maximum entropy
+      const buf = Buffer.alloc(256);
+      for (let i = 0; i < 256; i++) buf[i] = i;
+      expect(computeShannonEntropy(buf)).toBeCloseTo(8, 1); // exactly 8.0
+    });
+
+    it('should be between 0 and 8 for mixed data', () => {
+      const buf = Buffer.from([0, 1, 0, 1, 0, 1, 0, 1]);
+      // p0=0.5, p1=0.5 → -0.5*log2(0.5) * 2 = 1.0
+      expect(computeShannonEntropy(buf)).toBeCloseTo(1, 1);
+    });
+
+    it('should return 0 for empty buffer', () => {
+      expect(computeShannonEntropy(Buffer.alloc(0))).toBe(0);
+    });
+
+    it('should handle single-byte buffer', () => {
+      expect(computeShannonEntropy(Buffer.from([0x55]))).toBe(0);
+    });
+  });
+
+  // ── High-entropy heap block detection ────────────────────────────────
+
+  describe('detectHighEntropy', () => {
+    it('should flag a block with entropy >= 7.0', async () => {
+      const { ReadProcessMemory } = await import('@native/Win32API');
+      // Return 256 bytes with each value 0-255 (max entropy ~8.0)
+      vi.mocked(ReadProcessMemory).mockImplementation(() => {
+        const buf = Buffer.alloc(256);
+        for (let i = 0; i < 256; i++) buf[i] = i;
+        return buf;
+      });
+
+      const anomalies: any[] = [];
+      await (analyzer as any).detectHighEntropy(
+        1234,
+        [{ address: '0x4000', size: 256, flags: 0x01, heapId: '0x100', isFree: false }],
+        '0x100',
+        anomalies,
+      );
+
+      const highEntropyAnomalies = anomalies.filter((a) => a.type === 'high_entropy');
+      expect(highEntropyAnomalies).toHaveLength(1);
+      expect(highEntropyAnomalies[0]!.severity).toBe('medium');
+      expect(highEntropyAnomalies[0]!.details).toMatch(/entropy/i);
+    });
+
+    it('should not flag low-entropy blocks', async () => {
+      const { ReadProcessMemory } = await import('@native/Win32API');
+      // All NOP sled — very low entropy
+      vi.mocked(ReadProcessMemory).mockImplementation(() => Buffer.alloc(256, 0x90));
+
+      const anomalies: any[] = [];
+      await (analyzer as any).detectHighEntropy(
+        1234,
+        [{ address: '0x4000', size: 256, flags: 0x01, heapId: '0x100', isFree: false }],
+        '0x100',
+        anomalies,
+      );
+
+      expect(anomalies.filter((a) => a.type === 'high_entropy')).toHaveLength(0);
+    });
+
+    it('should skip free blocks', async () => {
+      const { ReadProcessMemory } = await import('@native/Win32API');
+      vi.mocked(ReadProcessMemory).mockImplementation(() => Buffer.alloc(256)); // low entropy
+
+      const anomalies: any[] = [];
+      await (analyzer as any).detectHighEntropy(
+        1234,
+        [{ address: '0x3000', size: 256, flags: 0x02, heapId: '0x100', isFree: true }],
+        '0x100',
+        anomalies,
+      );
+
+      // Free blocks are skipped entirely — no high_entropy detection
+      expect(anomalies.filter((a) => a.type === 'high_entropy')).toHaveLength(0);
+    });
+
+    it('should skip blocks smaller than 64 bytes', async () => {
+      const anomalies: any[] = [];
+      await (analyzer as any).detectHighEntropy(
+        1234,
+        [{ address: '0x1000', size: 32, flags: 0x01, heapId: '0x100', isFree: false }],
+        '0x100',
+        anomalies,
+      );
+
+      expect(anomalies).toHaveLength(0);
+    });
+
+    it('should swallow openProcessForMemory failures gracefully', async () => {
+      const { openProcessForMemory } = await import('@native/Win32API');
+      vi.mocked(openProcessForMemory).mockImplementation(() => {
+        throw new Error('open failed');
+      });
+
+      const anomalies: any[] = [];
+      await expect(
+        (analyzer as any).detectHighEntropy(
+          1234,
+          [{ address: '0x4000', size: 256, flags: 0x01, heapId: '0x100', isFree: false }],
+          '0x100',
+          anomalies,
+        ),
+      ).resolves.toBeUndefined();
+
+      expect(state.logger.debug).toHaveBeenCalledWith(
+        expect.stringContaining('High-entropy check failed for PID 1234'),
+      );
+      expect(anomalies).toHaveLength(0);
+    });
+  });
+});

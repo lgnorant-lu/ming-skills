@@ -1,0 +1,264 @@
+#!/usr/bin/env node
+
+import { MCPServer } from '@server/MCPServer';
+import { getConfig, validateConfig } from '@utils/config';
+import { logger } from '@utils/logger';
+import { initRegistry } from '@server/registry/index';
+import { resolveCliFastPath } from '@utils/cliFastPath';
+import { registerServerInstance, unregisterServerInstance } from '@utils/InstanceRegistry';
+import {
+  cleanupArtifacts,
+  getArtifactRetentionConfig,
+  startArtifactRetentionScheduler,
+} from '@utils/artifactRetention';
+import {
+  SHUTDOWN_TIMEOUT_MS,
+  RUNTIME_ERROR_WINDOW_MS,
+  RUNTIME_ERROR_THRESHOLD,
+} from '@src/constants';
+
+interface RuntimeRecoveryState {
+  windowStart: number;
+  errorCount: number;
+  degradedMode: boolean;
+}
+
+/** Error codes that indicate unrecoverable system-level failures — process must exit. */
+const FATAL_ERROR_CODES: ReadonlySet<string> = new Set([
+  'ERR_WORKER_OUT_OF_MEMORY',
+  'ERR_MEMORY_ALLOCATION_FAILED',
+]);
+
+/** errno codes from OS-level failures that cannot be recovered from. */
+const FATAL_ERRNO_CODES: ReadonlySet<string> = new Set([
+  'ENOMEM', // out of memory
+  'ENOSPC', // no space left on device
+  'EMFILE', // too many open files (system)
+  'ENFILE', // too many open files (process)
+]);
+
+function isFatalError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+
+  // Safely extract code property (Node.js SystemError / ErrnoException)
+  const code =
+    'code' in error && typeof (error as Record<string, unknown>).code === 'string'
+      ? ((error as Record<string, unknown>).code as string)
+      : undefined;
+
+  // Node.js internal fatal error codes
+  if (code && FATAL_ERROR_CODES.has(code)) return true;
+
+  // OS-level errno codes
+  if (code && FATAL_ERRNO_CODES.has(code)) return true;
+
+  // RangeError from V8 heap exhaustion
+  if (error instanceof RangeError && error.message.includes('allocation')) return true;
+
+  return false;
+}
+
+function formatUnknownError(input: unknown): string {
+  if (input instanceof Error) {
+    return `${input.name}: ${input.message}`;
+  }
+
+  try {
+    return typeof input === 'string' ? input : JSON.stringify(input);
+  } catch {
+    return String(input);
+  }
+}
+
+export async function main(): Promise<void> {
+  try {
+    const cliFastPath = resolveCliFastPath(process.argv.slice(2), import.meta.url);
+    if (cliFastPath.handled) {
+      if (cliFastPath.output) {
+        process.stdout.write(cliFastPath.output);
+      }
+      process.exit(cliFastPath.exitCode);
+      return;
+    }
+
+    const config = getConfig();
+    logger.debug('Configuration loaded:', config);
+
+    const validation = validateConfig(config);
+    if (!validation.valid) {
+      logger.error('Configuration validation failed:');
+      validation.errors.forEach((error) => logger.error(`  - ${error}`));
+      process.exit(1);
+      return; // prevent further execution conceptually
+    }
+
+    const artifactRetention = getArtifactRetentionConfig();
+    if (artifactRetention.cleanupOnStart && artifactRetention.enabled) {
+      const cleanup = await cleanupArtifacts();
+      if (cleanup.removedFiles > 0) {
+        logger.info(
+          `[artifacts] Startup cleanup removed ${cleanup.removedFiles} files (${cleanup.removedBytes} bytes)`,
+        );
+      }
+    }
+
+    logger.info('Creating MCP server instance...');
+    const transportMode = (process.env.MCP_TRANSPORT ?? 'stdio').toLowerCase();
+    const explicitProfile = (process.env.MCP_TOOL_PROFILE ?? '').trim().toLowerCase() as
+      | 'search'
+      | 'workflow'
+      | 'full'
+      | undefined;
+    const profile =
+      explicitProfile === 'full' || explicitProfile === 'workflow' || explicitProfile === 'search'
+        ? explicitProfile
+        : 'search';
+    logger.info(`[startup] transport=${transportMode} profile=${profile}`);
+    await registerServerInstance({ transport: transportMode, profile });
+    await initRegistry(profile);
+    const server = new MCPServer(config);
+    const stopArtifactRetentionScheduler = startArtifactRetentionScheduler();
+    const recoveryWindowMs = Math.max(1000, RUNTIME_ERROR_WINDOW_MS);
+    const maxRecoverableErrors = Math.max(1, RUNTIME_ERROR_THRESHOLD);
+    const runtimeRecovery: RuntimeRecoveryState = {
+      windowStart: Date.now(),
+      errorCount: 0,
+      degradedMode: false,
+    };
+
+    const handleRuntimeFailure = (
+      kind: 'uncaughtException' | 'unhandledRejection',
+      reason: unknown,
+    ) => {
+      // Fatal errors must exit immediately — no recovery possible
+      if (isFatalError(reason)) {
+        logger.error(
+          `[${kind}] FATAL unrecoverable error — forcing exit: ${formatUnknownError(reason)}`,
+        );
+        process.exit(1);
+      }
+
+      const now = Date.now();
+      if (now - runtimeRecovery.windowStart > recoveryWindowMs) {
+        runtimeRecovery.windowStart = now;
+        runtimeRecovery.errorCount = 0;
+      }
+
+      runtimeRecovery.errorCount += 1;
+
+      logger.error(
+        `[${kind}] Runtime failure captured (${runtimeRecovery.errorCount}/${maxRecoverableErrors}): ` +
+          `${formatUnknownError(reason)}`,
+      );
+
+      if (!runtimeRecovery.degradedMode && runtimeRecovery.errorCount >= maxRecoverableErrors) {
+        runtimeRecovery.degradedMode = true;
+        server.enterDegradedMode(
+          `Runtime failures reached ${runtimeRecovery.errorCount} within ${recoveryWindowMs}ms`,
+        );
+        logger.warn('Degraded mode enabled. Server keeps running without forced process exit.');
+      }
+    };
+
+    process.on('SIGINT', async () => {
+      logger.info('Received SIGINT, shutting down...');
+      const forceExitTimer = setTimeout(() => {
+        logger.error('Graceful shutdown timed out, forcing exit');
+        process.exit(1);
+      }, SHUTDOWN_TIMEOUT_MS);
+      // Unref so this timer alone doesn't keep the event loop alive
+      forceExitTimer.unref();
+      try {
+        stopArtifactRetentionScheduler?.();
+        await server.close();
+      } catch (error) {
+        logger.error('Error during SIGINT shutdown:', error);
+      } finally {
+        await unregisterServerInstance();
+      }
+      clearTimeout(forceExitTimer);
+      process.exit(0);
+    });
+
+    process.on('SIGTERM', async () => {
+      logger.info('Received SIGTERM, shutting down...');
+      const forceExitTimer = setTimeout(() => {
+        logger.error('Graceful shutdown timed out, forcing exit');
+        process.exit(1);
+      }, SHUTDOWN_TIMEOUT_MS);
+      forceExitTimer.unref();
+      try {
+        stopArtifactRetentionScheduler?.();
+        await server.close();
+      } catch (error) {
+        logger.error('Error during SIGTERM shutdown:', error);
+      } finally {
+        await unregisterServerInstance();
+      }
+      clearTimeout(forceExitTimer);
+      process.exit(0);
+    });
+
+    process.on('uncaughtException', (error) => {
+      handleRuntimeFailure('uncaughtException', error);
+    });
+
+    process.on('unhandledRejection', (reason) => {
+      handleRuntimeFailure('unhandledRejection', reason);
+    });
+
+    logger.info('Starting MCP server...');
+    await server.start();
+    logger.info('MCP server started successfully');
+
+    if (transportMode === 'stdio') {
+      // Safety net: detect parent disconnect for stdio mode only. HTTP mode may
+      // intentionally run detached from a parent stdin stream.
+      process.stdin.resume();
+      process.stdin.on('end', async () => {
+        logger.info('stdin EOF — parent disconnected, shutting down...');
+        const forceExitTimer = setTimeout(() => {
+          logger.error('Graceful shutdown timed out after stdin EOF, forcing exit');
+          process.exit(1);
+        }, SHUTDOWN_TIMEOUT_MS);
+        forceExitTimer.unref();
+        try {
+          stopArtifactRetentionScheduler?.();
+          await server.close();
+        } catch (error) {
+          logger.error('Error during stdin EOF shutdown:', error);
+        } finally {
+          await unregisterServerInstance();
+        }
+        clearTimeout(forceExitTimer);
+        process.exit(0);
+      });
+    }
+
+    logger.info('MCP server is running. Press Ctrl+C to stop.');
+  } catch (error) {
+    await unregisterServerInstance();
+    logger.error('Failed to start MCP server:');
+
+    if (error instanceof Error) {
+      logger.error('Error name:', error.name);
+      logger.error('Error message:', error.message);
+      logger.error('Error stack:', error.stack);
+    }
+    logger.error('Full error object:', JSON.stringify(error, null, 2));
+
+    const code = (error as Record<string, unknown>)?.['code'];
+    const message = error instanceof Error ? error.message : String(error);
+
+    if (code === 'EADDRINUSE') {
+      logger.error('Port is already in use. Please check if another instance is running.');
+    }
+    if (message?.includes('credentials')) {
+      logger.error('Authentication failed. Please check your API keys or credentials.');
+    }
+
+    process.exit(1);
+  }
+}
+
+void main();

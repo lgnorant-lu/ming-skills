@@ -1,0 +1,532 @@
+/**
+ * Unified Browser Manager - Provides a unified interface for both Chrome and Camoufox browsers.
+ *
+ * Supports:
+ * - Chrome (via rebrowser-puppeteer-core) with headless: true | false | 'shell'
+ * - Camoufox (Firefox via camoufox-js) with headless: true | false | 'virtual'
+ * - Browser discovery to find existing browsers with debug ports
+ */
+
+import type {
+  Browser as PuppeteerBrowser,
+  Page as PuppeteerPage,
+  LaunchOptions,
+} from 'rebrowser-puppeteer-core';
+import { BrowserModeManager, type BrowserModeConfig } from '@modules/browser/BrowserModeManager';
+import {
+  CamoufoxBrowserManager,
+  type CamoufoxBrowserConfig,
+  type CamoufoxBrowserLike,
+  type CamoufoxPageLike,
+} from '@modules/browser/CamoufoxBrowserManager';
+import { BrowserDiscovery, type BrowserInfo } from '@modules/browser/BrowserDiscovery';
+import { logger } from '@utils/logger';
+import { DEBUG_PORT_CANDIDATES } from '@src/constants/server';
+
+/**
+ * Supported browser drivers
+ */
+export type BrowserDriver = 'chrome' | 'camoufox';
+
+/**
+ * Unified headless mode type
+ * - Chrome: true | false | 'shell' (new headless mode)
+ * - Camoufox: true | false | 'virtual' (virtual display for headless)
+ */
+export type HeadlessMode = boolean | 'shell' | 'virtual';
+
+/**
+ * Proxy configuration
+ */
+export interface ProxyConfig {
+  server: string;
+  username?: string;
+  password?: string;
+}
+
+/**
+ * Unified browser configuration
+ */
+export interface UnifiedBrowserConfig {
+  /** Browser driver to use */
+  driver?: BrowserDriver;
+  /** Headless mode: true, false, 'shell' (Chrome), or 'virtual' (Camoufox) */
+  headless?: HeadlessMode;
+  /** Custom browser executable path */
+  executablePath?: string;
+  /** Debug port for Chrome remote debugging */
+  debugPort?: number;
+  /** Proxy configuration */
+  proxy?: ProxyConfig;
+  /** Target OS fingerprint (Camoufox-specific) */
+  os?: 'windows' | 'macos' | 'linux';
+  /** Auto-resolve GeoIP for locale/timezone (Camoufox-specific) */
+  geoip?: boolean;
+  /** Humanize cursor movements (Camoufox-specific) */
+  humanize?: boolean | number;
+  /** Block image loading (Camoufox-specific) */
+  blockImages?: boolean;
+  /** Block WebRTC to prevent IP leaks (Camoufox-specific) */
+  blockWebrtc?: boolean;
+  /** Auto-detect and handle CAPTCHA (Chrome-specific) */
+  autoDetectCaptcha?: boolean;
+  /** Auto-switch from headless to headed for CAPTCHA (Chrome-specific) */
+  autoSwitchHeadless?: boolean;
+  /** CAPTCHA handling timeout in ms (Chrome-specific) */
+  captchaTimeout?: number;
+  /** Connect to existing browser via WebSocket endpoint */
+  wsEndpoint?: string;
+  /** Additional launch arguments for Chrome */
+  args?: string[];
+}
+
+/**
+ * Interface for browser managers
+ */
+export interface IBrowserManager {
+  launch(): Promise<PuppeteerBrowser | CamoufoxBrowserLike>;
+  newPage(): Promise<PuppeteerPage | CamoufoxPageLike>;
+  goto(
+    url: string,
+    page?: PuppeteerPage | CamoufoxPageLike,
+  ): Promise<PuppeteerPage | CamoufoxPageLike>;
+  close(): Promise<void>;
+  getBrowser(): PuppeteerBrowser | CamoufoxBrowserLike | null;
+}
+
+/**
+ * Browser status information
+ */
+export interface BrowserStatus {
+  driver: BrowserDriver;
+  running: boolean;
+  hasActivePage: boolean;
+  headless?: boolean | 'shell' | 'virtual';
+  debugPort?: number;
+}
+
+/**
+ * Unified Browser Manager
+ *
+ * Provides a unified interface for launching and controlling both Chrome and Camoufox browsers.
+ * Supports browser discovery, headless mode configuration, and CAPTCHA handling.
+ */
+export class UnifiedBrowserManager implements IBrowserManager {
+  private driver: BrowserDriver;
+  private config: UnifiedBrowserConfig;
+  private chromeManager: BrowserModeManager | null = null;
+  private camoufoxManager: CamoufoxBrowserManager | null = null;
+  private browserDiscovery: BrowserDiscovery;
+  private activePage: PuppeteerPage | CamoufoxPageLike | null = null;
+  private chromeLaunchPromise?: Promise<PuppeteerBrowser>;
+  private camoufoxLaunchPromise?: Promise<CamoufoxBrowserLike>;
+  private isClosing = false;
+  private chromeIsAttached = false;
+
+  constructor(config: UnifiedBrowserConfig = {}) {
+    this.config = config;
+    this.driver = config.driver ?? 'chrome';
+    this.browserDiscovery = new BrowserDiscovery();
+  }
+
+  async launch(): Promise<PuppeteerBrowser | CamoufoxBrowserLike> {
+    if (this.driver === 'camoufox') {
+      return this.launchCamoufox();
+    }
+    return this.launchChrome();
+  }
+
+  /**
+   * Run `launcher` under a single-flight promise lock: concurrent callers
+   * share the in-flight launch, and the lock clears when it settles. Both
+   * driver launch paths use this to prevent launch race conditions.
+   */
+  private async withLaunchLock<T>(
+    getLock: () => Promise<T> | undefined,
+    setLock: (promise: Promise<T> | undefined) => void,
+    launcher: () => Promise<T>,
+  ): Promise<T> {
+    const inFlight = getLock();
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const promise = launcher();
+    setLock(promise);
+    try {
+      return await promise;
+    } finally {
+      setLock(undefined);
+    }
+  }
+
+  private async launchChrome(): Promise<PuppeteerBrowser> {
+    // Prevent launch during shutdown
+    if (this.isClosing) {
+      throw new Error('Cannot launch browser while closing');
+    }
+
+    // Early return if browser already connected (cache reference to avoid repeated calls)
+    const existingBrowser = this.chromeManager?.getBrowser();
+    if (existingBrowser?.isConnected()) {
+      return existingBrowser;
+    }
+
+    return this.withLaunchLock(
+      () => this.chromeLaunchPromise,
+      (promise) => {
+        this.chromeLaunchPromise = promise;
+      },
+      () => this.doLaunchChrome(),
+    );
+  }
+
+  private async doLaunchChrome(): Promise<PuppeteerBrowser> {
+    logger.info(`Launching Chrome [headless=${this.config.headless ?? true}]...`);
+
+    const modeConfig: BrowserModeConfig = {
+      autoDetectCaptcha: this.config.autoDetectCaptcha,
+      autoSwitchHeadless: this.config.autoSwitchHeadless,
+      captchaTimeout: this.config.captchaTimeout,
+      defaultHeadless: this.getHeadlessBoolean(),
+    };
+
+    const launchOptions: LaunchOptions = {
+      headless: this.normalizeChromeHeadless(),
+      executablePath: this.config.executablePath,
+      args: this.config.args,
+    };
+
+    // Add proxy configuration
+    if (this.config.proxy) {
+      const proxyArgs = [`--proxy-server=${this.config.proxy.server}`];
+      launchOptions.args = [...(launchOptions.args || []), ...proxyArgs];
+    }
+
+    // Add debug port
+    if (this.config.debugPort) {
+      launchOptions.args = [
+        ...(launchOptions.args || []),
+        `--remote-debugging-port=${this.config.debugPort}`,
+      ];
+    }
+
+    this.chromeManager = new BrowserModeManager(modeConfig, launchOptions);
+    const browser = await this.chromeManager.launch();
+
+    logger.info('Chrome browser launched successfully');
+    return browser;
+  }
+
+  private async launchCamoufox(): Promise<CamoufoxBrowserLike> {
+    // Prevent launch during shutdown
+    if (this.isClosing) {
+      throw new Error('Cannot launch browser while closing');
+    }
+
+    // Early return if browser already connected (cache reference to avoid repeated calls)
+    const existingBrowser = this.camoufoxManager?.getBrowser();
+    if (existingBrowser?.isConnected()) {
+      return existingBrowser;
+    }
+
+    return this.withLaunchLock(
+      () => this.camoufoxLaunchPromise,
+      (promise) => {
+        this.camoufoxLaunchPromise = promise;
+      },
+      () => this.doLaunchCamoufox(),
+    );
+  }
+
+  private async doLaunchCamoufox(): Promise<CamoufoxBrowserLike> {
+    const headless = this.normalizeCamoufoxHeadless();
+    logger.info(
+      `Launching Camoufox (Firefox) [os=${this.config.os ?? 'windows'}, headless=${headless}]...`,
+    );
+
+    const camoufoxConfig: CamoufoxBrowserConfig = {
+      headless,
+      os: this.config.os,
+      geoip: this.config.geoip,
+      humanize: this.config.humanize,
+      proxy: this.config.proxy,
+      blockImages: this.config.blockImages,
+      blockWebrtc: this.config.blockWebrtc,
+    };
+
+    this.camoufoxManager = new CamoufoxBrowserManager(camoufoxConfig);
+    const browser = await this.camoufoxManager.launch();
+
+    logger.info('Camoufox browser launched successfully');
+    return browser;
+  }
+
+  async connect(wsEndpoint: string): Promise<PuppeteerBrowser | CamoufoxBrowserLike> {
+    if (this.driver === 'camoufox') {
+      return this.connectCamoufox(wsEndpoint);
+    }
+    return this.connectChrome(wsEndpoint);
+  }
+
+  private async connectChrome(wsEndpoint: string): Promise<PuppeteerBrowser> {
+    logger.info(`Connecting to Chrome browser: ${wsEndpoint}`);
+
+    const puppeteer = await import('rebrowser-puppeteer-core');
+    const browser = await puppeteer.connect({
+      browserWSEndpoint: wsEndpoint,
+      defaultViewport: null,
+    });
+
+    // Create a minimal manager wrapper for the connected browser
+    this.chromeManager = new BrowserModeManager({}, {});
+    // Access internal browser reference
+    Reflect.set(this.chromeManager as object, 'browser', browser);
+    this.chromeIsAttached = true;
+
+    logger.info('Connected to Chrome browser successfully');
+    return browser;
+  }
+
+  private async connectCamoufox(wsEndpoint: string): Promise<CamoufoxBrowserLike> {
+    logger.info(`Connecting to Camoufox browser: ${wsEndpoint}`);
+
+    this.camoufoxManager = new CamoufoxBrowserManager({});
+    const browser = await this.camoufoxManager.connectToServer(wsEndpoint);
+
+    logger.info('Connected to Camoufox browser successfully');
+    return browser;
+  }
+
+  async newPage(): Promise<PuppeteerPage | CamoufoxPageLike> {
+    if (this.driver === 'camoufox') {
+      if (!this.camoufoxManager) {
+        await this.launchCamoufox();
+      }
+      this.activePage = await this.camoufoxManager!.newPage();
+      return this.activePage;
+    }
+
+    if (!this.chromeManager) {
+      await this.launchChrome();
+    }
+    this.activePage = await this.chromeManager!.newPage();
+    return this.activePage;
+  }
+
+  async goto(
+    url: string,
+    page?: PuppeteerPage | CamoufoxPageLike,
+  ): Promise<PuppeteerPage | CamoufoxPageLike> {
+    const targetPage = page ?? this.activePage;
+
+    if (this.driver === 'camoufox') {
+      if (!this.camoufoxManager) {
+        await this.launchCamoufox();
+      }
+      return this.camoufoxManager!.goto(url, targetPage as CamoufoxPageLike);
+    }
+
+    if (!this.chromeManager) {
+      await this.launchChrome();
+    }
+    return this.chromeManager!.goto(url, targetPage as PuppeteerPage);
+  }
+
+  async close(): Promise<void> {
+    // Set closing flag to prevent new launches
+    this.isClosing = true;
+
+    try {
+      // Wait for any in-flight launches to settle first — a launch that
+      // completes after close() would otherwise leave a running browser
+      // process with no manager reference to close it.
+      const pendingLaunches: Promise<unknown>[] = [];
+      if (this.chromeLaunchPromise) {
+        pendingLaunches.push(this.chromeLaunchPromise.catch(() => undefined));
+      }
+      if (this.camoufoxLaunchPromise) {
+        pendingLaunches.push(this.camoufoxLaunchPromise.catch(() => undefined));
+      }
+      await Promise.all(pendingLaunches);
+
+      const camoufoxManager = this.camoufoxManager;
+      const chromeManager = this.chromeManager;
+
+      this.camoufoxManager = null;
+      this.chromeManager = null;
+      this.chromeLaunchPromise = undefined;
+      this.camoufoxLaunchPromise = undefined;
+      this.activePage = null;
+      const chromeWasAttached = this.chromeIsAttached;
+      this.chromeIsAttached = false;
+
+      const closeTasks: Promise<void>[] = [];
+
+      if (camoufoxManager) {
+        closeTasks.push(
+          camoufoxManager.close().then(() => {
+            logger.info('Camoufox browser closed');
+          }),
+        );
+      }
+
+      if (chromeManager) {
+        if (chromeWasAttached) {
+          // Attached browsers: disconnect only, do not kill the external process
+          const browser = chromeManager.getBrowser();
+          if (browser) {
+            closeTasks.push(
+              browser.disconnect().then(() => {
+                logger.info('Detached from Chrome browser (not killed)');
+              }),
+            );
+          }
+        } else {
+          closeTasks.push(
+            chromeManager.close().then(() => {
+              logger.info('Chrome browser closed');
+            }),
+          );
+        }
+      }
+
+      await Promise.all(closeTasks);
+    } finally {
+      // Reset closing flag to allow future launches
+      this.isClosing = false;
+    }
+  }
+
+  getBrowser(): PuppeteerBrowser | CamoufoxBrowserLike | null {
+    if (this.driver === 'camoufox') {
+      return this.camoufoxManager?.getBrowser() ?? null;
+    }
+    return this.chromeManager?.getBrowser() ?? null;
+  }
+
+  getActivePage(): PuppeteerPage | CamoufoxPageLike | null {
+    return this.activePage;
+  }
+
+  getDriver(): BrowserDriver {
+    return this.driver;
+  }
+
+  setDriver(driver: BrowserDriver): void {
+    this.driver = driver;
+  }
+
+  getStatus(): BrowserStatus {
+    const browser = this.getBrowser();
+    const running = browser !== null && browser.isConnected();
+
+    return {
+      driver: this.driver,
+      running,
+      hasActivePage: this.activePage !== null,
+      headless: this.config.headless,
+      debugPort: this.config.debugPort,
+    };
+  }
+
+  async discoverBrowsers(): Promise<BrowserInfo[]> {
+    return this.browserDiscovery.discoverBrowsers();
+  }
+
+  async findChromeWithDebugPort(
+    preferredPorts: number[] = DEBUG_PORT_CANDIDATES,
+  ): Promise<BrowserInfo | null> {
+    const browsers = await this.discoverBrowsers();
+    const chromeBrowsers = browsers.filter((b) => b.type === 'chrome' || b.type === 'edge');
+
+    for (const browser of chromeBrowsers) {
+      if (browser.debugPort && preferredPorts.includes(browser.debugPort)) {
+        return browser;
+      }
+    }
+
+    return null;
+  }
+
+  async attachToExistingChrome(
+    preferredPorts: number[] = DEBUG_PORT_CANDIDATES,
+  ): Promise<PuppeteerBrowser | null> {
+    const browserInfo = await this.findChromeWithDebugPort(preferredPorts);
+
+    if (!browserInfo?.debugPort) {
+      logger.info('No existing Chrome browser with debug port found');
+      return null;
+    }
+
+    const wsEndpoint = `ws://127.0.0.1:${browserInfo.debugPort}`;
+    logger.info(`Found existing Chrome browser on port ${browserInfo.debugPort}, connecting...`);
+
+    try {
+      return await this.connectChrome(wsEndpoint);
+    } catch (error) {
+      logger.error('Failed to connect to existing Chrome browser', error);
+      return null;
+    }
+  }
+
+  /**
+   * Normalize headless mode for Chrome
+   * - true -> true (old headless)
+   * - false -> false (headed)
+   * - 'shell' -> 'shell' (new headless)
+   * - 'virtual' -> true (virtual is Camoufox-specific)
+   */
+  private normalizeChromeHeadless(): boolean | 'shell' {
+    const headless = this.config.headless;
+
+    if (headless === 'virtual') {
+      // 'virtual' is Camoufox-specific, fallback to true for Chrome
+      return true;
+    }
+
+    if (headless === 'shell') {
+      return 'shell';
+    }
+
+    return headless ?? true;
+  }
+
+  /**
+   * Normalize headless mode for Camoufox
+   * - true -> true
+   * - false -> false
+   * - 'virtual' -> 'virtual'
+   * - 'shell' -> true ('shell' is Chrome-specific)
+   */
+  private normalizeCamoufoxHeadless(): boolean | 'virtual' {
+    const headless = this.config.headless;
+
+    if (headless === 'shell') {
+      // 'shell' is Chrome-specific, fallback to true for Camoufox
+      return true;
+    }
+
+    if (headless === 'virtual') {
+      return 'virtual';
+    }
+
+    return headless ?? true;
+  }
+
+  private getHeadlessBoolean(): boolean {
+    const headless = this.config.headless;
+    if (headless === 'shell' || headless === 'virtual') {
+      return true;
+    }
+    return headless ?? true;
+  }
+}
+
+// Re-export types and classes
+export { BrowserModeManager } from '@modules/browser/BrowserModeManager';
+export type { BrowserModeConfig } from '@modules/browser/BrowserModeManager';
+export { CamoufoxBrowserManager } from '@modules/browser/CamoufoxBrowserManager';
+export type { CamoufoxBrowserConfig } from '@modules/browser/CamoufoxBrowserManager';
+export { BrowserDiscovery } from '@modules/browser/BrowserDiscovery';
+export type { BrowserInfo, BrowserSignature } from '@modules/browser/BrowserDiscovery';

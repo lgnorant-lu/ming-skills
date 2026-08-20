@@ -1,0 +1,620 @@
+import { existsSync } from 'fs';
+import type { Browser, Page, LaunchOptions } from 'rebrowser-puppeteer-core';
+import { logger } from '@utils/logger';
+import { findBrowserExecutableAsync } from '@utils/browserExecutable';
+import { CaptchaDetector, type CaptchaDetectionResult } from '@modules/captcha/CaptchaDetector';
+import { determineCaptchaResolution } from '@modules/captcha/CaptchaPolicy';
+import { SessionProfileManager } from '@modules/stealth/SessionProfileManager';
+import type { SessionProfile } from '@internal-types/SessionProfile';
+import { toChromeCompatibleWaitUntil } from '@modules/browser/navigation-wait-until';
+
+type PermissionQueryInput = Parameters<Permissions['query']>[0];
+
+type NotificationWithPermission = typeof Notification & {
+  permission: NotificationPermission;
+};
+
+type ChromeRuntimeLike = {
+  connect: () => void;
+  sendMessage: () => void;
+  onMessage: {
+    addListener: () => void;
+    removeListener: () => void;
+  };
+};
+
+type ChromeLike = {
+  runtime: ChromeRuntimeLike;
+  loadTimes: () => {
+    commitLoadTime: number;
+    connectionInfo: string;
+    finishDocumentLoadTime: number;
+    finishLoadTime: number;
+    firstPaintAfterLoadTime: number;
+    firstPaintTime: number;
+    navigationType: string;
+    npnNegotiatedProtocol: string;
+    requestTime: number;
+    startLoadTime: number;
+    wasAlternateProtocolAvailable: boolean;
+    wasFetchedViaSpdy: boolean;
+    wasNpnNegotiated: boolean;
+  };
+  csi: () => {
+    onloadT: number;
+    pageT: number;
+    startE: number;
+    tran: number;
+  };
+};
+
+type WindowWithChrome = Window & {
+  chrome?: ChromeLike;
+};
+
+export interface BrowserModeConfig {
+  autoDetectCaptcha?: boolean;
+  autoSwitchHeadless?: boolean;
+  captchaTimeout?: number;
+  defaultHeadless?: boolean;
+  askBeforeSwitchBack?: boolean;
+}
+
+export class BrowserModeManager {
+  private browser: Browser | null = null;
+  private currentPage: Page | null = null;
+  private isHeadless: boolean = true;
+  private isClosing = false;
+  private launchPromise?: Promise<Browser>;
+  private config: Required<BrowserModeConfig>;
+  private captchaDetector: CaptchaDetector;
+  private launchOptions: LaunchOptions;
+  /** PID of the Chrome child process launched by puppeteer, used for force-kill fallback. */
+  private chromePid: number | null = null;
+  private static readonly BROWSER_CLOSE_TIMEOUT_MS = 5000;
+  private sessionData: {
+    origin?: string;
+    cookies?: Awaited<ReturnType<Page['cookies']>>;
+    localStorage?: Record<string, string>;
+    sessionStorage?: Record<string, string>;
+    userAgent?: string;
+    platform?: string;
+    acceptLanguage?: string;
+    sessionProfile?: SessionProfile;
+  } = {};
+  private readonly sessionProfileManager = SessionProfileManager.getInstance();
+
+  constructor(config: BrowserModeConfig = {}, launchOptions: LaunchOptions = {}) {
+    this.config = {
+      autoDetectCaptcha: config.autoDetectCaptcha ?? true,
+      autoSwitchHeadless: config.autoSwitchHeadless ?? true,
+      captchaTimeout: config.captchaTimeout ?? 300000,
+      defaultHeadless: config.defaultHeadless ?? true,
+      askBeforeSwitchBack: config.askBeforeSwitchBack ?? true,
+    };
+
+    this.isHeadless = this.config.defaultHeadless;
+    this.captchaDetector = new CaptchaDetector();
+    this.launchOptions = launchOptions;
+  }
+
+  async launch(): Promise<Browser> {
+    if (this.browser?.isConnected()) {
+      return this.browser;
+    }
+
+    if (this.isClosing) {
+      throw new Error('Cannot launch browser while closing');
+    }
+
+    if (this.launchPromise) {
+      return this.launchPromise;
+    }
+
+    const launchPromise = this.doLaunch();
+    this.launchPromise = launchPromise;
+
+    try {
+      return await launchPromise;
+    } finally {
+      if (this.launchPromise === launchPromise) {
+        this.launchPromise = undefined;
+      }
+    }
+  }
+
+  private async doLaunch(): Promise<Browser> {
+    const headlessMode = this.isHeadless;
+    const executablePath = await this.resolveExecutablePath();
+    logger.info(`Launching browser (${headlessMode ? 'headless' : 'headed'} mode)...`);
+
+    const options: LaunchOptions = {
+      ...this.launchOptions,
+      headless: headlessMode,
+      args: [
+        ...(this.launchOptions.args || []),
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-extensions',
+        '--disable-component-extensions-with-background-pages',
+      ],
+      ignoreDefaultArgs: ['--enable-automation'],
+    };
+    if (executablePath) {
+      options.executablePath = executablePath;
+    }
+
+    const puppeteer = await import('rebrowser-puppeteer-core');
+    const browser = await (puppeteer.launch ?? puppeteer.default.launch)(options);
+    const pid = browser.process()?.pid ?? null;
+
+    if (this.isClosing) {
+      await browser.close().catch((error) => {
+        logger.warn('Failed to close browser launched during shutdown', error);
+        BrowserModeManager.forceKillPid(pid);
+      });
+      throw new Error('Browser launch aborted because close was requested');
+    }
+
+    this.browser = browser;
+    this.chromePid = pid;
+    if (pid) {
+      logger.debug(`Chrome child process PID: ${pid}`);
+    }
+
+    logger.info('Browser launched successfully');
+
+    return this.browser;
+  }
+
+  private async resolveExecutablePath(): Promise<string | undefined> {
+    const configuredPath = this.launchOptions.executablePath?.trim();
+    if (configuredPath) {
+      if (existsSync(configuredPath)) {
+        return configuredPath;
+      }
+      throw new Error(
+        `Configured browser executable was not found: ${configuredPath}. ` +
+          'Set a valid executablePath or configure CHROME_PATH / PUPPETEER_EXECUTABLE_PATH / BROWSER_EXECUTABLE_PATH.',
+      );
+    }
+
+    const detectedPath = await findBrowserExecutableAsync();
+    if (detectedPath) {
+      return detectedPath;
+    }
+
+    logger.info(
+      'No explicit browser executable configured. Falling back to Puppeteer-managed browser resolution.',
+    );
+    return undefined;
+  }
+
+  async newPage(): Promise<Page> {
+    const browser = this.browser?.isConnected() ? this.browser : await this.launch();
+
+    const page = await browser.newPage();
+    this.currentPage = page;
+
+    await this.injectAntiDetectionScripts(page);
+
+    if (this.sessionData.cookies && this.sessionData.cookies.length > 0) {
+      await page.setCookie(...this.sessionData.cookies);
+    }
+
+    return page;
+  }
+
+  private async finalizeClose(): Promise<void> {
+    try {
+      const browser = this.browser;
+      const pid = this.chromePid;
+      this.browser = null;
+      this.currentPage = null;
+      this.chromePid = null;
+
+      if (browser) {
+        try {
+          await Promise.race([
+            browser.close(),
+            new Promise<never>((_, reject) =>
+              setTimeout(
+                () => reject(new Error('browser.close() timed out')),
+                BrowserModeManager.BROWSER_CLOSE_TIMEOUT_MS,
+              ),
+            ),
+          ]);
+          logger.info('Browser closed');
+        } catch (error) {
+          logger.warn('browser.close() failed or timed out, attempting force-kill:', error);
+          BrowserModeManager.forceKillPid(pid);
+        }
+      }
+    } finally {
+      this.isClosing = false;
+    }
+  }
+
+  async goto(url: string, page?: Page): Promise<Page> {
+    const targetPage = page || this.currentPage;
+
+    if (!targetPage) {
+      throw new Error('No page available. Call newPage() first.');
+    }
+
+    logger.info(`Navigating to URL: ${url}`);
+
+    await targetPage.goto(url, { waitUntil: toChromeCompatibleWaitUntil() });
+
+    if (this.config.autoDetectCaptcha) {
+      await this.checkAndHandleCaptcha(targetPage, url);
+    }
+
+    return targetPage;
+  }
+
+  async checkAndHandleCaptcha(page: Page, originalUrl: string): Promise<void> {
+    const captchaAssessment = await this.captchaDetector.assess(page);
+    const resolution = determineCaptchaResolution(captchaAssessment, {
+      autoDetectCaptcha: this.config.autoDetectCaptcha,
+      autoSwitchHeadless: this.config.autoSwitchHeadless,
+      isHeadless: this.isHeadless,
+    });
+
+    if (captchaAssessment.candidates.length > 0) {
+      logger.warn(
+        `CAPTCHA assessment candidates: ${captchaAssessment.candidates
+          .map((candidate) => `${candidate.type}@${candidate.source}(${candidate.confidence}%)`)
+          .join(', ')}`,
+      );
+    }
+
+    if (resolution.action === 'ignore') {
+      return;
+    }
+
+    if (resolution.action === 'ask_ai' || resolution.action === 'observe') {
+      logger.info(`CAPTCHA auto-handling skipped: ${resolution.reason}`);
+      return;
+    }
+
+    const captchaResult: CaptchaDetectionResult = captchaAssessment.primaryDetection;
+    logger.warn(
+      `CAPTCHA detected (type: ${captchaResult.type}, confidence: ${captchaResult.confidence}%)`,
+    );
+
+    if (captchaResult.providerHint) {
+      logger.warn(`CAPTCHA provider hint: ${captchaResult.providerHint}`);
+    }
+
+    if (resolution.action === 'switch_to_headed') {
+      await this.switchToHeaded(page, originalUrl, captchaResult);
+    } else {
+      logger.info(`Waiting for manual CAPTCHA completion: ${resolution.reason}`);
+      await this.captchaDetector.waitForCompletion(page, this.config.captchaTimeout);
+    }
+  }
+
+  private async switchToHeaded(
+    currentPage: Page,
+    url: string,
+    captchaInfo: CaptchaDetectionResult,
+  ): Promise<void> {
+    logger.info('Switching browser to headed mode for manual CAPTCHA solving');
+
+    await this.saveSessionData(currentPage);
+
+    const oldPid = this.chromePid;
+    try {
+      await this.browser?.close();
+    } catch (error) {
+      logger.warn('Failed to close old browser during mode switch:', error);
+      BrowserModeManager.forceKillPid(oldPid);
+    }
+    this.chromePid = null;
+
+    this.isHeadless = false;
+    await this.launch();
+
+    const newPage = await this.newPage();
+
+    await newPage.goto(url, { waitUntil: toChromeCompatibleWaitUntil() });
+
+    // Restore session storage data after mode switch to preserve login state
+    await this.restoreSessionData(newPage);
+
+    // Reload page so the app reads restored storage data (important for SPAs)
+    // Only reload if we actually restored data
+    if (this.sessionData.localStorage || this.sessionData.sessionStorage) {
+      await newPage.reload({ waitUntil: toChromeCompatibleWaitUntil() });
+    }
+
+    this.showCaptchaPrompt(captchaInfo);
+
+    const completed = await this.captchaDetector.waitForCompletion(
+      newPage,
+      this.config.captchaTimeout,
+    );
+
+    if (completed) {
+      logger.info('CAPTCHA solved in headed mode');
+      this.sessionData.sessionProfile = await this.sessionProfileManager.exportFromPage(newPage, {
+        origin: this.sessionData.origin,
+        ttlSec: 1800,
+      });
+
+      if (this.config.askBeforeSwitchBack && this.config.defaultHeadless) {
+        logger.info('Headless mode can be restored based on configured policy');
+      }
+    } else {
+      logger.error('CAPTCHA completion timed out in headed mode');
+      throw new Error('Captcha completion timeout');
+    }
+  }
+
+  private showCaptchaPrompt(captchaInfo: CaptchaDetectionResult): void {
+    const lines = [
+      '',
+      '='.repeat(60),
+      'CAPTCHA detected. Please solve it manually.',
+      '='.repeat(60),
+      `Type: ${captchaInfo.type}`,
+      ...(captchaInfo.providerHint ? [`Provider hint: ${captchaInfo.providerHint}`] : []),
+      `Confidence: ${captchaInfo.confidence}%`,
+      '',
+      'Please:',
+      '  1. Complete the CAPTCHA in the visible browser window.',
+      '  2. Keep this process running.',
+      '  3. The script will continue automatically after completion.',
+      `  4. Timeout: ${this.config.captchaTimeout / 1000}s`,
+      '='.repeat(60),
+      '',
+    ];
+
+    for (const line of lines) {
+      process.stderr.write(`${line}\n`);
+    }
+  }
+
+  private async saveSessionData(page: Page): Promise<void> {
+    // Clear previous session data to prevent cross-session leakage
+    this.sessionData = {};
+
+    try {
+      // Store origin for security verification during restore
+      const url = page.url();
+      this.sessionData.origin = url !== 'about:blank' ? new URL(url).origin : undefined;
+
+      this.sessionData.cookies = await page.cookies();
+
+      const storageData = await page.evaluate(() => {
+        const local: Record<string, string> = {};
+        const session: Record<string, string> = {};
+
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key) {
+            local[key] = localStorage.getItem(key) || '';
+          }
+        }
+
+        for (let i = 0; i < sessionStorage.length; i++) {
+          const key = sessionStorage.key(i);
+          if (key) {
+            session[key] = sessionStorage.getItem(key) || '';
+          }
+        }
+
+        return {
+          local,
+          session,
+          userAgent: navigator.userAgent,
+          platform: navigator.platform,
+          acceptLanguage: navigator.language,
+        };
+      });
+
+      this.sessionData.localStorage = storageData.local;
+      this.sessionData.sessionStorage = storageData.session;
+      this.sessionData.userAgent = storageData.userAgent;
+      this.sessionData.platform = storageData.platform;
+      this.sessionData.acceptLanguage = storageData.acceptLanguage;
+      this.sessionData.sessionProfile = await this.sessionProfileManager.exportFromPage(page, {
+        origin: this.sessionData.origin,
+        ttlSec: 1800,
+      });
+
+      logger.info('Session data captured before browser mode switch');
+    } catch (error) {
+      logger.error('Failed to capture session data before mode switch', error);
+    }
+  }
+
+  private async restoreSessionData(page: Page): Promise<void> {
+    try {
+      // Security check: verify origin matches to prevent cross-origin data leakage
+      const currentUrl = page.url();
+      const currentOrigin = currentUrl !== 'about:blank' ? new URL(currentUrl).origin : undefined;
+
+      if (this.sessionData.origin && currentOrigin && this.sessionData.origin !== currentOrigin) {
+        logger.warn(
+          `Origin mismatch: session data from ${this.sessionData.origin} cannot be restored to ${currentOrigin}. ` +
+            'This prevents cross-origin data leakage.',
+        );
+        return;
+      }
+
+      if (this.sessionData.localStorage || this.sessionData.sessionStorage) {
+        await page.evaluate(
+          (data) => {
+            if (data.local) {
+              for (const [key, value] of Object.entries(data.local)) {
+                localStorage.setItem(key, value);
+              }
+            }
+            if (data.session) {
+              for (const [key, value] of Object.entries(data.session)) {
+                sessionStorage.setItem(key, value);
+              }
+            }
+          },
+          {
+            local: this.sessionData.localStorage,
+            session: this.sessionData.sessionStorage,
+          },
+        );
+        logger.info('Session storage data restored');
+      }
+    } catch (error) {
+      logger.error('Failed to restore session storage data', error);
+    }
+  }
+
+  private async injectAntiDetectionScripts(page: Page): Promise<void> {
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined,
+      });
+
+      const win = window as WindowWithChrome;
+      win.chrome = {
+        runtime: {
+          connect: () => {},
+          sendMessage: () => {},
+          onMessage: {
+            addListener: () => {},
+            removeListener: () => {},
+          },
+        },
+        loadTimes: function () {
+          return {
+            commitLoadTime: Date.now() / 1000,
+            connectionInfo: 'http/1.1',
+            finishDocumentLoadTime: Date.now() / 1000,
+            finishLoadTime: Date.now() / 1000,
+            firstPaintAfterLoadTime: 0,
+            firstPaintTime: Date.now() / 1000,
+            navigationType: 'Other',
+            npnNegotiatedProtocol: 'unknown',
+            requestTime: 0,
+            startLoadTime: Date.now() / 1000,
+            wasAlternateProtocolAvailable: false,
+            wasFetchedViaSpdy: false,
+            wasNpnNegotiated: false,
+          };
+        },
+        csi: function () {
+          return {
+            onloadT: Date.now(),
+            pageT: Date.now(),
+            startE: Date.now(),
+            tran: 15,
+          };
+        },
+      };
+
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [
+          {
+            0: {
+              type: 'application/pdf',
+              suffixes: 'pdf',
+              description: 'Portable Document Format',
+            },
+            description: 'Portable Document Format',
+            filename: 'internal-pdf-viewer',
+            length: 1,
+            name: 'Chrome PDF Plugin',
+          },
+          {
+            0: { type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: '' },
+            description: '',
+            filename: 'internal-pdf-viewer',
+            length: 1,
+            name: 'Chrome PDF Viewer',
+          },
+          {
+            0: {
+              type: 'application/x-nacl',
+              suffixes: '',
+              description: 'Native Client Executable',
+            },
+            1: {
+              type: 'application/x-pnacl',
+              suffixes: '',
+              description: 'Portable Native Client Executable',
+            },
+            description: '',
+            filename: 'internal-nacl-plugin',
+            length: 2,
+            name: 'Native Client',
+          },
+        ],
+      });
+
+      const originalQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
+      const notification = Notification as NotificationWithPermission;
+      window.navigator.permissions.query = (parameters: PermissionQueryInput) =>
+        parameters.name === 'notifications'
+          ? Promise.resolve({ state: notification.permission } as PermissionStatus)
+          : originalQuery(parameters);
+
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+      });
+    });
+
+    logger.info('Injected anti-detection scripts');
+  }
+
+  async close(): Promise<void> {
+    // Clear session data to prevent cross-session data leakage
+    this.sessionData = {};
+
+    this.isClosing = true;
+
+    const pendingLaunch = this.launchPromise;
+    if (pendingLaunch) {
+      void pendingLaunch
+        .catch(() => undefined)
+        .finally(() => {
+          void this.finalizeClose();
+        });
+      return;
+    }
+
+    await this.finalizeClose();
+  }
+
+  getBrowser(): Browser | null {
+    return this.browser;
+  }
+
+  getCurrentPage(): Page | null {
+    return this.currentPage;
+  }
+
+  isHeadlessMode(): boolean {
+    return this.isHeadless;
+  }
+
+  /** Get the tracked Chrome child process PID. */
+  getChromePid(): number | null {
+    return this.chromePid;
+  }
+
+  /** Force-kill a process by PID. Safe to call with null/invalid PIDs. */
+  static forceKillPid(pid: number | null): void {
+    if (!pid) return;
+    try {
+      process.kill(pid, 'SIGKILL');
+      logger.info(`Force-killed Chrome process PID ${pid}`);
+    } catch (error) {
+      // ESRCH = process already exited, which is fine
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+        logger.warn(`Failed to force-kill Chrome PID ${pid}:`, error);
+      }
+    }
+  }
+}

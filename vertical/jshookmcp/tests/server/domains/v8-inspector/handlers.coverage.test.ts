@@ -1,0 +1,1149 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// ---------------------------------------------------------------------------
+// Mocks — must come before imports that reference the mocked modules.
+// Mock factories MUST use `function` (not arrow) so `new` produces instances.
+// ---------------------------------------------------------------------------
+
+const mockExtractBytecode = vi.fn();
+const mockAttemptNativeBytecodeExtraction = vi.fn();
+const mockDisassembleBytecode = vi.fn();
+const mockFindHiddenClasses = vi.fn();
+const mockInspectJIT = vi.fn();
+const mockTakeHeapSnapshot = vi.fn();
+const mockGetObjectByObjectId = vi.fn();
+const mockGetHeapUsage = vi.fn();
+const mockDetectV8Version = vi.fn();
+const bytecodeExtractorGetPages: Array<(() => Promise<unknown>) | undefined> = [];
+const jitInspectorGetPages: Array<(() => Promise<unknown>) | undefined> = [];
+const versionDetectorGetPages: Array<(() => Promise<unknown>) | undefined> = [];
+
+vi.mock('@modules/v8-inspector', () => {
+  return {
+    BytecodeExtractor: vi.fn(function (this: any, getPage?: () => Promise<unknown>) {
+      bytecodeExtractorGetPages.push(getPage);
+      this.attemptNativeBytecodeExtraction = mockAttemptNativeBytecodeExtraction;
+      this.extractBytecode = mockExtractBytecode;
+      this.disassembleBytecode = mockDisassembleBytecode;
+      this.findHiddenClasses = mockFindHiddenClasses;
+    }),
+    JITInspector: vi.fn(function (this: any, getPage?: () => Promise<unknown>) {
+      jitInspectorGetPages.push(getPage);
+      this.inspectJIT = mockInspectJIT;
+    }),
+  };
+});
+
+vi.mock('@modules/v8-inspector/V8InspectorClient', () => {
+  return {
+    V8InspectorClient: vi.fn(function (this: any) {
+      this.takeHeapSnapshot = mockTakeHeapSnapshot;
+      this.getObjectByObjectId = mockGetObjectByObjectId;
+      this.getHeapUsage = mockGetHeapUsage;
+      this.dispose = vi.fn();
+    }),
+  };
+});
+
+vi.mock('@modules/v8-inspector/VersionDetector', () => {
+  return {
+    VersionDetector: vi.fn(function (this: any, getPage?: () => Promise<unknown>) {
+      versionDetectorGetPages.push(getPage);
+      this.detectV8Version = mockDetectV8Version;
+      this.supportsNativesSyntax = vi.fn().mockResolvedValue(false);
+    }),
+  };
+});
+
+// ---------------------------------------------------------------------------
+// Imports — handler functions under test
+// ---------------------------------------------------------------------------
+
+import { handleBytecodeExtract } from '../../../../src/server/domains/v8-inspector/handlers/bytecode-extract';
+import { handleJitInspect } from '../../../../src/server/domains/v8-inspector/handlers/jit-inspect';
+import {
+  handleHeapSnapshotCapture,
+  handleHeapSearch,
+  clearSnapshotCache,
+  getSnapshotCache,
+  storeSnapshot,
+  getSnapshot,
+} from '../../../../src/server/domains/v8-inspector/handlers/heap-snapshot';
+import {
+  V8InspectorHandlers,
+  type V8InspectorDomainDependencies,
+} from '../../../../src/server/domains/v8-inspector/handlers/impl';
+import { ResponseBuilder } from '../../../../src/server/domains/shared/ResponseBuilder';
+
+const parseBody = (res: unknown): Record<string, unknown> =>
+  ResponseBuilder.parse<Record<string, unknown>>(
+    res as Parameters<typeof ResponseBuilder.parse>[0],
+  );
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function createMockDeps(
+  overrides?: Partial<V8InspectorDomainDependencies>,
+): V8InspectorDomainDependencies {
+  const eventBus = {
+    emit: vi.fn().mockResolvedValue(undefined),
+  };
+  const pageController = {
+    getPage: vi.fn().mockResolvedValue({}),
+  };
+  const ctx = {
+    pageController,
+    eventBus,
+  } as unknown as import('@server/MCPServer.context').MCPServerContext;
+  const client = {
+    takeHeapSnapshot: mockTakeHeapSnapshot,
+    getObjectByObjectId: mockGetObjectByObjectId,
+    getHeapUsage: mockGetHeapUsage,
+    dispose: vi.fn(),
+  } as unknown as import('@modules/v8-inspector/V8InspectorClient').V8InspectorClient;
+  return {
+    ctx: overrides?.ctx ?? ctx,
+    client: overrides?.client ?? client,
+  };
+}
+
+function createMockDepsWithoutPage(): V8InspectorDomainDependencies {
+  const eventBus = {
+    emit: vi.fn().mockResolvedValue(undefined),
+  };
+  const ctx = {
+    eventBus,
+  } as unknown as import('@server/MCPServer.context').MCPServerContext;
+  const client = {
+    takeHeapSnapshot: mockTakeHeapSnapshot,
+    getObjectByObjectId: mockGetObjectByObjectId,
+    getHeapUsage: mockGetHeapUsage,
+    dispose: vi.fn(),
+  } as unknown as import('@modules/v8-inspector/V8InspectorClient').V8InspectorClient;
+  return { ctx, client };
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('v8-inspector handler coverage', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearSnapshotCache();
+    bytecodeExtractorGetPages.length = 0;
+    jitInspectorGetPages.length = 0;
+    versionDetectorGetPages.length = 0;
+  });
+
+  afterEach(() => {
+    clearSnapshotCache();
+  });
+
+  // =========================================================================
+  // bytecode-extract.ts
+  // =========================================================================
+  describe('handleBytecodeExtract', () => {
+    it('should return error when scriptId is empty', async () => {
+      const result = await handleBytecodeExtract({});
+      expect(result).toMatchObject({
+        success: false,
+        error: 'scriptId is required',
+      });
+    });
+
+    it('should return error when scriptId is whitespace-only', async () => {
+      const result = await handleBytecodeExtract({ scriptId: '   ' });
+      expect(result).toMatchObject({
+        success: false,
+        error: 'scriptId is required',
+      });
+    });
+
+    it('should return error when extractBytecode returns null', async () => {
+      mockAttemptNativeBytecodeExtraction.mockResolvedValueOnce(null);
+      const result = await handleBytecodeExtract({ scriptId: 'script-42' });
+      expect(result).toMatchObject({
+        success: false,
+        error: 'Unable to inspect bytecode for scriptId "script-42"',
+      });
+    });
+
+    it('should return native extraction result on success', async () => {
+      const nativeAttempt = {
+        available: true,
+        bytecode: '0 LdaConstant\n1 Return',
+        format: 'v8-disassembly',
+        functionName: 'myFunc',
+        reason: 'Native V8 disassembly text returned via %DisassembleFunction',
+        rawIgnitionBytecodeAvailable: false,
+        sourcePosition: 10,
+        supportsNativesSyntax: true,
+      };
+      mockAttemptNativeBytecodeExtraction.mockResolvedValueOnce(nativeAttempt);
+      mockDisassembleBytecode.mockReturnValueOnce([
+        { offset: 0, opcode: 'LdaConstant', operands: [] },
+        { offset: 1, opcode: 'Return', operands: [] },
+      ]);
+      mockFindHiddenClasses.mockResolvedValueOnce([
+        { address: 'hidden-class-0', properties: ['x', 'y'] },
+      ]);
+
+      const result = await handleBytecodeExtract(
+        { scriptId: 'script-99' },
+        { getPage: vi.fn().mockResolvedValue({}) },
+      );
+
+      expect(result).toMatchObject({
+        success: true,
+        scriptId: 'script-99',
+        functionOffset: null,
+        mode: 'native',
+        bytecodeAvailable: true,
+        format: 'v8-disassembly',
+        extraction: {
+          functionName: 'myFunc',
+          bytecode: '0 LdaConstant\n1 Return',
+          sourcePosition: 10,
+        },
+        disassembly: [
+          { offset: 0, opcode: 'LdaConstant', operands: [] },
+          { offset: 1, opcode: 'Return', operands: [] },
+        ],
+        hiddenClasses: [{ address: 'hidden-class-0', properties: ['x', 'y'] }],
+        sourceFallback: null,
+      });
+    });
+
+    it('should pass functionOffset when provided', async () => {
+      mockAttemptNativeBytecodeExtraction.mockResolvedValueOnce({
+        available: false,
+        bytecode: null,
+        format: null,
+        functionName: 'inner',
+        reason: 'unavailable',
+        rawIgnitionBytecodeAvailable: false,
+        sourcePosition: 42,
+        supportsNativesSyntax: true,
+      });
+      mockDisassembleBytecode.mockReturnValueOnce([]);
+      mockFindHiddenClasses.mockResolvedValueOnce([]);
+
+      const result = await handleBytecodeExtract(
+        { scriptId: 'script-1', functionOffset: 42 },
+        { getPage: vi.fn().mockResolvedValue({}) },
+      );
+
+      expect(mockAttemptNativeBytecodeExtraction).toHaveBeenCalledWith('script-1', 42);
+      expect(result).toMatchObject({
+        success: true,
+        scriptId: 'script-1',
+        functionOffset: 42,
+      });
+    });
+
+    it('should expose explicit source fallback when requested', async () => {
+      mockAttemptNativeBytecodeExtraction.mockResolvedValueOnce({
+        available: false,
+        bytecode: null,
+        format: null,
+        functionName: 'anon',
+        reason: 'Runtime disassembly output is not exposed through the current browser/CDP path',
+        rawIgnitionBytecodeAvailable: false,
+        sourcePosition: 3,
+        supportsNativesSyntax: true,
+      });
+      mockExtractBytecode.mockResolvedValueOnce({
+        functionName: 'anon',
+        bytecode: '0 Evaluate x',
+        sourcePosition: 3,
+      });
+      mockDisassembleBytecode.mockReturnValueOnce([
+        { offset: 0, opcode: 'Evaluate', operands: ['x'] },
+      ]);
+      mockFindHiddenClasses.mockResolvedValueOnce([]);
+
+      const result = await handleBytecodeExtract({
+        scriptId: 'script-x',
+        includeSourceFallback: true,
+      });
+
+      expect(result).toMatchObject({
+        success: true,
+        scriptId: 'script-x',
+        mode: 'source-fallback',
+        bytecodeAvailable: false,
+        sourceFallback: {
+          format: 'pseudo-bytecode',
+          extraction: {
+            functionName: 'anon',
+            bytecode: '0 Evaluate x',
+            sourcePosition: 3,
+          },
+          disassembly: [{ offset: 0, opcode: 'Evaluate', operands: ['x'] }],
+        },
+      });
+    });
+  });
+
+  // =========================================================================
+  // jit-inspect.ts
+  // =========================================================================
+  describe('handleJitInspect', () => {
+    it('should return error when scriptId is empty', async () => {
+      const result = await handleJitInspect({});
+      expect(result).toMatchObject({
+        success: false,
+        error: 'scriptId is required',
+      });
+    });
+
+    it('should return error when scriptId is whitespace-only', async () => {
+      const result = await handleJitInspect({ scriptId: '\t\n' });
+      expect(result).toMatchObject({
+        success: false,
+        error: 'scriptId is required',
+      });
+    });
+
+    it('should return functions on success', async () => {
+      const functions = [
+        { functionName: 'foo', optimized: true, tier: 'turbofan' },
+        { functionName: 'bar', optimized: false, tier: 'interpreted' },
+      ];
+      mockInspectJIT.mockResolvedValueOnce({
+        functions,
+        supportsNativesSyntax: true,
+        inspectionMode: 'native-status',
+      });
+
+      const result = await handleJitInspect(
+        { scriptId: 'script-7' },
+        { getPage: vi.fn().mockResolvedValue({}) },
+      );
+
+      expect(result).toMatchObject({
+        success: true,
+        scriptId: 'script-7',
+        inspectionMode: 'native-status',
+        supportsNativesSyntax: true,
+        functions,
+      });
+    });
+
+    it('should work without runtime', async () => {
+      mockInspectJIT.mockResolvedValueOnce({
+        functions: [],
+        supportsNativesSyntax: false,
+        inspectionMode: 'heuristic',
+      });
+      const result = await handleJitInspect({ scriptId: 'abc' });
+      expect(result).toMatchObject({
+        success: true,
+        scriptId: 'abc',
+        inspectionMode: 'heuristic',
+        supportsNativesSyntax: false,
+      });
+    });
+  });
+
+  // =========================================================================
+  // heap-snapshot.ts — cache operations
+  // =========================================================================
+  describe('heap-snapshot cache operations', () => {
+    it('clearSnapshotCache should empty the cache', async () => {
+      storeSnapshot({ id: 'snap-1', chunks: ['{}'], capturedAt: 't', sizeBytes: 0 });
+      expect(getSnapshotCache().size).toBe(1);
+      clearSnapshotCache();
+      expect(getSnapshotCache().size).toBe(0);
+    });
+
+    it('storeSnapshot should add and return the snapshot', async () => {
+      const snap = { id: 'snap-2', chunks: ['chunk-a'], capturedAt: '2026-01-01', sizeBytes: 100 };
+      const result = storeSnapshot(snap);
+      expect(result).toBe(snap);
+      expect(getSnapshot('snap-2')).toBe(snap);
+    });
+
+    it('getSnapshot should return undefined for missing id', async () => {
+      expect(getSnapshot('nonexistent')).toBeUndefined();
+    });
+
+    it('getSnapshotCache should return the live map', async () => {
+      const cache = getSnapshotCache();
+      expect(cache).toBeInstanceOf(Map);
+    });
+  });
+
+  // =========================================================================
+  // heap-snapshot.ts — handleHeapSnapshotCapture
+  // =========================================================================
+  describe('handleHeapSnapshotCapture', () => {
+    function makeOptions(overrides?: Record<string, unknown>) {
+      return {
+        getPage: vi.fn().mockResolvedValue({}),
+        getSnapshot: vi.fn().mockReturnValue(null),
+        setSnapshot: vi.fn(),
+        // persist:false keeps these logic-focused capture tests from writing
+        // snapshot_* files to the shared artifacts/heap-snapshots/ dir, which
+        // otherwise races snapshot-persistence.test's eviction assertions.
+        persist: false,
+        ...overrides,
+      };
+    }
+
+    it('should capture via client when client succeeds', async () => {
+      mockTakeHeapSnapshot.mockImplementationOnce(async (onChunk: (c: string) => void) => {
+        onChunk('chunk1');
+        onChunk('chunk2');
+        return 200;
+      });
+      const opts = makeOptions({ client: { takeHeapSnapshot: mockTakeHeapSnapshot } });
+
+      const result = await handleHeapSnapshotCapture({}, opts);
+
+      expect(result.success).toBe(true);
+      expect(result.simulated).toBe(false);
+      expect(result.sizeBytes).toBe(200);
+      expect(result.chunks).toEqual([]);
+      expect(opts.setSnapshot).toHaveBeenCalled();
+    });
+
+    it('should fall through to CDP page fallback when client throws', async () => {
+      mockTakeHeapSnapshot.mockRejectedValueOnce(new Error('CDP fail'));
+
+      const mockSession = {
+        send: vi
+          .fn()
+          .mockResolvedValueOnce(undefined) // HeapProfiler.enable
+          .mockResolvedValueOnce({
+            result: JSON.stringify({
+              jsHeapSizeUsed: 512,
+              jsHeapSizeTotal: 1024,
+              jsHeapSizeLimit: 2048,
+            }),
+          }), // Runtime.evaluate
+        detach: vi.fn().mockResolvedValue(undefined),
+      };
+      const mockPage = { createCDPSession: vi.fn().mockResolvedValue(mockSession) };
+      const opts = makeOptions({
+        client: { takeHeapSnapshot: mockTakeHeapSnapshot },
+        getPage: vi.fn().mockResolvedValue(mockPage),
+      });
+
+      const result = await handleHeapSnapshotCapture({}, opts);
+
+      expect(result.success).toBe(true);
+      expect(result.simulated).toBe(true);
+      expect(result.sizeBytes).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should fall through to minimal fallback when CDP page fails', async () => {
+      mockTakeHeapSnapshot.mockRejectedValueOnce(new Error('fail'));
+      const opts = makeOptions({
+        client: { takeHeapSnapshot: mockTakeHeapSnapshot },
+        getPage: vi.fn().mockRejectedValue(new Error('no page')),
+      });
+
+      const result = await handleHeapSnapshotCapture({}, opts);
+
+      expect(result.success).toBe(true);
+      expect(result.simulated).toBe(true);
+      expect(result.sizeBytes).toBe(0);
+    });
+
+    it('should fall through to minimal fallback when no client provided and page is not CDP-like', async () => {
+      const opts = makeOptions(); // no client, getPage returns {}
+
+      const result = await handleHeapSnapshotCapture({}, opts);
+
+      expect(result.success).toBe(true);
+      expect(result.simulated).toBe(true);
+      expect(result.sizeBytes).toBe(0);
+    });
+
+    it('should use minimal fallback when no client and no page', async () => {
+      const opts = makeOptions({ getPage: vi.fn().mockRejectedValue(new Error('no browser')) });
+
+      const result = await handleHeapSnapshotCapture({}, opts);
+
+      expect(result.success).toBe(true);
+      expect(result.simulated).toBe(true);
+      expect(result.sizeBytes).toBe(0);
+      expect(opts.setSnapshot).toHaveBeenCalled();
+    });
+
+    it('should handle CDP page fallback when Runtime.evaluate returns null memory', async () => {
+      const mockSession = {
+        send: vi
+          .fn()
+          .mockResolvedValueOnce(undefined) // HeapProfiler.enable
+          .mockResolvedValueOnce({ result: 'null' }), // Runtime.evaluate returns null
+        detach: vi.fn().mockResolvedValue(undefined),
+      };
+      const mockPage = { createCDPSession: vi.fn().mockResolvedValue(mockSession) };
+      const opts = makeOptions({ getPage: vi.fn().mockResolvedValue(mockPage) });
+
+      const result = await handleHeapSnapshotCapture({}, opts);
+
+      expect(result.success).toBe(true);
+      expect(result.simulated).toBe(true);
+      expect(result.sizeBytes).toBe(0);
+    });
+
+    it('should handle CDP page fallback when response has no result field', async () => {
+      const mockSession = {
+        send: vi
+          .fn()
+          .mockResolvedValueOnce(undefined) // HeapProfiler.enable
+          .mockResolvedValueOnce({ notResult: 'something' }), // no 'result'
+        detach: vi.fn().mockResolvedValue(undefined),
+      };
+      const mockPage = { createCDPSession: vi.fn().mockResolvedValue(mockSession) };
+      const opts = makeOptions({ getPage: vi.fn().mockResolvedValue(mockPage) });
+
+      const result = await handleHeapSnapshotCapture({}, opts);
+
+      expect(result.success).toBe(true);
+      expect(result.simulated).toBe(true);
+      expect(result.sizeBytes).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // heap-snapshot.ts — handleHeapSearch
+  // =========================================================================
+  describe('handleHeapSearch', () => {
+    function makeSearchOptions(overrides?: Record<string, unknown>) {
+      return {
+        getPage: vi.fn().mockResolvedValue({}),
+        getSnapshot: vi.fn().mockReturnValue(null),
+        setSnapshot: vi.fn(),
+        ...overrides,
+      };
+    }
+
+    it('should throw when snapshotId is missing and no current snapshot', async () => {
+      const opts = makeSearchOptions();
+      await expect(handleHeapSearch({}, opts)).rejects.toThrow('snapshotId is required');
+    });
+
+    it('should throw when specified snapshotId is not found', async () => {
+      const opts = makeSearchOptions();
+      await expect(
+        handleHeapSearch({ snapshotId: 'missing-snap', query: 'test' }, opts),
+      ).rejects.toThrow('Snapshot missing-snap not found');
+    });
+
+    it('should return matching chunks for a valid snapshot', async () => {
+      storeSnapshot({
+        id: 'snap-search',
+        chunks: ['{"name":"foo"}', '{"name":"bar"}', '{"name":"foobar"}'],
+        capturedAt: '2026-01-01',
+        sizeBytes: 300,
+      });
+      const opts = makeSearchOptions();
+
+      const result = await handleHeapSearch({ snapshotId: 'snap-search', query: 'foo' }, opts);
+
+      expect(result.success).toBe(true);
+      expect(result.snapshotId).toBe('snap-search');
+      expect(result.query).toBe('foo');
+      // Chunks that include "foo": the first and third
+      expect(result.matches).toHaveLength(2);
+    });
+
+    it('should default query to ".*" when not provided', async () => {
+      // handleHeapSearch uses chunk.includes(query) — literal string match
+      // Chunks containing the literal substring ".*" will match
+      storeSnapshot({
+        id: 'snap-wildcard',
+        chunks: ['has-.*-inside', 'no-wildcard'],
+        capturedAt: '2026-01-01',
+        sizeBytes: 100,
+      });
+      const opts = makeSearchOptions();
+
+      const result = await handleHeapSearch({ snapshotId: 'snap-wildcard' }, opts);
+
+      expect(result.query).toBe('.*');
+      // Only the first chunk contains the literal substring ".*"
+      expect(result.matches).toHaveLength(1);
+      expect(result.matches[0]).toBe('has-.*-inside');
+    });
+
+    it('should use getSnapshot() as fallback for snapshotId', async () => {
+      storeSnapshot({
+        id: 'snap-fallback',
+        chunks: ['data'],
+        capturedAt: '2026-01-01',
+        sizeBytes: 50,
+      });
+      const opts = makeSearchOptions({
+        getSnapshot: vi.fn().mockReturnValue('snap-fallback'),
+      });
+
+      const result = await handleHeapSearch({ query: 'data' }, opts);
+
+      expect(result.success).toBe(true);
+      expect(result.snapshotId).toBe('snap-fallback');
+    });
+
+    it('should return empty matches when no chunks match query', async () => {
+      storeSnapshot({
+        id: 'snap-nomatch',
+        chunks: ['alpha', 'beta'],
+        capturedAt: '2026-01-01',
+        sizeBytes: 100,
+      });
+      const opts = makeSearchOptions();
+
+      const result = await handleHeapSearch({ snapshotId: 'snap-nomatch', query: 'gamma' }, opts);
+
+      expect(result.success).toBe(true);
+      expect(result.matches).toHaveLength(0);
+    });
+  });
+
+  // =========================================================================
+  // impl.ts — V8InspectorHandlers
+  // =========================================================================
+  describe('V8InspectorHandlers', () => {
+    describe('handle() dispatch', () => {
+      it('should throw for unknown tool', async () => {
+        const handlers = new V8InspectorHandlers(createMockDeps());
+        await expect(handlers.handle('unknown_tool', {})).rejects.toThrow(
+          'Unknown v8-inspector tool: unknown_tool',
+        );
+      });
+
+      it('should dispatch to v8_heap_stats', async () => {
+        mockGetHeapUsage.mockResolvedValueOnce({
+          jsHeapSizeUsed: 100,
+          jsHeapSizeTotal: 200,
+          jsHeapSizeLimit: 300,
+        });
+        const handlers = new V8InspectorHandlers(createMockDeps());
+        const result = parseBody(await handlers.handle('v8_heap_stats', {}));
+        expect(result).toMatchObject({
+          success: true,
+          snapshotCount: 0,
+          heapUsage: { jsHeapSizeUsed: 100, jsHeapSizeTotal: 200, jsHeapSizeLimit: 300 },
+        });
+      });
+    });
+
+    describe('v8_heap_snapshot_capture', () => {
+      it('should throw without pageController', async () => {
+        const deps = createMockDepsWithoutPage();
+        const handlers = new V8InspectorHandlers(deps);
+        expect(parseBody(await handlers.v8_heap_snapshot_capture({ persist: false })).success).toBe(
+          false,
+        );
+      });
+
+      it('should capture snapshot and emit event on success', async () => {
+        mockTakeHeapSnapshot.mockImplementationOnce(async (onChunk: (c: string) => void) => {
+          onChunk('chunk-data');
+          return 1024;
+        });
+        const deps = createMockDeps();
+        const handlers = new V8InspectorHandlers(deps);
+
+        const result = parseBody(await handlers.v8_heap_snapshot_capture({ persist: false }));
+
+        expect(result.success).toBe(true);
+        expect(result.simulated).toBe(false);
+        expect(result.sizeBytes).toBe(1024);
+        expect(deps.ctx.eventBus.emit).toHaveBeenCalledWith(
+          'v8:heap_captured',
+          expect.objectContaining({
+            snapshotId: result.snapshotId,
+            sizeBytes: 1024,
+          }),
+        );
+      });
+
+      it('should use pageController.getPage() for fallback capture paths', async () => {
+        mockTakeHeapSnapshot.mockRejectedValueOnce(new Error('primary capture failed'));
+        const mockSession = {
+          send: vi
+            .fn()
+            .mockResolvedValueOnce(undefined)
+            .mockResolvedValueOnce({
+              result: {
+                value: {
+                  jsHeapSizeUsed: 512,
+                },
+              },
+            }),
+          detach: vi.fn().mockResolvedValue(undefined),
+        };
+        const mockPage = {
+          createCDPSession: vi.fn().mockResolvedValue(mockSession),
+        };
+        const pageController = {
+          getPage: vi.fn().mockResolvedValue(mockPage),
+        };
+        const handlers = new V8InspectorHandlers(
+          createMockDeps({
+            ctx: {
+              pageController,
+              eventBus: {
+                emit: vi.fn().mockResolvedValue(undefined),
+              },
+            } as unknown as import('@server/MCPServer.context').MCPServerContext,
+          }),
+        );
+
+        const result = parseBody(await handlers.v8_heap_snapshot_capture({ persist: false }));
+
+        expect(result).toMatchObject({
+          // verify minimum result shape; internal call counts may vary
+          success: true,
+          simulated: true,
+          sizeBytes: expect.any(Number),
+        });
+        // verify result shape
+        expect(pageController.getPage).toHaveBeenCalled();
+      });
+    });
+
+    describe('v8_heap_snapshot_analyze', () => {
+      it('should throw if snapshotId is missing', async () => {
+        const handlers = new V8InspectorHandlers(createMockDeps());
+        const body = parseBody(await handlers.v8_heap_snapshot_analyze({}));
+        expect(body.success).toBe(false);
+        expect(String(body.error)).toMatch(/snapshotId/i);
+      });
+
+      it('should throw if snapshot not found in cache', async () => {
+        const handlers = new V8InspectorHandlers(createMockDeps());
+        const body = parseBody(
+          await handlers.v8_heap_snapshot_analyze({ snapshotId: 'no-such-snap' }),
+        );
+        expect(body.success).toBe(false);
+        expect(String(body.error)).toMatch(/Snapshot no-such-snap not found/);
+      });
+
+      it('should return analysis for a stored snapshot', async () => {
+        // Store a valid snapshot with proper V8 heap format
+        const validSnapshot = JSON.stringify({
+          snapshot: {
+            meta: {
+              node_fields: ['type', 'name', 'id', 'self_size', 'edge_count', 'trace_node_id'],
+              node_types: [['object'], 'object'],
+              edge_fields: ['type', 'name_or_index', 'to_node'],
+              edge_types: [['property'], 'property'],
+            },
+            node_count: 2,
+            edge_count: 0,
+          },
+          nodes: [
+            // Root
+            0, 0, 1, 0, 0, 0,
+            // Object
+            0, 1, 2, 1024, 0, 0,
+          ],
+          edges: [],
+          strings: ['(root)', 'Object'],
+        });
+
+        storeSnapshot({
+          id: 'snap-analyze',
+          chunks: [validSnapshot],
+          capturedAt: '2026-01-01',
+          sizeBytes: Buffer.byteLength(validSnapshot, 'utf8'),
+        });
+        const handlers = new V8InspectorHandlers(createMockDeps());
+
+        const result = parseBody(
+          await handlers.v8_heap_snapshot_analyze({ snapshotId: 'snap-analyze' }),
+        );
+
+        expect(result).toHaveProperty('success', true);
+        expect(result).toHaveProperty('snapshotId', 'snap-analyze');
+        expect(result).toHaveProperty('summary');
+        expect(result).toHaveProperty('classHistogram');
+        expect(result).toHaveProperty('parseTimeMs');
+        expect((result as any).summary.chunkCount).toBe(1);
+        expect((result as any).summary.totalObjects).toBe(2);
+        expect((result as any).classHistogram).toBeInstanceOf(Array);
+      });
+    });
+
+    describe('v8_heap_diff', () => {
+      it('should throw if beforeSnapshotId is missing', async () => {
+        const handlers = new V8InspectorHandlers(createMockDeps());
+        const body = parseBody(await handlers.v8_heap_diff({ afterSnapshotId: 'snap-after' }));
+        expect(body.success).toBe(false);
+        expect(String(body.error)).toMatch(
+          /Both beforeSnapshotId and afterSnapshotId are required/,
+        );
+      });
+
+      it('should throw if afterSnapshotId is missing', async () => {
+        const handlers = new V8InspectorHandlers(createMockDeps());
+        const body = parseBody(await handlers.v8_heap_diff({ beforeSnapshotId: 'snap-before' }));
+        expect(body.success).toBe(false);
+        expect(String(body.error)).toMatch(
+          /Both beforeSnapshotId and afterSnapshotId are required/,
+        );
+      });
+
+      it('should throw if both snapshot IDs are non-string', async () => {
+        const handlers = new V8InspectorHandlers(createMockDeps());
+        const body = parseBody(
+          await handlers.v8_heap_diff({ beforeSnapshotId: 123, afterSnapshotId: 456 }),
+        );
+        expect(body.success).toBe(false);
+        expect(String(body.error)).toMatch(
+          /Both beforeSnapshotId and afterSnapshotId are required/,
+        );
+      });
+
+      it('should throw if before snapshot not found', async () => {
+        const handlers = new V8InspectorHandlers(createMockDeps());
+        const body = parseBody(
+          await handlers.v8_heap_diff({
+            beforeSnapshotId: 'missing',
+            afterSnapshotId: 'also-missing',
+          }),
+        );
+        expect(body.success).toBe(false);
+        expect(String(body.error)).toMatch(/Snapshot missing not found/);
+      });
+
+      it('should throw if after snapshot not found', async () => {
+        storeSnapshot({ id: 'snap-before', chunks: ['a'], capturedAt: 't', sizeBytes: 100 });
+        const handlers = new V8InspectorHandlers(createMockDeps());
+        const body = parseBody(
+          await handlers.v8_heap_diff({
+            beforeSnapshotId: 'snap-before',
+            afterSnapshotId: 'missing-after',
+          }),
+        );
+        expect(body.success).toBe(false);
+        expect(String(body.error)).toMatch(/Snapshot missing-after not found/);
+      });
+
+      it('should return size delta for two stored snapshots', async () => {
+        storeSnapshot({ id: 'snap-diff-before', chunks: ['a'], capturedAt: 't1', sizeBytes: 500 });
+        storeSnapshot({
+          id: 'snap-diff-after',
+          chunks: ['b', 'c'],
+          capturedAt: 't2',
+          sizeBytes: 800,
+        });
+        const handlers = new V8InspectorHandlers(createMockDeps());
+
+        const result = parseBody(
+          await handlers.v8_heap_diff({
+            beforeSnapshotId: 'snap-diff-before',
+            afterSnapshotId: 'snap-diff-after',
+          }),
+        );
+
+        expect(result).toMatchObject({
+          success: true,
+          beforeSnapshotId: 'snap-diff-before',
+          afterSnapshotId: 'snap-diff-after',
+          sizeDeltaBytes: 300,
+        });
+      });
+
+      it('should return negative delta when after is smaller', async () => {
+        storeSnapshot({ id: 'snap-big', chunks: ['x'], capturedAt: 't1', sizeBytes: 1000 });
+        storeSnapshot({ id: 'snap-small', chunks: ['y'], capturedAt: 't2', sizeBytes: 400 });
+        const handlers = new V8InspectorHandlers(createMockDeps());
+
+        const result = parseBody(
+          await handlers.v8_heap_diff({
+            beforeSnapshotId: 'snap-big',
+            afterSnapshotId: 'snap-small',
+          }),
+        );
+
+        expect(result.sizeDeltaBytes).toBe(-600);
+      });
+    });
+
+    describe('v8_object_inspect', () => {
+      it('should throw if address is missing', async () => {
+        const handlers = new V8InspectorHandlers(createMockDeps());
+        const body = parseBody(await handlers.v8_object_inspect({}));
+        expect(body.success).toBe(false);
+        expect(String(body.error)).toMatch(/address/i);
+      });
+
+      it('should prefer debugger manager object inspection when available', async () => {
+        const debuggerManager = {
+          getObjectPropertiesById: vi.fn().mockResolvedValue([
+            {
+              name: 'tag',
+              value: 'runtime-audit',
+              type: 'string',
+            },
+          ]),
+        };
+        const handlers = new V8InspectorHandlers(
+          createMockDeps({
+            ctx: {
+              pageController: {
+                getPage: vi.fn().mockResolvedValue({}),
+              },
+              eventBus: {
+                emit: vi.fn().mockResolvedValue(undefined),
+              },
+              debuggerManager,
+            } as unknown as import('@server/MCPServer.context').MCPServerContext,
+          }),
+        );
+
+        const result = parseBody(
+          await handlers.v8_object_inspect({ address: 'debugger-object-id' }),
+        );
+
+        expect(debuggerManager.getObjectPropertiesById).toHaveBeenCalledWith('debugger-object-id');
+        expect(mockGetObjectByObjectId).not.toHaveBeenCalled();
+        expect(result).toMatchObject({
+          success: true,
+          address: 'debugger-object-id',
+          objectData: {
+            kind: 'runtime-object',
+            source: 'debugger-session',
+            propertyCount: 1,
+            properties: [
+              {
+                name: 'tag',
+                value: 'runtime-audit',
+                type: 'string',
+              },
+            ],
+          },
+        });
+      });
+
+      it('should return object data when client succeeds', async () => {
+        mockGetObjectByObjectId.mockResolvedValueOnce({ type: 'object', className: 'Object' });
+        const handlers = new V8InspectorHandlers(createMockDeps());
+
+        const result = parseBody(await handlers.v8_object_inspect({ address: '1:42' }));
+
+        expect(result).toMatchObject({
+          success: true,
+          address: '1:42',
+          objectData: { type: 'object', className: 'Object' },
+        });
+      });
+
+      it('should fall back to client when debugger manager cannot inspect the object', async () => {
+        const debuggerManager = {
+          getObjectPropertiesById: vi.fn().mockRejectedValue(new Error('Invalid remote object id')),
+        };
+        mockGetObjectByObjectId.mockResolvedValueOnce({ type: 'object', className: 'Fallback' });
+        const handlers = new V8InspectorHandlers(
+          createMockDeps({
+            ctx: {
+              pageController: {
+                getPage: vi.fn().mockResolvedValue({}),
+              },
+              eventBus: {
+                emit: vi.fn().mockResolvedValue(undefined),
+              },
+              debuggerManager,
+            } as unknown as import('@server/MCPServer.context').MCPServerContext,
+          }),
+        );
+
+        const result = parseBody(await handlers.v8_object_inspect({ address: '1:77' }));
+
+        expect(debuggerManager.getObjectPropertiesById).toHaveBeenCalledWith('1:77');
+        expect(mockGetObjectByObjectId).toHaveBeenCalledWith('1:77');
+        expect(result).toMatchObject({
+          success: true,
+          address: '1:77',
+          objectData: { type: 'object', className: 'Fallback' },
+        });
+      });
+
+      it('should return without objectData when client returns null', async () => {
+        mockGetObjectByObjectId.mockResolvedValueOnce(null);
+        const handlers = new V8InspectorHandlers(createMockDeps());
+
+        const result = parseBody(await handlers.v8_object_inspect({ address: '1:99' }));
+
+        expect(result.success).toBe(false);
+      });
+
+      it('should handle client error gracefully', async () => {
+        mockGetObjectByObjectId.mockRejectedValueOnce(new Error('CDP error'));
+        const handlers = new V8InspectorHandlers(createMockDeps());
+
+        const result = parseBody(await handlers.v8_object_inspect({ address: '1:0' }));
+
+        expect(result.success).toBe(false);
+      });
+    });
+
+    describe('v8_heap_stats', () => {
+      it('should throw without pageController', async () => {
+        const deps = createMockDepsWithoutPage();
+        const handlers = new V8InspectorHandlers(deps);
+        expect(parseBody(await handlers.v8_heap_stats({})).success).toBe(false);
+      });
+
+      it('should return stats with heapUsage when client succeeds', async () => {
+        mockGetHeapUsage.mockResolvedValueOnce({
+          jsHeapSizeUsed: 512,
+          jsHeapSizeTotal: 1024,
+          jsHeapSizeLimit: 2048,
+        });
+        const handlers = new V8InspectorHandlers(createMockDeps());
+
+        const result = parseBody(await handlers.v8_heap_stats({}));
+
+        expect(result).toMatchObject({
+          success: true,
+          snapshotCount: 0,
+          heapUsage: { jsHeapSizeUsed: 512, jsHeapSizeTotal: 1024, jsHeapSizeLimit: 2048 },
+        });
+      });
+
+      it('should return stats without heapUsage when client throws', async () => {
+        mockGetHeapUsage.mockRejectedValueOnce(new Error('no session'));
+        const handlers = new V8InspectorHandlers(createMockDeps());
+
+        const result = parseBody(await handlers.v8_heap_stats({}));
+
+        expect(result).toMatchObject({
+          success: true,
+          snapshotCount: 0,
+        });
+      });
+
+      it('should include cached snapshot count', async () => {
+        storeSnapshot({ id: 's1', chunks: ['a'], capturedAt: 't', sizeBytes: 10 });
+        storeSnapshot({ id: 's2', chunks: ['b'], capturedAt: 't', sizeBytes: 20 });
+        mockGetHeapUsage.mockRejectedValueOnce(new Error('skip'));
+        const handlers = new V8InspectorHandlers(createMockDeps());
+
+        const result = parseBody(await handlers.v8_heap_stats({}));
+
+        expect(result.snapshotCount).toBe(2);
+      });
+    });
+
+    describe('v8_bytecode_extract', () => {
+      it('should return error when scriptId is empty', async () => {
+        const handlers = new V8InspectorHandlers(createMockDeps());
+        const result = await handlers.v8_bytecode_extract({});
+        expect(result).toMatchObject({ success: false, error: 'scriptId is required' });
+      });
+
+      it('should pass an active page getter into BytecodeExtractor', async () => {
+        mockAttemptNativeBytecodeExtraction.mockResolvedValueOnce({
+          available: false,
+          bytecode: null,
+          format: null,
+          functionName: 'test',
+          reason: 'unavailable',
+          rawIgnitionBytecodeAvailable: false,
+          supportsNativesSyntax: true,
+        });
+        mockDisassembleBytecode.mockReturnValueOnce([]);
+        mockFindHiddenClasses.mockResolvedValueOnce([]);
+
+        const deps = createMockDeps();
+        const handlers = new V8InspectorHandlers(deps);
+        const result = await handlers.v8_bytecode_extract({ scriptId: 's1' });
+        const getPage = bytecodeExtractorGetPages.at(-1);
+
+        expect(result).toMatchObject({ success: true, scriptId: 's1' });
+        expect(typeof getPage).toBe('function');
+        await expect(getPage?.()).resolves.toEqual({});
+        expect((deps.ctx.pageController as any).getPage).toHaveBeenCalledOnce();
+      });
+
+      it('should work without pageController', async () => {
+        mockAttemptNativeBytecodeExtraction.mockResolvedValueOnce(null);
+        const deps = createMockDepsWithoutPage();
+        const handlers = new V8InspectorHandlers(deps);
+
+        const result = await handlers.v8_bytecode_extract({ scriptId: 's2' });
+
+        expect(result).toMatchObject({ success: false, error: expect.stringContaining('s2') });
+      });
+    });
+
+    describe('v8_version_detect', () => {
+      it('should return error without pageController', async () => {
+        const deps = createMockDepsWithoutPage();
+        const handlers = new V8InspectorHandlers(deps);
+
+        const result = parseBody(await handlers.v8_version_detect({}));
+
+        expect(result.success).toBe(false);
+        expect(String(result.error)).toMatch(/PageController/i);
+      });
+
+      it('should detect version with pageController', async () => {
+        mockDetectV8Version.mockResolvedValueOnce({
+          major: 12,
+          minor: 4,
+          patch: 100,
+          commit: 'abc',
+        });
+        const deps = createMockDeps();
+        const handlers = new V8InspectorHandlers(deps);
+
+        const result = parseBody(await handlers.v8_version_detect({}));
+        const getPage = versionDetectorGetPages.at(-1);
+
+        expect(result).toMatchObject({
+          success: true,
+          version: { major: 12, minor: 4, patch: 100, commit: 'abc' },
+          features: { nativesSyntax: false },
+        });
+        expect(typeof getPage).toBe('function');
+        await expect(getPage?.()).resolves.toEqual({});
+        expect((deps.ctx.pageController as any).getPage).toHaveBeenCalledOnce();
+      });
+    });
+
+    describe('v8_jit_inspect', () => {
+      it('should return error when scriptId is empty', async () => {
+        const handlers = new V8InspectorHandlers(createMockDeps());
+        const result = await handlers.v8_jit_inspect({});
+        expect(result).toMatchObject({ success: false, error: 'scriptId is required' });
+      });
+
+      it('should return functions on success', async () => {
+        const functions = [{ functionName: 'fn1', optimized: true, tier: 'turbofan' }];
+        mockInspectJIT.mockResolvedValueOnce({
+          functions,
+          supportsNativesSyntax: true,
+          inspectionMode: 'native-status',
+        });
+        const deps = createMockDeps();
+        const handlers = new V8InspectorHandlers(deps);
+
+        const result = await handlers.v8_jit_inspect({ scriptId: 'jit-1' });
+        const getPage = jitInspectorGetPages.at(-1);
+
+        expect(result).toMatchObject({
+          success: true,
+          scriptId: 'jit-1',
+          inspectionMode: 'native-status',
+          supportsNativesSyntax: true,
+          functions,
+        });
+        expect(typeof getPage).toBe('function');
+        await expect(getPage?.()).resolves.toEqual({});
+        expect((deps.ctx.pageController as any).getPage).toHaveBeenCalledOnce();
+      });
+    });
+  });
+});

@@ -1,0 +1,18 @@
+verbose = "info"
+no_progress = true
+exclude = [
+  "^http://127\\.0\\.0\\.1",
+  "^http://localhost",
+  "^ws://127\\.0\\.0\\.1",
+  "^ws://localhost",
+  # star-history.com image API intermittently returns 503 (external service
+  # flakiness, not a real broken link) — exclude to keep Repo Hygiene stable.
+  "^https://api\\.star-history\\.com"
+]
+exclude_path = [
+  "docs/.vitepress/dist/assets/**",
+  "docs/.vitepress/dist/hashmap.json",
+  "docs/.vitepress/dist/vp-icons.css",
+  "node_modules/**",
+  "artifacts/**"
+]
