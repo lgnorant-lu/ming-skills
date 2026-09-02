@@ -1,0 +1,23 @@
+{
+  "package": "com.ss.android.ugc.sicily_cm",
+  "app_version": "14.3.0 (2889)",
+  "target": {
+    "type": "func",
+    "so_name": "libsscronet.so",
+    "offset": "0x2bbe54"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": { "enable": true, "level": 0 },
+    "logging": {
+      "insn_debug": false,
+      "hook_diff": false,
+      "progress_insn_step": 50000000,
+      "heartbeat_sec": 30
+    },
+    "stop_condition": { "max_traces": 1 },
+    "hook_format": { "args": "ptr,ptr,ptr,ptr", "ret": "int" }
+  },
+  "notes": "H2 request serializer (0x2BBE54): builds :method/:authority/:path pseudo-headers then iterates header list [x25+0x18..0x20] which ALREADY contains signature headers. One business-request trace = full upstream chain of sig injection."
+}

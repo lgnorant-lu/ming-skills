@@ -1,0 +1,24 @@
+{
+  "package": "com.ss.android.ugc.sicily_cm",
+  "app_version": "14.3.0 (2889)",
+  "target": {
+    "type": "func",
+    "so_name": "libmetasec_ml.so",
+    "offset": "0x126e30"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": { "enable": true, "level": 0 },
+    "filter": { "arg": 2, "type": "int", "op": "eq", "value": 50331651 },
+    "logging": {
+      "insn_debug": false,
+      "hook_diff": false,
+      "progress_insn_step": 20000000,
+      "heartbeat_sec": 30
+    },
+    "stop_condition": { "max_traces": 1 },
+    "hook_format": { "args": "_,_,hex,int,long,jstr,jobj", "ret": "jobj" }
+  },
+  "notes": "filter arg2 int decimal 50331651 = 0x3000003 (business sig, 519 hits observed). hook_diff off."
+}

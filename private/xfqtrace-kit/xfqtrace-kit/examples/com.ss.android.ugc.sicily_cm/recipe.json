@@ -1,0 +1,23 @@
+{
+  "package": "com.ss.android.ugc.sicily_cm",
+  "app_version": "14.3.0 (2889)",
+  "target": {
+    "type": "func",
+    "so_name": "libmetasec_ml.so",
+    "offset": "0x126e30"
+  },
+  "options": {
+    "inline_hook_backend": 2,
+    "out_format": "traceui",
+    "lz4_compression": { "enable": true, "level": 0 },
+    "logging": {
+      "insn_debug": false,
+      "hook_diff": true,
+      "progress_insn_step": 20000000,
+      "heartbeat_sec": 10
+    },
+    "stop_condition": { "max_traces": 1 },
+    "hook_format": { "args": "int,int,long,jstr,jobj", "ret": "jobj" }
+  },
+  "notes": "l.a(int,int,long,String,Object) native entry (entry_point_from_jni_). code=0x03000001=HTTP sig. Trigger: cold start auto (2000+ calls). Verified twice via artMethod entry_point read."
+}
