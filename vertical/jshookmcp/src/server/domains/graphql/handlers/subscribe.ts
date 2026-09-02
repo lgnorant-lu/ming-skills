@@ -186,7 +186,10 @@ export interface SubscribeInPageResult {
 }
 
 export class SubscribeHandlers {
-  constructor(private collector: CodeCollector) {}
+  private collector: CodeCollector;
+  constructor(collector: CodeCollector) {
+    this.collector = collector;
+  }
 
   async handleGraphqlSubscribe(args: Record<string, unknown>) {
     try {

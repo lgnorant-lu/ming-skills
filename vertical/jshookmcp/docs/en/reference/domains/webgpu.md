@@ -21,7 +21,7 @@ WebGPU reverse analysis domain supporting GPU adapter info, shader compile/disas
 - webgpu + browser
 - webgpu + instrumentation
 
-## Full tool list (9)
+## Full tool list (10)
 
 | Tool | Description |
 | --- | --- |
@@ -29,7 +29,8 @@ WebGPU reverse analysis domain supporting GPU adapter info, shader compile/disas
 | `webgpu_shader_compile` | Compile WGSL shader and extract metadata (entry points, bindings, attributes). Validates shader code and detects potential security issues. |
 | `webgpu_shader_disassemble` | Parse WGSL or SPIR-V shader into AST and generate human-readable disassembly. Used for reverse engineering shader logic. SPIR-V input (hex/base64) is reflected into entry points, bindings, structs, and locations without compilation. |
 | `webgpu_timing_analysis` | GPU timing analysis for side-channel detection. Measures GPU command execution time variance to detect cache-based side-channel attacks (Graz University 2025 research). |
-| `webgpu_memory_layout` | Analyze GPU memory allocations and buffer usage. Identifies memory layout patterns that may be vulnerable to side-channel attacks. |
+| `webgpu_frame_timing` | Measure per-frame CPU and GPU cost over a rAF loop using GPU timestamp queries (device.limits.timestampPeriod conversion). Answers "how long did the GPU take" and "CPU-bound vs GPU-bound". Degrades to CPU round-trip timing with precision=cpu-roundtrip when the timestamp-query feature is unavailable. |
+| `webgpu_memory_layout` | Analyze GPU memory allocations and buffer usage. Identifies memory layout patterns that may be vulnerable to side-channel attacks. With track=true, snapshots are stored on the shared state board (webgpu_memory_&lt;canvasId&gt;) and the response includes the delta vs the previous snapshot plus the growth rate in KB/s. |
 | `webgpu_capture_commands` | Capture GPU command queue submissions (render passes, compute dispatches). Used for analyzing GPU workload and detecting malicious shader behavior. |
 | `webgpu_shader_source_capture` | Capture WGSL shader sources a running app compiles via GPUDevice.createShaderModule — the only artifact revealing what a compute/render pipeline computes (e.g. physics vs. cryptominer). Pairs with webgpu_capture_commands to reconstruct what data each draw/dispatch operated on. |
 | `webgpu_error_capture` | Capture WebGPU validation/out-of-memory/internal errors the target app swallows (via device uncapturederror), plus the current device.lost state. Optionally wraps createBuffer/createTexture in error scopes to attribute failures to specific calls. Surfaces the real diagnostics behind "empty buffer" / "zero draw call" symptoms. |

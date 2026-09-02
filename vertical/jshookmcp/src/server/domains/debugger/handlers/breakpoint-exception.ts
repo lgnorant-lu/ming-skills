@@ -6,7 +6,10 @@ interface BreakpointExceptionHandlersDeps {
 }
 
 export class BreakpointExceptionHandlers {
-  constructor(private deps: BreakpointExceptionHandlersDeps) {}
+  private deps: BreakpointExceptionHandlersDeps;
+  constructor(deps: BreakpointExceptionHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handleBreakpointSetOnException(args: Record<string, unknown>) {
     const state = argString(args, 'state', 'none') as 'none' | 'uncaught' | 'all';

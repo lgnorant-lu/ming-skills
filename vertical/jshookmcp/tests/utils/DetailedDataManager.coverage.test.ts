@@ -23,12 +23,16 @@ describe('DetailedDataManager – v8 ignore branch coverage', () => {
 
   // ── serializeWithMemo ────────────────────────────────────────────────────
 
-  it('serializeWithMemo caches identical object references', () => {
-    const obj = { shared: true };
-    const { json: json1, size: size1 } = (manager as any).serializeWithMemo(obj);
-    const { json: json2, size: size2 } = (manager as any).serializeWithMemo(obj);
-    expect(json1).toBe(json2); // Same reference returns same cached result
-    expect(size1).toBe(size2);
+  it('serializeWithMemo recomputes when the object was mutated since last call', () => {
+    const obj: Record<string, unknown> = { shared: true };
+    const first = (manager as any).serializeWithMemo(obj);
+    // Mutating the object between calls must NOT reuse the stale cached size —
+    // a stale size could bypass the smart threshold and leak large data into
+    // the LLM context window.
+    obj.big = 'x'.repeat(5000);
+    const second = (manager as any).serializeWithMemo(obj);
+    expect(second.size).toBeGreaterThan(first.size);
+    expect(second.json).toContain('x'.repeat(5000));
   });
 
   it('serializeWithMemo does not cache primitives', () => {
@@ -69,29 +73,29 @@ describe('DetailedDataManager – v8 ignore branch coverage', () => {
 
   // ── getByPath ─────────────────────────────────────────────────────────────
 
-  it('getByPath throws when path leads to null', () => {
-    const id = manager.store({ a: null });
+  it('getByPath throws when path leads to null', async () => {
+    const id = await manager.store({ a: null });
     expect(() => manager.retrieve(id, 'a.toString')).toThrow('Path not found');
   });
 
-  it('getByPath throws when path leads to undefined', () => {
-    const id = manager.store({ a: undefined });
+  it('getByPath throws when path leads to undefined', async () => {
+    const id = await manager.store({ a: undefined });
     expect(() => manager.retrieve(id, 'a.b')).toThrow('Path not found');
   });
 
-  it('getByPath handles dot-separated path segments', () => {
-    const id = manager.store({ a: { b: { c: { d: 42 } } } });
+  it('getByPath handles dot-separated path segments', async () => {
+    const id = await manager.store({ a: { b: { c: { d: 42 } } } });
     expect(manager.retrieve(id, 'a.b.c.d')).toBe(42);
   });
 
-  it('getByPath handles path with numeric-looking keys on objects', () => {
-    const id = manager.store({ '0': 'zero', '1': 'one' });
+  it('getByPath handles path with numeric-looking keys on objects', async () => {
+    const id = await manager.store({ '0': 'zero', '1': 'one' });
     expect(manager.retrieve(id, '0')).toBe('zero');
     expect(manager.retrieve(id, '1')).toBe('one');
   });
 
-  it('getByPath handles empty path (returns root)', () => {
-    const id = manager.store({ value: 123 });
+  it('getByPath handles empty path (returns root)', async () => {
+    const id = await manager.store({ value: 123 });
     expect(manager.retrieve(id, '')).toEqual({ value: 123 });
   });
 
@@ -137,9 +141,9 @@ describe('DetailedDataManager – v8 ignore branch coverage', () => {
     expect(debugSpy).not.toHaveBeenCalled();
   });
 
-  it('cleanup removes only expired entries', () => {
-    const id1 = manager.store({ a: 1 }, 1000); // expires at t=1000
-    const id2 = manager.store({ b: 2 }, 2000); // expires at t=2000
+  it('cleanup removes only expired entries', async () => {
+    const id1 = await manager.store({ a: 1 }, 1000); // expires at t=1000
+    const id2 = await manager.store({ b: 2 }, 2000); // expires at t=2000
 
     vi.advanceTimersByTime(1500); // t=1500
     (manager as any).cleanup();
@@ -149,12 +153,38 @@ describe('DetailedDataManager – v8 ignore branch coverage', () => {
     expect(manager.retrieve(id2)).toEqual({ b: 2 });
   });
 
+  // ── queueRebuildMetadata coalescing ──────────────────────────────────────
+
+  it('coalesces multiple eviction-triggered metadata rebuilds in one tick', async () => {
+    const rebuildSpy = vi.spyOn(manager as any, 'rebuildMetadata').mockResolvedValue(undefined);
+
+    // No persistPath → discardPersistedEntries skips the unlink and only queues
+    // a metadata rebuild, so this exercises the coalescing path in isolation.
+    const entry = {
+      data: { a: 1 },
+      expiresAt: Date.now() + 60_000,
+      createdAt: Date.now(),
+      lastAccessedAt: Date.now(),
+      accessCount: 0,
+      size: 10,
+    };
+
+    // Three synchronous discards in the same tick must collapse into a single
+    // whole-file metadata rewrite rather than three consecutive rewrites.
+    const p1 = (manager as any).discardPersistedEntries([entry]);
+    const p2 = (manager as any).discardPersistedEntries([entry]);
+    const p3 = (manager as any).discardPersistedEntries([entry]);
+    await Promise.all([p1, p2, p3]);
+
+    expect(rebuildSpy).toHaveBeenCalledTimes(1);
+  });
+
   // ── evictLRU ─────────────────────────────────────────────────────────────
 
-  it('evictLRU removes least recently accessed entry', () => {
+  it('evictLRU removes least recently accessed entry', async () => {
     const ids: string[] = [];
     for (let i = 0; i < 100; i++) {
-      ids.push(manager.store({ ['k' + i]: i })); // explicit string key 'k0', 'k1', etc.
+      ids.push(await manager.store({ ['k' + i]: i })); // explicit string key 'k0', 'k1', etc.
       vi.advanceTimersByTime(1);
     }
 
@@ -162,7 +192,7 @@ describe('DetailedDataManager – v8 ignore branch coverage', () => {
     manager.retrieve(ids[0]!);
 
     // Add one more to trigger eviction
-    const overflow = manager.store({ overflow: true });
+    const overflow = await manager.store({ overflow: true });
 
     // ids[1] should have been evicted (it was the LRU after ids[0] was accessed)
     expect(() => manager.retrieve(ids[1]!)).toThrow();
@@ -170,13 +200,13 @@ describe('DetailedDataManager – v8 ignore branch coverage', () => {
     expect(manager.retrieve(overflow)).toEqual({ overflow: true });
   });
 
-  it('evictLRU logs eviction info', () => {
-    const infoSpy = vi.spyOn(logger, 'info');
+  it('evictLRU logs eviction at debug level (a2-12)', async () => {
+    const debugSpy = vi.spyOn(logger, 'debug');
 
     // Fill to 100 and access all to set lastAccessedAt
     const ids: string[] = [];
     for (let i = 0; i < 100; i++) {
-      ids.push(manager.store({ i }));
+      ids.push(await manager.store({ i }));
     }
 
     // Access oldest
@@ -184,15 +214,15 @@ describe('DetailedDataManager – v8 ignore branch coverage', () => {
     vi.advanceTimersByTime(1);
 
     // Trigger eviction
-    manager.store({ overflow: true });
+    await manager.store({ overflow: true });
 
-    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Evicted LRU entry'));
+    expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('Evicted LRU entry'));
   });
 
   // ── extend ───────────────────────────────────────────────────────────────
 
-  it('extend adds EXTEND_DURATION when no additionalTime provided', () => {
-    const id = manager.store({ a: 1 }, 60_000); // 1 min TTL
+  it('extend adds EXTEND_DURATION when no additionalTime provided', async () => {
+    const id = await manager.store({ a: 1 }, 60_000); // 1 min TTL
     const before = manager.getDetailedStats().find((s) => s.detailId === id)!;
     const beforeTime = new Date(before.expiresAt).getTime();
 
@@ -206,8 +236,8 @@ describe('DetailedDataManager – v8 ignore branch coverage', () => {
     expect(afterTime).toBeGreaterThan(beforeTime + 60_000);
   });
 
-  it('extend uses MAX_TTL as upper bound', () => {
-    const id = manager.store({ a: 1 }, 1000);
+  it('extend uses MAX_TTL as upper bound', async () => {
+    const id = await manager.store({ a: 1 }, 1000);
     // Try to extend by 1 year
     manager.extend(id, 365 * 24 * 60 * 60 * 1000);
     const stats = manager.getDetailedStats().find((s) => s.detailId === id)!;
@@ -220,17 +250,17 @@ describe('DetailedDataManager – v8 ignore branch coverage', () => {
     expect(() => manager.extend('nonexistent')).toThrow('not found');
   });
 
-  it('extend throws for expired detailId', () => {
-    const id = manager.store({ a: 1 }, 10);
+  it('extend throws for expired detailId', async () => {
+    const id = await manager.store({ a: 1 }, 10);
     vi.advanceTimersByTime(11);
     expect(() => manager.extend(id)).toThrow('already expired');
   });
 
   // ── getStats ─────────────────────────────────────────────────────────────
 
-  it('getStats computes average access count correctly', () => {
-    const id1 = manager.store({ a: 1 });
-    const id2 = manager.store({ b: 2 });
+  it('getStats computes average access count correctly', async () => {
+    const id1 = await manager.store({ a: 1 });
+    const id2 = await manager.store({ b: 2 });
     manager.retrieve(id1);
     manager.retrieve(id1);
     manager.retrieve(id2);
@@ -255,27 +285,27 @@ describe('DetailedDataManager – v8 ignore branch coverage', () => {
     expect(manager.getDetailedStats()).toEqual([]);
   });
 
-  it('getDetailedStats marks expired entries correctly', () => {
-    manager.store({ a: 1 }, 10);
+  it('getDetailedStats marks expired entries correctly', async () => {
+    await manager.store({ a: 1 }, 10);
     vi.advanceTimersByTime(20);
     const stats = manager.getDetailedStats();
     expect(stats[0]?.isExpired).toBe(true);
     expect(stats[0]?.remainingSeconds).toBe(0);
   });
 
-  it('getDetailedStats computes remaining seconds correctly', () => {
+  it('getDetailedStats computes remaining seconds correctly', async () => {
     // 1 min TTL
-    manager.store({ a: 1 }, 60_000);
+    await manager.store({ a: 1 }, 60_000);
     vi.advanceTimersByTime(30_000); // 30 seconds in
     const stats = manager.getDetailedStats();
     expect(stats[0]?.remainingSeconds).toBeGreaterThan(25);
     expect(stats[0]?.remainingSeconds).toBeLessThanOrEqual(30);
   });
 
-  it('getDetailedStats returns entries sorted by lastAccessedAt descending', () => {
-    const id1 = manager.store({ first: true });
+  it('getDetailedStats returns entries sorted by lastAccessedAt descending', async () => {
+    const id1 = await manager.store({ first: true });
     vi.advanceTimersByTime(1000);
-    const id2 = manager.store({ second: true });
+    const id2 = await manager.store({ second: true });
     vi.advanceTimersByTime(1000);
 
     // Access id1 to make it most recently used
@@ -288,15 +318,15 @@ describe('DetailedDataManager – v8 ignore branch coverage', () => {
 
   // ── smartHandle ──────────────────────────────────────────────────────────
 
-  it('smartHandle returns data directly when under threshold', () => {
+  it('smartHandle returns data directly when under threshold', async () => {
     const small = { value: 123 };
-    const result = manager.smartHandle(small, 1000);
+    const result = await manager.smartHandle(small, 1000);
     expect(result).toBe(small);
   });
 
-  it('smartHandle returns DetailedDataResponse when over threshold', () => {
+  it('smartHandle returns DetailedDataResponse when over threshold', async () => {
     const large = { text: 'x'.repeat(5000) };
-    const result = manager.smartHandle(large, 100) as {
+    const result = (await manager.smartHandle(large, 100)) as {
       detailId: string;
       summary: { size: number };
       hint: string;
@@ -308,38 +338,38 @@ describe('DetailedDataManager – v8 ignore branch coverage', () => {
     expect(result.expiresAt).toBeGreaterThan(Date.now());
   });
 
-  it('smartHandle handles null and undefined directly', () => {
-    expect(manager.smartHandle(null)).toBeNull();
-    expect(manager.smartHandle(undefined)).toBeUndefined();
+  it('smartHandle handles null and undefined directly', async () => {
+    expect(await manager.smartHandle(null)).toBeNull();
+    expect(await manager.smartHandle(undefined)).toBeUndefined();
   });
 
-  it('smartHandle handles arrays correctly', () => {
+  it('smartHandle handles arrays correctly', async () => {
     const arr = [1, 2, 3];
-    const under = manager.smartHandle(arr, 1000) as unknown[];
+    const under = (await manager.smartHandle(arr, 1000)) as unknown[];
     expect(under).toBe(arr);
 
     const largeArr = Array.from({ length: 1000 }, (_, i) => ({ i }));
-    const over = manager.smartHandle(largeArr, 50) as { detailId: string };
+    const over = (await manager.smartHandle(largeArr, 50)) as { detailId: string };
     expect(over.detailId).toMatch(/^detail_/);
   });
 
   // ── store / retrieve lifecycle ───────────────────────────────────────────
 
-  it('store uses customTTL when provided', () => {
-    const id = manager.store({ a: 1 }, 5000);
+  it('store uses customTTL when provided', async () => {
+    const id = await manager.store({ a: 1 }, 5000);
     const stats = manager.getDetailedStats().find((s) => s.detailId === id)!;
     expect(stats.remainingSeconds).toBeLessThanOrEqual(6);
     expect(stats.remainingSeconds).toBeGreaterThan(4);
   });
 
-  it('store logs storage info', () => {
+  it('store logs storage info', async () => {
     const debugSpy = vi.spyOn(logger, 'debug');
-    manager.store({ test: true });
+    await manager.store({ test: true });
     expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('Stored detailed data'));
   });
 
-  it('retrieve updates accessCount and lastAccessedAt', () => {
-    const id = manager.store({ a: 1 });
+  it('retrieve updates accessCount and lastAccessedAt', async () => {
+    const id = await manager.store({ a: 1 });
     vi.advanceTimersByTime(5000);
 
     const before = manager.getDetailedStats().find((s) => s.detailId === id)!;
@@ -353,8 +383,8 @@ describe('DetailedDataManager – v8 ignore branch coverage', () => {
     expect(new Date(after.lastAccessedAt).getTime()).toBeGreaterThan(lastAccessedBefore);
   });
 
-  it('retrieve auto-extends TTL when near expiration', () => {
-    const id = manager.store({ a: 1 }, 4 * 60 * 1000); // 4 min TTL
+  it('retrieve auto-extends TTL when near expiration', async () => {
+    const id = await manager.store({ a: 1 }, 4 * 60 * 1000); // 4 min TTL
     vi.advanceTimersByTime(3 * 60 * 1000); // 3 mins in — 1 min remaining (< 5 min threshold)
 
     const before = manager.getDetailedStats().find((s) => s.detailId === id)!;
@@ -371,27 +401,27 @@ describe('DetailedDataManager – v8 ignore branch coverage', () => {
     expect(() => manager.retrieve('detail_missing')).toThrow('not found or expired');
   });
 
-  it('retrieve throws for expired detailId', () => {
-    const id = manager.store({ a: 1 }, 10);
+  it('retrieve throws for expired detailId', async () => {
+    const id = await manager.store({ a: 1 }, 10);
     vi.advanceTimersByTime(11);
     expect(() => manager.retrieve(id)).toThrow('expired');
   });
 
   // ── clear ───────────────────────────────────────────────────────────────
 
-  it('clear logs clearing info', () => {
+  it('clear logs clearing info', async () => {
     const infoSpy = vi.spyOn(logger, 'info');
-    manager.store({ a: 1 });
+    await manager.store({ a: 1 });
     manager.clear();
     expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('Cleared all'));
   });
 
-  it('clear resets stats', () => {
-    manager.store({ a: 1 });
-    manager.store({ b: 2 });
+  it('clear resets stats', async () => {
+    await manager.store({ a: 1 });
+    await manager.store({ b: 2 });
     manager.clear();
     expect(manager.getStats().cacheSize).toBe(0);
-    expect(manager.getStats().totalSizeKB).toBe('0.0');
+    expect(manager.getStats().totalSizeKB).toBe(0);
   });
 
   // ── shutdown ─────────────────────────────────────────────────────────────

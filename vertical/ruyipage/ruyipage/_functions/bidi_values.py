@@ -2,6 +2,25 @@
 """BiDi 协议值序列化/反序列化工具"""
 
 
+class _JsFailure(object):
+    """表示 JS 调用本身失败，区别于 JS 合法返回 null/undefined。
+
+    求值为假，因此历史上的 ``_run_safe(...) or default`` 写法行为不变；
+    需要区分“失败”和“返回空”的调用方显式用 ``is JS_FAILED`` 判断。
+    """
+
+    __slots__ = ()
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return "<JS_FAILED>"
+
+
+JS_FAILED = _JsFailure()
+
+
 def parse_value(node):
     """将 BiDi RemoteValue 转换为 Python 原生对象
 

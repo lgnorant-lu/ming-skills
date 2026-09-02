@@ -28,6 +28,8 @@ class ExtensionManager:
             str: 扩展ID
         """
         result = bidi_ext.install(self._driver, path)
+        if result is None:
+            return ""
         ext_id = result.get("extension", "")
         self._installed[ext_id] = path
         return ext_id
@@ -39,6 +41,15 @@ class ExtensionManager:
     def install_archive(self, path):
         """安装 .xpi / 压缩包形式的扩展（新手友好别名）。"""
         return self.install(path)
+
+    def install_base64(self, value):
+        """安装以 W3C base64 extensionData 表示的扩展归档。"""
+        result = bidi_ext.install(self._driver, base64_value=value)
+        if result is None:
+            return ""
+        ext_id = result.get("extension", "")
+        self._installed[ext_id] = "<base64>"
+        return ext_id
 
     def uninstall(self, extension_id):
         """卸载扩展

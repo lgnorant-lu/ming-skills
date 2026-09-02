@@ -2,8 +2,8 @@
 /**
  * Interactive env-tuning helper for jshookmcp.
  *
- * Reads all env-tunable constants from src/constants.ts, lets users
- * pick a preset or tweak individual values, and writes a .env file.
+ * Reads all env-tunable constants from src/constants/ (18 domain files),
+ * lets users pick a preset or tweak individual values, and writes a .env file.
  *
  * Usage:
  *   node scripts/tune-env.mjs                # interactive menu
@@ -17,26 +17,53 @@ import { fileURLToPath } from 'url';
 import { createInterface } from 'readline';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
-export const CONSTANTS_PATH = path.join(ROOT, 'src/constants.ts');
+// Constants were refactored from the monolithic src/constants.ts into
+// src/constants/*.ts domain files (2026-06-16) — scan the directory.
+export const CONSTANTS_DIR = path.join(ROOT, 'src/constants');
 const ENV_PATH = path.join(ROOT, '.env');
 
-// ── Parse constants.ts ──
+// helpers.ts defines the parsers themselves; index.ts is the barrel re-export.
+const SKIP_CONSTANT_FILES = new Set(['helpers.ts', 'index.ts']);
 
-export async function parseConstants(_constantsPath = CONSTANTS_PATH) {
-  const source = await fs.readFile(CONSTANTS_PATH, 'utf-8');
+// ── Parse constants ──
+
+export async function parseConstants(constantsPath = CONSTANTS_DIR) {
+  let files;
+  try {
+    const stat = await fs.stat(constantsPath);
+    if (stat.isDirectory()) {
+      const all = await fs.readdir(constantsPath);
+      files = all
+        .filter((f) => f.endsWith('.ts') && !SKIP_CONSTANT_FILES.has(f))
+        .map((f) => path.join(constantsPath, f));
+    } else {
+      files = [constantsPath];
+    }
+  } catch {
+    files = [constantsPath];
+  }
+  const sources = await Promise.all(files.map((f) => fs.readFile(f, 'utf-8')));
   const entries = [];
-  // Match: export const NAME = type('ENV_KEY', default)
+  // Match: export const NAME = [new Set(] type('ENV_KEY', default[,...])[)]
+  // Handles multi-line declarations: line-broken `export const X =\n  str(...)`,
+  // `new Set(csv(...))` wrapping, and autoInt's derive-fn third argument.
   const re =
-    /export\s+const\s+([A-Z_][A-Z0-9_]*)\s*=\s*(int|float|bool|str|csv|list)\(\s*['"]([^'"]+)['"]\s*,\s*([^)]+)\)/g;
-  let m;
-  while ((m = re.exec(source)) !== null) {
-    const [, constName, type, envKey, rawDefault] = m;
-    entries.push({
-      const: constName,
-      type,
-      envKey,
-      default: rawDefault.trim().replace(/_/g, ''),
-    });
+    /export\s+const\s+([A-Z_][A-Z0-9_]*)\s*=\s*(?:new\s+Set\s*\(\s*)?(int|float|bool|str|csv|list|autoInt)\(\s*['"]([^'"]+)['"]\s*,\s*([^)]*)\)/g;
+  for (const source of sources) {
+    let m;
+    while ((m = re.exec(source)) !== null) {
+      const [, constName, type, envKey, rawDefault] = m;
+      // Array defaults (list/csv) keep the whole literal; scalar defaults may
+      // be followed by more arguments (autoInt derive fn) — take the first.
+      let def = rawDefault.trim().replace(/_/g, '');
+      if (!def.startsWith('[')) def = def.split(',')[0].trim();
+      entries.push({
+        const: constName,
+        type,
+        envKey,
+        default: def,
+      });
+    }
   }
   return entries;
 }
@@ -246,6 +273,7 @@ async function main() {
   rl.close();
 }
 
+// eslint-disable-next-line no-underscore-dangle
 const __filename = fileURLToPath(import.meta.url);
 if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
   main().catch((e) => {

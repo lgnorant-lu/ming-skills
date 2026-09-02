@@ -6,14 +6,17 @@
  */
 
 /** The categories of instrumentation that a session can manage. */
-export enum InstrumentationType {
-  BEFORE_LOAD_INJECT = 'before-load-inject',
-  RUNTIME_HOOK = 'runtime-hook',
-  NETWORK_INTERCEPT = 'network-intercept',
-  FUNCTION_TRACE = 'function-trace',
-  STORAGE_MUTATION = 'storage-mutation',
-  DOM_OBSERVATION = 'dom-observation',
-}
+export const InstrumentationType = {
+  BEFORE_LOAD_INJECT: 'before-load-inject',
+  RUNTIME_HOOK: 'runtime-hook',
+  NETWORK_INTERCEPT: 'network-intercept',
+  FUNCTION_TRACE: 'function-trace',
+  STORAGE_MUTATION: 'storage-mutation',
+  DOM_OBSERVATION: 'dom-observation',
+} as const;
+
+/** The categories of instrumentation that a session can manage. */
+export type InstrumentationType = (typeof InstrumentationType)[keyof typeof InstrumentationType];
 
 /** A single instrumentation operation registered within a session. */
 export interface InstrumentationOperation {

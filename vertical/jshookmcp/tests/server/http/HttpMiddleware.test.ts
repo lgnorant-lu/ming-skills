@@ -44,6 +44,7 @@ describe('HttpMiddleware', () => {
     delete process.env.MCP_AUTH_TOKEN;
     delete process.env.MCP_HOST;
     delete process.env.MCP_ALLOW_INSECURE;
+    delete process.env.MCP_MAX_BODY_BYTES;
     delete process.env.MCP_RATE_LIMIT_ENABLED;
     delete process.env.MCP_RATE_LIMIT_MAX;
     delete process.env.MCP_RATE_LIMIT_WINDOW_MS;
@@ -118,6 +119,15 @@ describe('HttpMiddleware', () => {
       expect(checkAuth(req, res)).toBe(true);
     });
 
+    it('does not treat an unrecognized insecure flag as enabled', () => {
+      process.env.MCP_HOST = '0.0.0.0';
+      process.env.MCP_ALLOW_INSECURE = 'yes';
+      const req = mockReq();
+      const res = mockRes();
+      expect(checkAuth(req, res)).toBe(false);
+      expect(res.statusCodeValue).toBe(403);
+    });
+
     it('validates correct bearer token', () => {
       process.env.MCP_AUTH_TOKEN = 'mysecret';
       const req = mockReq({
@@ -125,6 +135,20 @@ describe('HttpMiddleware', () => {
       });
       const res = mockRes();
       expect(checkAuth(req, res)).toBe(true);
+    });
+
+    it('uses an explicit runtime auth config instead of rereading env', () => {
+      process.env.MCP_AUTH_TOKEN = 'env-secret';
+      const req = mockReq();
+      const res = mockRes();
+
+      expect(
+        checkAuth(req, res, {
+          authToken: undefined,
+          host: '127.0.0.1',
+          allowInsecure: false,
+        }),
+      ).toBe(true);
     });
 
     it('rejects wrong bearer token', () => {
@@ -164,6 +188,13 @@ describe('HttpMiddleware', () => {
       expect(checkRateLimit(req, res)).toBe(true);
     });
 
+    it('honors an explicit runtime disable even when env enables rate limiting', () => {
+      process.env.MCP_RATE_LIMIT_ENABLED = 'true';
+      const req = mockReq();
+      const res = mockRes();
+      expect(checkRateLimit(req, res, false, { enabled: false })).toBe(true);
+    });
+
     it('allows requests within limit', () => {
       const req = mockReq();
       const res = mockRes();
@@ -173,6 +204,16 @@ describe('HttpMiddleware', () => {
   });
 
   describe('readBodyWithLimit', () => {
+    it('resolves the configured default limit at call time', async () => {
+      process.env.MCP_MAX_BODY_BYTES = '5';
+      const req = mockReq({ headers: { 'content-length': '6' } });
+      (req as any).on = vi.fn();
+      const res = mockRes();
+
+      await expect(readBodyWithLimit(req, res)).rejects.toThrow('body_too_large');
+      expect(res.statusCodeValue).toBe(413);
+    });
+
     it('rejects oversized Content-Length upfront', async () => {
       const req = mockReq({
         headers: { 'content-length': '999999999' },

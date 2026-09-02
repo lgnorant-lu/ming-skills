@@ -2,17 +2,19 @@ import type { DomainManifest, MCPServerContext } from '@server/domains/shared/re
 import { defineMethodRegistrations, toolLookup } from '@server/domains/shared/registry';
 import { syscallHookToolDefinitions } from '@server/domains/syscall-hook/definitions';
 import type { SyscallHookHandlers } from '@server/domains/syscall-hook/handlers';
+import { readEnvString } from '@src/config/environment';
 
 const DOMAIN = 'syscall-hook' as const;
 const DEP_KEY = 'syscallHookHandlers' as const;
 
 type Handlers = SyscallHookHandlers;
 
+const configuredPlatform = readEnvString('JSHOOK_REGISTRY_PLATFORM', '', { trim: true });
 const EFFECTIVE_PLATFORM =
-  process.env.JSHOOK_REGISTRY_PLATFORM === 'win32' ||
-  process.env.JSHOOK_REGISTRY_PLATFORM === 'linux' ||
-  process.env.JSHOOK_REGISTRY_PLATFORM === 'darwin'
-    ? process.env.JSHOOK_REGISTRY_PLATFORM
+  configuredPlatform === 'win32' ||
+  configuredPlatform === 'linux' ||
+  configuredPlatform === 'darwin'
+    ? configuredPlatform
     : process.platform;
 
 const IS_WIN32 = EFFECTIVE_PLATFORM === 'win32';

@@ -72,6 +72,18 @@ describe('skia-detect handlers', () => {
       await dumpScene(mockPageController, { includeDrawCommands: false });
       expect(mockExtractSceneTree).toHaveBeenCalledWith(mockPageController, undefined, false);
     });
+
+    it('throws a clear error when extraction is unsupported (non-Skia engine)', async () => {
+      mockExtractSceneTree.mockResolvedValueOnce({
+        layers: [],
+        drawCommands: [],
+        totalLayers: 0,
+        totalDrawCommands: 0,
+        unsupported: true,
+      });
+      const { dumpScene } = await import('@server/domains/canvas/skia/skia-detect');
+      await expect(dumpScene(mockPageController, {})).rejects.toThrow('not supported');
+    });
   });
 
   describe('correlateObjects', () => {
@@ -81,6 +93,18 @@ describe('skia-detect handlers', () => {
       await expect(correlateObjects(mockPageController, {})).rejects.toThrow(
         'No Skia scene data available',
       );
+    });
+
+    it('throws a clear error when correlation is unsupported (non-Skia engine)', async () => {
+      mockExtractSceneTree.mockResolvedValueOnce({
+        layers: [],
+        drawCommands: [],
+        totalLayers: 0,
+        totalDrawCommands: 0,
+        unsupported: true,
+      });
+      const { correlateObjects } = await import('@server/domains/canvas/skia/skia-detect');
+      await expect(correlateObjects(mockPageController, {})).rejects.toThrow('not supported');
     });
 
     it('correlates with JS objects', async () => {

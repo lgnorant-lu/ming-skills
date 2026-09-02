@@ -33,6 +33,7 @@ import {
   getTopPriorityFilesImpl,
 } from '@modules/collector/CodeCollectorFileQueryInternal';
 import type { ChromeLaunchOverrides } from '@modules/collector/CodeCollectorLaunchOptions';
+import { readEnvInteger } from '@src/config/environment';
 import {
   BrowserLifecycleManager,
   type CodeCollectorLaunchResult,
@@ -127,7 +128,7 @@ export class CodeCollector {
     this.MAX_FILES_PER_COLLECT = config.maxFilesPerCollect ?? 200;
     this.MAX_RESPONSE_SIZE = config.maxTotalContentSize ?? 512 * 1024;
     this.MAX_SINGLE_FILE_SIZE = config.maxSingleFileSize ?? 200 * 1024;
-    this.CONNECT_TIMEOUT_MS = Number(process.env.JSHOOK_CONNECT_TIMEOUT_MS) || 60000;
+    this.CONNECT_TIMEOUT_MS = readEnvInteger('JSHOOK_CONNECT_TIMEOUT_MS', 60_000, { min: 1 });
     this.viewport = config.viewport ?? { width: 1920, height: 1080 };
     this.userAgent =
       config.userAgent ??
@@ -243,9 +244,17 @@ export class CodeCollector {
       logger.warn(`Collected URLs exceeded ${this.MAX_COLLECTED_URLS}, clearing...`);
       const urls = Array.from(this.collectedUrls);
       this.collectedUrls.clear();
-      urls
-        .slice(-Math.floor(this.MAX_COLLECTED_URLS / 2))
-        .forEach((url) => this.collectedUrls.add(url));
+      const retained = new Set(urls.slice(-Math.floor(this.MAX_COLLECTED_URLS / 2)));
+      retained.forEach((url) => this.collectedUrls.add(url));
+
+      // The files cache is keyed by the same URL strings and previously grew
+      // unbounded alongside the URL set — 256 scopes × unbounded files. Prune
+      // it to the same retained set so the two views stay in lockstep (b1-05).
+      for (const fileUrl of this.collectedFilesCache.keys()) {
+        if (!retained.has(fileUrl)) {
+          this.collectedFilesCache.delete(fileUrl);
+        }
+      }
     }
   }
   private initGuard: Promise<void> | null = null;
@@ -596,12 +605,33 @@ export class CodeCollector {
     }
   }
   async collect(options: CollectCodeOptions): Promise<CollectCodeResult> {
-    // Serialize concurrent collect calls to avoid cdpSession race conditions
+    // Serialize concurrent collect calls to avoid cdpSession race conditions.
+    // Bound the wait with a timeout: a bare `await this.collectLock` loop never
+    // re-checks when the predecessor hangs, so race each wait against a timer.
+    const waitTimeoutError = new PrerequisiteError(
+      `Timed out after ${this.CONNECT_TIMEOUT_MS}ms waiting for a concurrent collect() to finish`,
+    );
+    const lockWaitDeadline = Date.now() + this.CONNECT_TIMEOUT_MS;
     while (this.collectLock) {
+      const remaining = lockWaitDeadline - Date.now();
+      if (remaining <= 0) {
+        throw waitTimeoutError;
+      }
+      let waitTimer: ReturnType<typeof setTimeout> | undefined;
       try {
-        await this.collectLock;
-      } catch {
+        await Promise.race([
+          this.collectLock,
+          new Promise<never>((_, reject) => {
+            waitTimer = setTimeout(() => reject(waitTimeoutError), remaining);
+          }),
+        ]);
+      } catch (error) {
+        if (error === waitTimeoutError) {
+          throw error;
+        }
         /* ignore predecessor failures */
+      } finally {
+        clearTimeout(waitTimer);
       }
     }
     let resolve!: (v: CollectCodeResult) => void;
@@ -616,6 +646,10 @@ export class CodeCollector {
       return result;
     } catch (e) {
       reject(e);
+      // The internal lock promise is only awaited by concurrent collect()
+      // calls — without a waiter its rejection would surface as an unhandled
+      // rejection whenever a standalone collect() fails.
+      void this.collectLock.catch(() => {});
       throw e;
     } finally {
       this.collectLock = null;

@@ -1,4 +1,4 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 
 export const webgpuTools: Tool[] = [
   {
@@ -66,6 +66,7 @@ export const webgpuTools: Tool[] = [
           type: 'number',
           description: 'Number of timing samples to collect',
           minimum: 1,
+          maximum: 10000,
         },
         detectAnomalies: {
           type: 'boolean',
@@ -77,12 +78,39 @@ export const webgpuTools: Tool[] = [
     },
   },
   {
-    name: 'webgpu_memory_layout',
+    name: 'webgpu_frame_timing',
     description:
-      'Analyze GPU memory allocations and buffer usage. Identifies memory layout patterns that may be vulnerable to side-channel attacks.',
+      'Measure per-frame CPU and GPU cost over a rAF loop using GPU timestamp queries (device.limits.timestampPeriod conversion). Answers "how long did the GPU take" and "CPU-bound vs GPU-bound". Degrades to CPU round-trip timing with precision=cpu-roundtrip when the timestamp-query feature is unavailable.',
     inputSchema: {
       type: 'object',
-      properties: {},
+      properties: {
+        frameCount: {
+          type: 'number',
+          description: 'Number of frames to measure (default 60)',
+          minimum: 1,
+          maximum: 10000,
+        },
+        includeTimestamps: {
+          type: 'boolean',
+          description: 'Include per-frame timing breakdown (default true)',
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'webgpu_memory_layout',
+    description:
+      'Analyze GPU memory allocations and buffer usage. Identifies memory layout patterns that may be vulnerable to side-channel attacks. With track=true, snapshots are stored on the shared state board (webgpu_memory_<canvasId>) and the response includes the delta vs the previous snapshot plus the growth rate in KB/s.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        track: {
+          type: 'boolean',
+          description:
+            'Store a memory snapshot and report delta/growth-rate vs the previous reading (default false)',
+        },
+      },
       additionalProperties: false,
     },
   },
@@ -97,6 +125,7 @@ export const webgpuTools: Tool[] = [
           type: 'number',
           description: 'Number of command submissions to capture',
           minimum: 1,
+          maximum: 10000,
         },
       },
       required: ['captureCount'],
@@ -114,12 +143,14 @@ export const webgpuTools: Tool[] = [
           type: 'number',
           description: 'Number of shader compilations to capture before returning',
           minimum: 1,
+          maximum: 10000,
         },
         timeoutMs: {
           type: 'number',
           description:
             'Max wait in ms (returns early once captureCount shaders are captured). Default 5000.',
           minimum: 100,
+          maximum: 120000,
         },
       },
       required: ['captureCount'],
@@ -137,12 +168,14 @@ export const webgpuTools: Tool[] = [
           type: 'number',
           description: 'Maximum number of errors to capture before returning',
           minimum: 1,
+          maximum: 10000,
         },
         timeoutMs: {
           type: 'number',
           description:
             'Max wait in ms (returns early once captureCount errors are captured). Default 5000.',
           minimum: 100,
+          maximum: 120000,
         },
         wrapAllocations: {
           type: 'boolean',
@@ -165,12 +198,14 @@ export const webgpuTools: Tool[] = [
           type: 'number',
           description: 'Number of pipeline/layout creations to capture before returning',
           minimum: 1,
+          maximum: 10000,
         },
         timeoutMs: {
           type: 'number',
           description:
             'Max wait in ms (returns early once captureCount pipelines are captured). Default 5000.',
           minimum: 100,
+          maximum: 120000,
         },
       },
       required: ['captureCount'],

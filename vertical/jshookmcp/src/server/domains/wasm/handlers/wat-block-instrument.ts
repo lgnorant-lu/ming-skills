@@ -31,6 +31,8 @@ export interface InstrumentBlockResult {
   functionsInstrumented: number;
   blocksInstrumented: number;
   functionsSkipped: number;
+  /** Why each skipped function was left uninstrumented (never silently dropped). */
+  skipReasons: string[];
 }
 
 export interface BasicBlockAnalysis {
@@ -44,7 +46,10 @@ export interface BasicBlockAnalysis {
 }
 
 const FUNC_RE = /^\s*\(func\b/;
-const FUNC_ATTR_RE = /^\(\s*(?:type|param|result|local|export)\b/;
+// `(?=\s|\))` instead of `\b`: `\b` also matches `(local.get` (`.` is a
+// non-word char), so a folded body instruction would be swallowed as a
+// `local` attribute and the func-entry trace inserted after it.
+const FUNC_ATTR_RE = /^\(\s*(?:type|param|result|local|export)(?=\s|\))/;
 
 /**
  * Skip past attributes that can appear before a function / block body.
@@ -66,6 +71,13 @@ function skipAttributes(text: string, pos: number): number {
     if (ch === '$') {
       // $identifier
       while (pos < len && !/[\s()]/.test(text.charAt(pos))) pos++;
+    } else if (ch === '(' && text.charAt(pos + 1) === ';') {
+      // (; block comment ;) — including (;@...;) annotations attached to
+      // the function. Skipping them keeps the body start after the real
+      // attributes (param/result/local/export).
+      pos += 2;
+      while (pos < len - 1 && !(text.charAt(pos) === ';' && text.charAt(pos + 1) === ')')) pos++;
+      pos += 2;
     } else if (ch === '(' && FUNC_ATTR_RE.test(text.slice(pos))) {
       // Balanced attribute sub-node
       let depth = 0;
@@ -192,9 +204,62 @@ function insertTraces(
   return { text: result, count: sorted.length };
 }
 
+/**
+ * Mask string literals and comments with numbered placeholders so numeric
+ * index-shift rewrites never touch them — a `(data ... "call 5")` payload or
+ * a `;; call 0` comment is not a function reference.
+ */
+function maskWatLiterals(text: string): { text: string; literals: string[] } {
+  const literals: string[] = [];
+  let out = '';
+  let i = 0;
+  const len = text.length;
+  while (i < len) {
+    if (text[i] === ';' && text[i + 1] === ';') {
+      // Line comment
+      const nl = text.indexOf('\n', i);
+      const end = nl < 0 ? len : nl;
+      literals.push(text.slice(i, end));
+      out += `__JSHOOK_LIT${literals.length - 1}__`;
+      i = end;
+    } else if (text[i] === '(' && text[i + 1] === ';') {
+      // Block comment (; ... ;) — supports nesting
+      let depth = 1;
+      let j = i + 2;
+      while (j < len - 1 && depth > 0) {
+        if (text[j] === '(' && text[j + 1] === ';') depth++;
+        else if (text[j] === ';' && text[j + 1] === ')') depth--;
+        j++;
+      }
+      literals.push(text.slice(i, j));
+      out += `__JSHOOK_LIT${literals.length - 1}__`;
+      i = j;
+    } else if (text[i] === '"') {
+      // String literal
+      let j = i + 1;
+      while (j < len) {
+        if (text[j] === '\\') j++;
+        else if (text[j] === '"') {
+          j++;
+          break;
+        }
+        j++;
+      }
+      literals.push(text.slice(i, j));
+      out += `__JSHOOK_LIT${literals.length - 1}__`;
+      i = j;
+    } else {
+      out += text[i];
+      i++;
+    }
+  }
+  return { text: out, literals };
+}
+
 /** Shift numeric references in the function index space after prepending an import. */
 function shiftNumericFunctionIndices(watNode: string): string {
-  let shifted = watNode.replace(
+  const masked = maskWatLiterals(watNode);
+  let shifted = masked.text.replace(
     /(\(elem\b[\s\S]*?\bfunc\s+)(\d+(?:\s+\d+)*)(?=\s*\))/g,
     (_match, prefix, indices) => {
       const rewritten = String(indices).replace(/\d+/g, (index) => String(Number(index) + 1));
@@ -209,7 +274,7 @@ function shiftNumericFunctionIndices(watNode: string): string {
     /(\((?:func|start)\s+)(\d+)\b/g,
     (_match, prefix, index) => `${prefix}${Number(index) + 1}`,
   );
-  return shifted;
+  return shifted.replace(/__JSHOOK_LIT(\d+)__/g, (_match, n) => masked.literals[Number(n)] ?? '');
 }
 
 /**
@@ -231,6 +296,10 @@ export function instrumentWatBlocks(
   const field = options?.importField ?? 'trace_block';
   const includeFuncEntry = options?.includeFuncEntry ?? true;
 
+  if (!/^\s*\(module\b/.test(wat)) {
+    throw new Error('Invalid WAT input: missing (module wrapper — cannot reassemble');
+  }
+
   const nodes = splitTopLevelNodes(wat);
   const importNode = `(import "${mod}" "${field}" (func ${traceFn} (param i32)))`;
 
@@ -238,6 +307,7 @@ export function instrumentWatBlocks(
   let totalBlocks = 0;
   let functionsInstrumented = 0;
   let functionsSkipped = 0;
+  const skipReasons: string[] = [];
   const outNodes: string[] = [importNode];
 
   for (const node of nodes) {
@@ -268,9 +338,11 @@ export function instrumentWatBlocks(
       totalBlocks += blockOffsets.length;
       outNodes.push(text);
       functionsInstrumented++;
-    } catch {
+    } catch (error) {
+      // Never silently drop a function — record why it was skipped.
       outNodes.push(shiftedNode);
       functionsSkipped++;
+      skipReasons.push(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -281,7 +353,13 @@ export function instrumentWatBlocks(
   const suffix = wat.slice(closeParen);
 
   const instrumented = `${prefix}\n  ${outNodes.join('\n')}\n${suffix}`;
-  return { instrumented, functionsInstrumented, blocksInstrumented: totalBlocks, functionsSkipped };
+  return {
+    instrumented,
+    functionsInstrumented,
+    blocksInstrumented: totalBlocks,
+    functionsSkipped,
+    skipReasons,
+  };
 }
 
 /**

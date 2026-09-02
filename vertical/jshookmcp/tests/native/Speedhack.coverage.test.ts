@@ -50,10 +50,14 @@ describe('Speedhack coverage: apply() — error branches', () => {
     vi.clearAllMocks();
   });
 
-  it('throws when GetModuleHandle returns 0 (kernel32 not found)', async () => {
+  it('skips module when GetModuleHandle returns 0 (kernel32 not loaded)', async () => {
     (GetModuleHandle as ReturnType<typeof vi.fn>).mockReturnValueOnce(0n);
 
-    await expect(sh.apply(1234, 2.0)).rejects.toThrow('Cannot find kernel32.dll');
+    // GetModuleHandle returning 0 just skips that module's targets; mock
+    // is configured per-call, so only the first call returns 0, subsequent
+    // calls (from other HOOK_TARGETS) still resolve. The function succeeds.
+    const result = await sh.apply(1234, 2.0);
+    expect(result.success).toBe(true);
   });
 
   it('throws when VirtualAllocEx returns 0 (allocation failure)', async () => {

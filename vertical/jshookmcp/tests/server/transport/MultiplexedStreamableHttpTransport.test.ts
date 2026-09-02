@@ -1,14 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { JSONRPCRequest, JSONRPCResponse } from '@modelcontextprotocol/sdk/types.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { JSONRPCRequest, JSONRPCResultResponse } from '@modelcontextprotocol/server';
 
 const mocks = vi.hoisted(() => {
   const innerTransports: any[] = [];
+  const innerTransportOptions: any[] = [];
   // When true, the next inner transport construction throws — simulates an
   // inner-transport setup failure after the admission hook claimed a lease.
   let failNextConstruct = false;
 
   return {
     innerTransports,
+    innerTransportOptions,
     get failNextConstruct() {
       return failNextConstruct;
     },
@@ -18,8 +20,9 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
-  StreamableHTTPServerTransport: class MockStreamableHTTPServerTransport {
+vi.mock('@modelcontextprotocol/node', () => ({
+  NodeStreamableHTTPServerTransport: class MockStreamableHTTPServerTransport {
+    private readonly options: { sessionIdGenerator: () => string; enableJsonResponse?: boolean };
     public sessionId?: string;
     // eslint-disable-next-line unicorn/prefer-add-event-listener
     public onmessage?: (message: any, extra?: any) => void;
@@ -40,11 +43,13 @@ vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
       }
     });
 
-    constructor(private readonly options: { sessionIdGenerator: () => string }) {
+    constructor(options: { sessionIdGenerator: () => string; enableJsonResponse?: boolean }) {
+      this.options = options;
       if (mocks.failNextConstruct) {
         throw new Error('inner transport construction failed');
       }
       mocks.innerTransports.push(this);
+      mocks.innerTransportOptions.push(options);
     }
 
     private sessionIdGenerator(): string {
@@ -54,6 +59,13 @@ vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
 }));
 
 import { MultiplexedStreamableHttpTransport } from '@server/transport/MultiplexedStreamableHttpTransport';
+
+vi.mock('@src/constants', () => ({
+  HTTP_CAPACITY_RETRY_AFTER_MS: 1_000,
+  MCP_HTTP_JSON_RESPONSE: false,
+}));
+
+const ORIGINAL_ENV = { ...process.env };
 
 function createReq(method: string, sessionId?: string) {
   return {
@@ -71,7 +83,15 @@ function createRes() {
 
 describe('MultiplexedStreamableHttpTransport', () => {
   beforeEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+    delete process.env.MCP_HTTP_MAX_INFLIGHT;
+    delete process.env.MCP_HTTP_MAX_SSE_INFLIGHT;
     mocks.innerTransports.length = 0;
+    mocks.innerTransportOptions.length = 0;
+  });
+
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
   });
 
   it('rejects repeated start calls', async () => {
@@ -271,6 +291,204 @@ describe('MultiplexedStreamableHttpTransport', () => {
     await active;
   });
 
+  it('rejects a session request once its in-flight capacity is reached', async () => {
+    const transport = new MultiplexedStreamableHttpTransport({ maxInFlight: 2 });
+    await transport.start();
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    const session = mocks.innerTransports[0];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    session.handleRequest.mockImplementation(async () => await gate);
+
+    const first = transport.handleRequest(createReq('POST', session.sessionId), createRes(), {});
+    const second = transport.handleRequest(createReq('POST', session.sessionId), createRes(), {});
+    await vi.waitFor(() => expect(transport.getStats().inFlight).toBe(2));
+
+    const overloaded = createRes();
+    // The in-flight cap rejects before any await; without the cap the promise
+    // would hang on the gate, so race it to fail fast on a regression.
+    const third = transport.handleRequest(createReq('POST', session.sessionId), overloaded, {});
+    const outcome = await Promise.race([
+      third.then(() => 'resolved'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 500)),
+    ]);
+
+    expect(outcome).toBe('resolved');
+    expect(overloaded.writeHead).toHaveBeenCalledWith(503, {
+      'Content-Type': 'application/json',
+      'Retry-After': '1',
+    });
+    expect(JSON.parse(overloaded.end.mock.calls[0]![0])).toMatchObject({
+      error: {
+        code: -32001,
+        data: {
+          code: 'MCP_SESSION_INFLIGHT_CAPACITY',
+          inFlight: 2,
+          inFlightLimit: 2,
+        },
+      },
+    });
+
+    release();
+    await Promise.allSettled([first, second, third]);
+  });
+
+  it('resolves the default in-flight cap from env when each transport is constructed', async () => {
+    process.env.MCP_HTTP_MAX_INFLIGHT = '1';
+    const transport = new MultiplexedStreamableHttpTransport();
+    await transport.start();
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    const session = mocks.innerTransports[0];
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    session.handleRequest.mockImplementation(async () => await gate);
+
+    const active = transport.handleRequest(createReq('POST', session.sessionId), createRes(), {});
+    await vi.waitFor(() => expect(transport.getStats().inFlight).toBe(1));
+
+    const overloaded = createRes();
+    await transport.handleRequest(createReq('POST', session.sessionId), overloaded, {});
+    expect(JSON.parse(overloaded.end.mock.calls[0]![0])).toMatchObject({
+      error: { data: { code: 'MCP_SESSION_INFLIGHT_CAPACITY', inFlightLimit: 1 } },
+    });
+
+    release();
+    await active;
+  });
+
+  it('does not count SSE GET streams against POST in-flight capacity', async () => {
+    const transport = new MultiplexedStreamableHttpTransport({ maxInFlight: 1 });
+    await transport.start();
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    const session = mocks.innerTransports[0];
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    session.handleRequest.mockImplementationOnce(async () => await gate);
+
+    const sse = transport.handleRequest(createReq('GET', session.sessionId), createRes(), {});
+    await vi.waitFor(() => expect(session.handleRequest).toHaveBeenCalledTimes(2));
+
+    // A hanging SSE GET must not consume POST in-flight capacity.
+    expect(transport.getStats().inFlight).toBe(0);
+
+    // A POST is still admitted while an SSE GET is open.
+    const postRes = createRes();
+    await transport.handleRequest(createReq('POST', session.sessionId), postRes, {});
+    expect(postRes.writeHead).not.toHaveBeenCalledWith(503, expect.any(Object));
+
+    release();
+    await sse;
+  });
+
+  it('bounds concurrent SSE GET streams with a separate small cap', async () => {
+    const transport = new MultiplexedStreamableHttpTransport({ maxSseInFlight: 2 });
+    await transport.start();
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    const session = mocks.innerTransports[0];
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    session.handleRequest.mockImplementation(async () => await gate);
+
+    const first = transport.handleRequest(createReq('GET', session.sessionId), createRes(), {});
+    const second = transport.handleRequest(createReq('GET', session.sessionId), createRes(), {});
+    await vi.waitFor(() => expect(session.handleRequest).toHaveBeenCalledTimes(3));
+
+    const overloaded = createRes();
+    const third = transport.handleRequest(createReq('GET', session.sessionId), overloaded, {});
+    const outcome = await Promise.race([
+      third.then(() => 'resolved'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 500)),
+    ]);
+
+    expect(outcome).toBe('resolved');
+    expect(overloaded.writeHead).toHaveBeenCalledWith(503, {
+      'Content-Type': 'application/json',
+      'Retry-After': '1',
+    });
+
+    release();
+    await Promise.allSettled([first, second, third]);
+  });
+
+  it('does not evict a session while an SSE GET stream is open', async () => {
+    let now = 0;
+    const onSessionClosed = vi.fn();
+    const transport = new MultiplexedStreamableHttpTransport({
+      maxSessions: 1,
+      sessionIdleTtlMs: 100,
+      now: () => now,
+      onSessionClosed,
+    });
+    await transport.start();
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    const session = mocks.innerTransports[0];
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    session.handleRequest.mockImplementationOnce(async () => await gate);
+
+    const sse = transport.handleRequest(createReq('GET', session.sessionId), createRes(), {});
+    await vi.waitFor(() => expect(session.handleRequest).toHaveBeenCalledTimes(2));
+
+    now = 200;
+    // With the SSE GET open, the session is not idle even though inFlight is 0.
+    const probe = createRes();
+    await transport.handleRequest(createReq('POST', session.sessionId), probe, {});
+    expect(probe.writeHead).not.toHaveBeenCalledWith(404, expect.any(Object));
+    expect(session.close).not.toHaveBeenCalled();
+
+    release();
+    await sse;
+  });
+
+  it('does not evict an SSE-open session through the admission sweeper', async () => {
+    let now = 0;
+    const onSessionClosed = vi.fn();
+    const transport = new MultiplexedStreamableHttpTransport({
+      maxSessions: 1,
+      sessionIdleTtlMs: 100,
+      now: () => now,
+      onSessionClosed,
+    });
+    await transport.start();
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    const session = mocks.innerTransports[0];
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    session.handleRequest.mockImplementationOnce(async () => await gate);
+
+    const sse = transport.handleRequest(createReq('GET', session.sessionId), createRes(), {});
+    await vi.waitFor(() => expect(session.handleRequest).toHaveBeenCalledTimes(2));
+
+    // Advance past the idle TTL, then force the admission-pressure sweeper
+    // (maxSessions:1) by registering a fresh session. The open SSE GET must
+    // keep the first session alive even though its POST inFlight is 0.
+    now = 200;
+    const overloaded = createRes();
+    await transport.handleRequest(createReq('POST'), overloaded, {});
+    expect(overloaded.writeHead).toHaveBeenCalledWith(503, expect.any(Object));
+    expect(session.close).not.toHaveBeenCalled();
+
+    release();
+    await sse;
+  });
+
   it('routes same client request ids from different sessions back to the correct inner transport', async () => {
     const transport = new MultiplexedStreamableHttpTransport();
     await transport.start();
@@ -306,12 +524,12 @@ describe('MultiplexedStreamableHttpTransport', () => {
     expect(seenMessages[0]!.params._meta.sessionId).toBe(sessionA.sessionId);
     expect(seenMessages[1]!.params._meta.sessionId).toBe(sessionB.sessionId);
 
-    const responseA: JSONRPCResponse = {
+    const responseA: JSONRPCResultResponse = {
       jsonrpc: '2.0',
       id: seenMessages[0]!.id,
       result: { ok: true },
     };
-    const responseB: JSONRPCResponse = {
+    const responseB: JSONRPCResultResponse = {
       jsonrpc: '2.0',
       id: seenMessages[1]!.id,
       result: { ok: true },
@@ -458,6 +676,93 @@ describe('MultiplexedStreamableHttpTransport', () => {
     ).rejects.toThrow('Ambiguous HTTP session for outbound request/response routing.');
   });
 
+  it('skips idle sessions when broadcasting notifications', async () => {
+    let now = 0;
+    const transport = new MultiplexedStreamableHttpTransport({ now: () => now });
+    await transport.start();
+
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    const [sessionA, sessionB] = mocks.innerTransports;
+
+    // Touch only session A after the default 5-minute broadcast idle TTL, leaving
+    // session B idle past the threshold.
+    now = 400_000;
+    await transport.handleRequest(createReq('POST', sessionA.sessionId), createRes(), {});
+
+    await transport.send({
+      jsonrpc: '2.0',
+      method: 'notifications/message',
+    });
+
+    expect(sessionA.send).toHaveBeenCalledWith(
+      {
+        jsonrpc: '2.0',
+        method: 'notifications/message',
+      },
+      undefined,
+    );
+    expect(sessionB.send).not.toHaveBeenCalled();
+    // Idle sessions are skipped, not evicted.
+    expect(transport.getStats().sessions).toBe(2);
+  });
+
+  it('keeps a long-lived open SSE session eligible for broadcasts', async () => {
+    let now = 0;
+    const transport = new MultiplexedStreamableHttpTransport({ now: () => now });
+    await transport.start();
+
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    const session = mocks.innerTransports[0]!;
+    let closeSse!: () => void;
+    const sseClosed = new Promise<void>((resolve) => {
+      closeSse = resolve;
+    });
+    session.handleRequest.mockImplementationOnce(async () => await sseClosed);
+
+    const openSse = transport.handleRequest(createReq('GET', session.sessionId), createRes(), {});
+    await vi.waitFor(() => expect(session.handleRequest).toHaveBeenCalledTimes(2));
+
+    now = 400_000;
+    await transport.send({
+      jsonrpc: '2.0',
+      method: 'notifications/message',
+    });
+
+    expect(session.send).toHaveBeenCalledWith(
+      {
+        jsonrpc: '2.0',
+        method: 'notifications/message',
+      },
+      undefined,
+    );
+
+    closeSse();
+    await openSse;
+  });
+
+  it('broadcasts to idle sessions when broadcastIdleTtlMs is Infinity', async () => {
+    let now = 0;
+    const transport = new MultiplexedStreamableHttpTransport({
+      now: () => now,
+      broadcastIdleTtlMs: Number.POSITIVE_INFINITY,
+    });
+    await transport.start();
+
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+    const [sessionA, sessionB] = mocks.innerTransports;
+
+    now = 10_000_000;
+    await transport.send({
+      jsonrpc: '2.0',
+      method: 'notifications/message',
+    });
+
+    expect(sessionA.send).toHaveBeenCalled();
+    expect(sessionB.send).toHaveBeenCalled();
+  });
+
   it('releases the admission claim when inner transport construction fails', async () => {
     const onSessionClosed = vi.fn();
     const onSessionOpened = vi.fn(async () => undefined);
@@ -517,5 +822,29 @@ describe('MultiplexedStreamableHttpTransport', () => {
     expect(onSessionClosed).toHaveBeenCalledWith(session.sessionId);
     await transport.close();
     expect(onclose).toHaveBeenCalledOnce();
+  });
+
+  it('constructs inner transports with enableJsonResponse disabled by default', async () => {
+    const transport = new MultiplexedStreamableHttpTransport();
+    await transport.start();
+
+    await transport.handleRequest(createReq('POST'), createRes(), {});
+
+    expect(mocks.innerTransportOptions[0]).toMatchObject({ enableJsonResponse: false });
+  });
+
+  it('enables JSON responses on inner transports when MCP_HTTP_JSON_RESPONSE is set', async () => {
+    const constantsMod = await import('@src/constants');
+    (constantsMod as { MCP_HTTP_JSON_RESPONSE: boolean }).MCP_HTTP_JSON_RESPONSE = true;
+    try {
+      const transport = new MultiplexedStreamableHttpTransport();
+      await transport.start();
+
+      await transport.handleRequest(createReq('POST'), createRes(), {});
+
+      expect(mocks.innerTransportOptions[0]).toMatchObject({ enableJsonResponse: true });
+    } finally {
+      (constantsMod as { MCP_HTTP_JSON_RESPONSE: boolean }).MCP_HTTP_JSON_RESPONSE = false;
+    }
   });
 });

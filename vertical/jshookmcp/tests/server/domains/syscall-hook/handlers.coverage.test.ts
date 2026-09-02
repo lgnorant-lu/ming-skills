@@ -206,7 +206,8 @@ describe('SyscallHookHandlers — coverage expansion', () => {
       const result = await handlers.handleSyscallStartMonitor({ backend: 'dtrace' });
       expect(result).toMatchObject({
         ok: false,
-        error: 'Unknown syscall-hook error',
+        // String throws are surfaced as-is so the caller sees the real error
+        error: 'string error',
         requestedBackend: 'dtrace',
       });
     });

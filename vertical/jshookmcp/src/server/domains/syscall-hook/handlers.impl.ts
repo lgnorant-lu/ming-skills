@@ -76,6 +76,30 @@ const SYSCALL_NAME_RE = /^[a-z][a-z0-9_]*$/;
  *  cannot blow up the capture_events response. */
 const SUMMARY_TOP_N = 20;
 
+/** Default syscall pool for simulated ebpf traces (pure file/memory I/O, no side effects). */
+const SIMULATED_TRACE_SYSCALLS = [
+  'read',
+  'write',
+  'openat',
+  'close',
+  'fstat',
+  'mmap',
+  'mprotect',
+  'munmap',
+  'brk',
+  'ioctl',
+] as const;
+
+/** Default bpftrace target pool — the base pool plus network/process syscalls. */
+const DEFAULT_EBPF_TRACE_SYSCALLS = [
+  ...SIMULATED_TRACE_SYSCALLS,
+  'connect',
+  'sendto',
+  'recvfrom',
+  'clone',
+  'execve',
+] as const;
+
 /** Known ETW provider names (lowercased) for start_monitor validation. */
 const KNOWN_ETW_PROVIDER_NAMES = new Set(Object.keys(ETW_PROVIDERS));
 
@@ -294,17 +318,31 @@ function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
   }
+  if (typeof error === 'string') {
+    return error;
+  }
   return 'Unknown syscall-hook error';
 }
 
 export class SyscallHookHandlers {
+  private monitor?: SyscallMonitor;
+  private mapper?: SyscallToJSMapper;
+  private eventBus?: EventBus<ServerEventMap>;
+  private directNt: DirectNtApiHandlers;
+  private ctx?: MCPServerContext;
   constructor(
-    private monitor?: SyscallMonitor,
-    private mapper?: SyscallToJSMapper,
-    private eventBus?: EventBus<ServerEventMap>,
-    private directNt = new DirectNtApiHandlers(),
-    private ctx?: MCPServerContext,
-  ) {}
+    monitor?: SyscallMonitor,
+    mapper?: SyscallToJSMapper,
+    eventBus?: EventBus<ServerEventMap>,
+    directNt = new DirectNtApiHandlers(),
+    ctx?: MCPServerContext,
+  ) {
+    this.monitor = monitor;
+    this.mapper = mapper;
+    this.eventBus = eventBus;
+    this.directNt = directNt;
+    this.ctx = ctx;
+  }
 
   async handleSyscallStartMonitorTool(args: Record<string, unknown>): Promise<ToolResponse> {
     return handleSafe(async () => await this.handleSyscallStartMonitor(args));
@@ -702,13 +740,15 @@ export class SyscallHookHandlers {
     }
     const pid = rawPid ?? 0;
 
+    // durationSec must be an integer: bpftrace `interval:s:<n>` rejects floats.
     if (
+      !Number.isInteger(durationSec) ||
       durationSec < SYSCALL_TRACE_DURATION_MIN_SEC ||
       durationSec > SYSCALL_TRACE_DURATION_MAX_SEC
     ) {
       return {
         ok: false,
-        error: `durationSec must be between ${SYSCALL_TRACE_DURATION_MIN_SEC} and ${SYSCALL_TRACE_DURATION_MAX_SEC}`,
+        error: `durationSec must be an integer between ${SYSCALL_TRACE_DURATION_MIN_SEC} and ${SYSCALL_TRACE_DURATION_MAX_SEC}`,
       };
     }
 
@@ -725,20 +765,7 @@ export class SyscallHookHandlers {
 
     if (simulate) {
       const simulatedEvents: SyscallEvent[] = [];
-      const syscallPool = syscalls?.length
-        ? syscalls
-        : [
-            'read',
-            'write',
-            'openat',
-            'close',
-            'fstat',
-            'mmap',
-            'mprotect',
-            'munmap',
-            'brk',
-            'ioctl',
-          ];
+      const syscallPool = syscalls?.length ? syscalls : SIMULATED_TRACE_SYSCALLS;
       const simulatedTimestampStepMs = durationSec * 50;
       let cumulativeTime = 0;
       for (let i = 0; i < 20; i++) {
@@ -772,25 +799,7 @@ export class SyscallHookHandlers {
     }
 
     // Generate a real bpftrace script for the requested syscalls
-    const targetSyscalls = syscalls?.length
-      ? syscalls
-      : [
-          'read',
-          'write',
-          'openat',
-          'close',
-          'fstat',
-          'mmap',
-          'mprotect',
-          'munmap',
-          'brk',
-          'ioctl',
-          'connect',
-          'sendto',
-          'recvfrom',
-          'clone',
-          'execve',
-        ];
+    const targetSyscalls = syscalls?.length ? syscalls : DEFAULT_EBPF_TRACE_SYSCALLS;
     const pidFilter = pid > 0 ? `/pid == ${pid}/` : '';
     const tracepoints = targetSyscalls
       .map((sc) => `tracepoint:syscalls:sys_enter_${sc}`)

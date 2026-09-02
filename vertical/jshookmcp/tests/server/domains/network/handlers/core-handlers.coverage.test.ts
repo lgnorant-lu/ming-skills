@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { CoreHandlers } from '@server/domains/network/handlers/core-handlers';
+import { ToolError } from '@errors/ToolError';
 import * as testUrls from '@tests/shared/test-urls';
 import { TEST_URLS, withPath } from '@tests/shared/test-urls';
 
@@ -431,6 +432,33 @@ describe('CoreHandlers', () => {
       deps.consoleMonitor.getResponseBody.mockRejectedValue(new Error('fail'));
       const r = await handlers.handleNetworkGetResponseBody({ requestId: 'r1' });
       expect(parseBody(r).success).toBe(false);
+    });
+
+    it('reports skip reason without retrying when the body was skipped (content-length over cap)', async () => {
+      deps.consoleMonitor.getResponseBody.mockRejectedValue(
+        new ToolError(
+          'NOT_FOUND',
+          'Response body skipped for r1: content-length exceeds the single-body cap',
+          {
+            details: {
+              skipped: true,
+              reason: 'content-length over single-body cap',
+              requestId: 'r1',
+            },
+          },
+        ),
+      );
+      const r = await handlers.handleNetworkGetResponseBody({
+        requestId: 'r1',
+        retries: 3,
+        retryIntervalMs: 1,
+      });
+      const body = parseBody(r);
+      expect(body.success).toBe(false);
+      expect(body.skipped).toBe(true);
+      expect(body.reason).toBe('content-length over single-body cap');
+      expect(body.attempts).toBe(1);
+      expect(deps.consoleMonitor.getResponseBody).toHaveBeenCalledTimes(1);
     });
   });
 

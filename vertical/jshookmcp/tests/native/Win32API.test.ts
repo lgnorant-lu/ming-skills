@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  isKoffiAvailable,
+  isKoffiBindingUsable,
   isWindows,
   OpenProcess,
   CloseHandle,
@@ -100,10 +100,10 @@ describe('Win32API', () => {
     expect(isWindows()).toBe(true);
   });
 
-  it('checks isKoffiAvailable', () => {
-    expect(isKoffiAvailable()).toBe(true);
+  it('checks isKoffiBindingUsable', () => {
+    expect(isKoffiBindingUsable()).toBe(true);
     // Cached return
-    expect(isKoffiAvailable()).toBe(true);
+    expect(isKoffiBindingUsable()).toBe(true);
   });
 
   it('handles basic OpenProcess and CloseHandle', () => {

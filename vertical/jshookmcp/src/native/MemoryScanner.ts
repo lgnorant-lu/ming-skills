@@ -24,7 +24,12 @@ import {
 import type { NativeMemoryManager } from './NativeMemoryManager.impl';
 import { nativeMemoryManager } from './NativeMemoryManager.impl';
 import { scanSessionManager } from './MemoryScanSession';
-import { compareScanValues, getValueSize, getDefaultAlignment } from './ScanComparators';
+import {
+  compareScanValues,
+  getValueSize,
+  getDefaultAlignment,
+  readTypedValue,
+} from './ScanComparators';
 import { parsePattern } from './NativeMemoryManager.utils';
 import type { ScanOptions, ScanCompareMode, ScanValueType } from './NativeMemoryManager.types';
 import { createPlatformProvider } from './platform/factory.js';
@@ -32,6 +37,19 @@ import type { PlatformMemoryAPI } from './platform/PlatformMemoryAPI.js';
 import type { ProcessHandle } from './platform/types.js';
 import { formatAddress, parseAddress } from './formatAddress';
 import { ToolError } from '@errors/ToolError';
+
+/**
+ * Number of chunks processed between event-loop yields inside scan loops.
+ * The FFI read is already async (awaited), but the per-chunk `Buffer.indexOf`
+ * scan is CPU-bound; yielding every N chunks keeps long first-scans from
+ * starving concurrent requests (b3-09).
+ */
+const SCAN_YIELD_CHUNK_INTERVAL = 8;
+
+/** Yield to the event loop (macrotask) without a fixed delay. */
+async function yieldToEventLoop(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
 
 export interface ScanResult {
   sessionId: string;
@@ -41,6 +59,8 @@ export interface ScanResult {
   totalMatches: number;
   truncated: boolean;
   elapsed: string;
+  /** Per-address deltas for changed_by_variable mode (address hex -> delta). */
+  deltas?: Record<string, number>;
 }
 
 export class MemoryScanner {
@@ -93,6 +113,7 @@ export class MemoryScanner {
       const regions = this.getFilteredRegions(handle, options);
       const totalRegions = regions.length;
       let regionsProcessed = 0;
+      let chunksProcessed = 0;
 
       for (const region of regions) {
         if (options.onProgress) options.onProgress(regionsProcessed, totalRegions);
@@ -114,7 +135,7 @@ export class MemoryScanner {
 
           let chunk: Buffer;
           try {
-            chunk = this.provider.readMemory(handle, chunkAddr, readSize).data;
+            chunk = (await this.provider.readMemory(handle, chunkAddr, readSize)).data;
           } catch {
             break; // Skip unreadable chunks
           }
@@ -147,6 +168,11 @@ export class MemoryScanner {
               }
             }
           }
+
+          chunksProcessed++;
+          if (chunksProcessed % SCAN_YIELD_CHUNK_INTERVAL === 0) {
+            await yieldToEventLoop();
+          }
         }
       }
     } finally {
@@ -176,6 +202,8 @@ export class MemoryScanner {
     mode: ScanCompareMode,
     value?: string,
     value2?: string,
+    delta?: number,
+    tolerance?: number,
   ): Promise<ScanResult> {
     const start = performance.now();
     const session = scanSessionManager.getSession(sessionId);
@@ -205,22 +233,45 @@ export class MemoryScanner {
 
     const newAddresses: bigint[] = [];
     const newValues = new Map<bigint, Buffer>();
+    const deltasByAddress = new Map<bigint, number>();
 
     const handle = this.provider.openProcess(pid, false);
     try {
       for (const addr of prevAddresses) {
         let currentBuf: Buffer;
         try {
-          currentBuf = this.provider.readMemory(handle, addr, valueSize).data;
+          currentBuf = (await this.provider.readMemory(handle, addr, valueSize)).data;
         } catch {
           continue; // Address no longer readable
         }
 
         const prevBuf = previousValues.get(addr) ?? null;
 
-        if (compareScanValues(currentBuf, prevBuf, targetBuf, target2Buf, mode, valueType)) {
+        if (
+          compareScanValues(
+            currentBuf,
+            prevBuf,
+            targetBuf,
+            target2Buf,
+            mode,
+            valueType,
+            delta,
+            tolerance,
+          )
+        ) {
           newAddresses.push(addr);
           newValues.set(addr, Buffer.from(currentBuf));
+
+          // For changed_by_variable, compute per-address delta
+          if (mode === 'changed_by_variable' && prevBuf) {
+            const curVal = readTypedValue(currentBuf, valueType);
+            const prevVal = readTypedValue(prevBuf, valueType);
+            const diff =
+              typeof curVal === 'bigint' && typeof prevVal === 'bigint'
+                ? Number(curVal - prevVal)
+                : Number(curVal) - Number(prevVal);
+            deltasByAddress.set(addr, diff);
+          }
         }
       }
     } finally {
@@ -231,7 +282,7 @@ export class MemoryScanner {
     const elapsed = `${(performance.now() - start).toFixed(1)}ms`;
     const displayAddresses = newAddresses.slice(0, SCAN_DISPLAY_RESULTS_LIMIT).map(formatAddress);
 
-    return {
+    const result: ScanResult = {
       sessionId,
       matchCount: newAddresses.length,
       scanNumber: session.scanCount,
@@ -240,6 +291,16 @@ export class MemoryScanner {
       truncated: newAddresses.length > SCAN_DISPLAY_RESULTS_LIMIT,
       elapsed,
     };
+
+    if (mode === 'changed_by_variable' && deltasByAddress.size > 0) {
+      const deltas: Record<string, number> = {};
+      for (const [addr, d] of deltasByAddress) {
+        deltas[formatAddress(addr)] = d;
+      }
+      result.deltas = deltas;
+    }
+
+    return result;
   }
 
   /**
@@ -269,6 +330,7 @@ export class MemoryScanner {
       const regions = this.getFilteredRegions(handle, options);
       const totalRegions = regions.length;
       let regionsProcessed = 0;
+      let chunksProcessed = 0;
 
       for (const region of regions) {
         if (options.onProgress) options.onProgress(regionsProcessed, totalRegions);
@@ -289,7 +351,7 @@ export class MemoryScanner {
 
           let chunk: Buffer;
           try {
-            chunk = this.provider.readMemory(handle, chunkAddr, readSize).data;
+            chunk = (await this.provider.readMemory(handle, chunkAddr, readSize)).data;
           } catch {
             break;
           }
@@ -302,6 +364,11 @@ export class MemoryScanner {
             values.set(addr, Buffer.from(chunk.subarray(i, i + valueSize)));
 
             if (addresses.length >= maxAddresses) break;
+          }
+
+          chunksProcessed++;
+          if (chunksProcessed % SCAN_YIELD_CHUNK_INTERVAL === 0) {
+            await yieldToEventLoop();
           }
         }
       }
@@ -333,6 +400,7 @@ export class MemoryScanner {
       maxDepth?: number;
       maxResults?: number;
       moduleOnly?: boolean;
+      regionFilter?: import('./NativeMemoryManager.types').RegionFilter;
     } = {},
   ): Promise<{
     sessionId: string;
@@ -347,7 +415,7 @@ export class MemoryScanner {
     const scanOptions: ScanOptions = {
       valueType: 'pointer',
       alignment: 8,
-      regionFilter: { moduleOnly: options.moduleOnly },
+      regionFilter: options.regionFilter ?? { moduleOnly: options.moduleOnly },
     };
     const sessionId = scanSessionManager.createSession(pid, scanOptions);
     const pointers: Array<{ address: string; value: string; offsetFromTarget: number }> = [];
@@ -355,6 +423,7 @@ export class MemoryScanner {
     const handle = this.provider.openProcess(pid, false);
     try {
       const regions = this.getFilteredRegions(handle, scanOptions);
+      let chunksProcessed = 0;
 
       for (const region of regions) {
         if (pointers.length >= maxResults) break;
@@ -373,7 +442,7 @@ export class MemoryScanner {
 
           let chunk: Buffer;
           try {
-            chunk = this.provider.readMemory(handle, chunkAddr, readSize).data;
+            chunk = (await this.provider.readMemory(handle, chunkAddr, readSize)).data;
           } catch {
             break;
           }
@@ -400,6 +469,11 @@ export class MemoryScanner {
 
               if (pointers.length >= maxResults) break;
             }
+          }
+
+          chunksProcessed++;
+          if (chunksProcessed % SCAN_YIELD_CHUNK_INTERVAL === 0) {
+            await yieldToEventLoop();
           }
         }
       }
@@ -464,6 +538,7 @@ export class MemoryScanner {
     const handle = this.provider.openProcess(pid, false);
     try {
       const regions = this.getFilteredRegions(handle, scanOptions);
+      let chunksProcessed = 0;
 
       for (const region of regions) {
         // we'd emit here if we exposed onProgress
@@ -485,7 +560,7 @@ export class MemoryScanner {
 
           let chunk: Buffer;
           try {
-            chunk = this.provider.readMemory(handle, chunkAddr, readSize).data;
+            chunk = (await this.provider.readMemory(handle, chunkAddr, readSize)).data;
           } catch {
             break;
           }
@@ -505,6 +580,11 @@ export class MemoryScanner {
               addresses.push(addr);
               if (addresses.length >= maxResults) break;
             }
+          }
+
+          chunksProcessed++;
+          if (chunksProcessed % SCAN_YIELD_CHUNK_INTERVAL === 0) {
+            await yieldToEventLoop();
           }
         }
       }
@@ -530,12 +610,18 @@ export class MemoryScanner {
    * AOB (Array of Bytes) scan with wildcard support.
    *
    * Searches for byte patterns like "48 8B ?? ?? 00 00" across readable memory
-   * regions. Wildcards (??) match any byte. Optionally restricts to a module.
+   * regions. Wildcards (??) match any byte. Optionally restricts to a module
+   * via regionFilter.modulePattern or the legacy moduleName shorthand.
    */
   async aobScan(
     pid: number,
     pattern: string,
-    options: { maxResults?: number; moduleName?: string } = {},
+    options: {
+      maxResults?: number;
+      moduleName?: string;
+      executableOnly?: boolean;
+      regionFilter?: import('./NativeMemoryManager.types').RegionFilter;
+    } = {},
   ): Promise<{
     matches: string[];
     totalMatches: number;
@@ -571,35 +657,28 @@ export class MemoryScanner {
     const matches: bigint[] = [];
     const handle = this.provider.openProcess(pid, false);
     try {
-      let regions = this.getFilteredRegions(handle, { valueType: 'byte' });
+      // Build regionFilter for getFilteredRegions
+      const scanFilter: import('./NativeMemoryManager.types').RegionFilter = {
+        ...options.regionFilter,
+      };
 
-      // If moduleName filter is provided, restrict to that module's memory range
-      if (options.moduleName) {
-        const filterLower = options.moduleName.toLowerCase();
-        const modules = this.provider.enumerateModules(handle);
-        const moduleRanges = modules
-          .filter((m) => m.name.toLowerCase().includes(filterLower))
-          .map((m) => ({
-            baseAddress: m.baseAddress,
-            size: m.size,
-          }));
-
-        if (moduleRanges.length === 0) {
-          const elapsed = `${(performance.now() - start).toFixed(1)}ms`;
-          return { matches: [], totalMatches: 0, elapsed };
-        }
-
-        // Filter regions to only those within matching modules
-        regions = regions.filter((r) =>
-          moduleRanges.some(
-            (mod) =>
-              r.baseAddress >= mod.baseAddress &&
-              r.baseAddress < mod.baseAddress + BigInt(mod.size),
-          ),
-        );
+      // Legacy moduleName: translate to modulePattern for backward compat
+      if (options.moduleName && !scanFilter.modulePattern) {
+        scanFilter.modulePattern = options.moduleName;
       }
 
+      // Legacy executableOnly: translate to regionFilter
+      if (options.executableOnly && scanFilter.executable === undefined) {
+        scanFilter.executable = true;
+      }
+
+      const regions = this.getFilteredRegions(handle, {
+        valueType: 'byte',
+        regionFilter: Object.keys(scanFilter).length > 0 ? scanFilter : undefined,
+      });
+
       const patternLen = parsed.length;
+      let chunksProcessed = 0;
       for (const region of regions) {
         if (matches.length >= maxResults) break;
 
@@ -614,7 +693,7 @@ export class MemoryScanner {
 
           let chunk: Buffer;
           try {
-            chunk = this.provider.readMemory(handle, chunkAddr, readSize).data;
+            chunk = (await this.provider.readMemory(handle, chunkAddr, readSize)).data;
           } catch {
             break;
           }
@@ -631,6 +710,11 @@ export class MemoryScanner {
             if (matched) {
               matches.push(chunkAddr + BigInt(i));
             }
+          }
+
+          chunksProcessed++;
+          if (chunksProcessed % SCAN_YIELD_CHUNK_INTERVAL === 0) {
+            await yieldToEventLoop();
           }
         }
       }
@@ -701,6 +785,50 @@ export class MemoryScanner {
     };
   }
 
+  // System module name prefixes to skip (case-insensitive)
+  private static readonly SYSTEM_MODULES = new Set([
+    'ntdll.dll',
+    'ntdll',
+    'kernel32.dll',
+    'kernel32',
+    'kernelbase.dll',
+    'kernelbase',
+    'user32.dll',
+    'user32',
+    'gdi32.dll',
+    'gdi32',
+    'advapi32.dll',
+    'advapi32',
+    'msvcrt.dll',
+    'msvcrt',
+    'combase.dll',
+    'combase',
+    'ole32.dll',
+    'ole32',
+    'shell32.dll',
+    'shell32',
+    'ws2_32.dll',
+    'ws2_32',
+    'bcrypt.dll',
+    'bcrypt',
+    'ucrtbase.dll',
+    'ucrtbase',
+    'vcruntime',
+    'msvcp',
+    'libc.so',
+    'libc-',
+    'libpthread',
+    'ld-linux',
+    'libm.so',
+    'libdl.so',
+    'librt.so',
+    'libc++.so',
+    'libc++abi.so',
+    'libSystem.B.dylib',
+    'libobjc.A.dylib',
+    'libc++.1.dylib',
+  ]);
+
   /**
    * Get readable memory regions, applying region filters.
    * Uses PlatformMemoryAPI.queryRegion() for cross-platform support.
@@ -714,6 +842,18 @@ export class MemoryScanner {
     const maxAddress = USERSPACE_MAX_ADDRESS;
     const filter = options.regionFilter;
 
+    // Cache module list if we need module-aware filters
+    let moduleList: Array<{ baseAddress: bigint; size: number; name: string }> | null = null;
+    const needsModules = filter?.skipSystemModules || filter?.moduleOnly || filter?.modulePattern;
+    if (needsModules) {
+      const mods = this.provider.enumerateModules(handle);
+      moduleList = mods.map((m) => ({
+        baseAddress: m.baseAddress,
+        size: m.size,
+        name: m.name,
+      }));
+    }
+
     while (address < maxAddress) {
       const regionInfo = this.provider.queryRegion(handle, address);
       if (!regionInfo) break;
@@ -726,6 +866,38 @@ export class MemoryScanner {
         if (filter?.writable && !regionInfo.isWritable) include = false;
         if (filter?.executable && !regionInfo.isExecutable) include = false;
         if (filter?.moduleOnly && regionInfo.type !== 'image') include = false;
+        if (include && filter?.minSize && regionSize < filter.minSize) include = false;
+
+        // skipSystemModules: filter out system DLL regions
+        if (include && filter?.skipSystemModules && moduleList) {
+          const ownerMod = moduleList.find(
+            (m) =>
+              regionInfo.baseAddress >= m.baseAddress &&
+              regionInfo.baseAddress < m.baseAddress + BigInt(m.size),
+          );
+          if (ownerMod) {
+            const nameLower = ownerMod.name.toLowerCase();
+            for (const sysMod of MemoryScanner.SYSTEM_MODULES) {
+              if (nameLower.includes(sysMod)) {
+                include = false;
+                break;
+              }
+            }
+          }
+        }
+
+        // modulePattern: only include regions whose module name matches
+        if (include && filter?.modulePattern && moduleList) {
+          const patternLower = filter.modulePattern.toLowerCase();
+          const ownerMod = moduleList.find(
+            (m) =>
+              regionInfo.baseAddress >= m.baseAddress &&
+              regionInfo.baseAddress < m.baseAddress + BigInt(m.size),
+          );
+          if (!ownerMod || !ownerMod.name.toLowerCase().includes(patternLower)) {
+            include = false;
+          }
+        }
 
         if (include) {
           regions.push({

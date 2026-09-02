@@ -46,10 +46,12 @@ interface ParsedToolResult {
 }
 
 export class ReverseSessionOrchestrator {
-  constructor(
-    private readonly store = new ReverseSessionStore(),
-    private readonly toolExecutor?: ReverseSessionToolExecutor,
-  ) {}
+  private readonly store: ReverseSessionStore;
+  private readonly toolExecutor?: ReverseSessionToolExecutor;
+  constructor(store = new ReverseSessionStore(), toolExecutor?: ReverseSessionToolExecutor) {
+    this.store = store;
+    this.toolExecutor = toolExecutor;
+  }
 
   create(input: CreateReverseSessionInput): ReverseSessionRecord {
     const target = normalizeTarget(input);

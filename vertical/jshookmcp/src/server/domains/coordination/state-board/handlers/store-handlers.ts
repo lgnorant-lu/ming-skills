@@ -43,7 +43,7 @@ export class StoreHandlers {
       version: oldVersion + 1,
     };
 
-    this.store.state.set(fullKey, entry);
+    this.store.setEntry(fullKey, entry);
 
     this.store.recordChange(fullKey, {
       id: randomUUID().slice(0, 8),
@@ -216,6 +216,7 @@ export class StoreHandlers {
       expiredEntries: expiredCount,
       totalWatches: this.store.watches.size,
       historySize,
+      evictedEntries: this.store.getEvictedEntries(),
     };
 
     return stats;

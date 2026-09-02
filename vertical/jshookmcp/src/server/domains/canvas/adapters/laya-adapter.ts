@@ -13,12 +13,8 @@ import type {
   CanvasProbeEnv,
   CanvasSceneDump,
   CanvasSceneNode,
-  CanvasTraceResult,
   DumpOpts,
   PickOpts,
-  StackFrame,
-  TraceOpts,
-  TraceServices,
 } from '../types';
 
 // ── Payload builders ──────────────────────────────────────────────────────────
@@ -59,16 +55,36 @@ export function buildLayaSceneTreeDumpPayload(opts: DumpOpts): string {
     try { var v = node[key]; return v === undefined || v === null ? fallback : v; } catch(e) { return fallback; }
   }
 
+  function toPt(p) {
+    // LayaAir 2.8's minified transform nodes call t.setTo(x, y) on the point
+    // passed to localToGlobal/globalToLocal, which throws "t.setTo is not a
+    // function" for a plain {x,y} literal. Wrap in a real Laya.Point when the
+    // engine exposes one; otherwise pass the literal through unchanged.
+    return (window.Laya && typeof window.Laya.Point === 'function')
+      ? new window.Laya.Point(p.x, p.y)
+      : p;
+  }
+
   function localToGlobalRect(node) {
     if (!node) return { x: 0, y: 0, width: 0, height: 0 };
     try {
-      var p0 = { x: 0, y: 0 };
-      var p1 = { x: safeProp(node, 'width', 0), y: safeProp(node, 'height', 0) };
-      var lp0 = node.localToGlobal ? node.localToGlobal(p0) : p0;
-      var lp1 = node.localToGlobal ? node.localToGlobal(p1) : p1;
-      var w = Math.abs(lp1.x - lp0.x) || safeProp(node, 'width', 0);
-      var h = Math.abs(lp1.y - lp0.y) || safeProp(node, 'height', 0);
-      return { x: lp0.x, y: lp0.y, width: w, height: h };
+      var w = safeProp(node, 'width', 0);
+      var h = safeProp(node, 'height', 0);
+      if (node.localToGlobal) {
+        // Map all four corners and take the axis-aligned bounding box. The old
+        // two-corner span (0,0)→(w,h) only measured the diagonal, which collapses
+        // to zero width/height for rotated nodes (e.g. a 45° square).
+        var c0 = node.localToGlobal(toPt({ x: 0, y: 0 }));
+        var c1 = node.localToGlobal(toPt({ x: w, y: 0 }));
+        var c2 = node.localToGlobal(toPt({ x: 0, y: h }));
+        var c3 = node.localToGlobal(toPt({ x: w, y: h }));
+        var minX = Math.min(c0.x, c1.x, c2.x, c3.x);
+        var maxX = Math.max(c0.x, c1.x, c2.x, c3.x);
+        var minY = Math.min(c0.y, c1.y, c2.y, c3.y);
+        var maxY = Math.max(c0.y, c1.y, c2.y, c3.y);
+        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+      }
+      return { x: safeProp(node, 'x', 0), y: safeProp(node, 'y', 0), width: w, height: h };
     } catch(e) {
       return { x: safeProp(node, 'x', 0), y: safeProp(node, 'y', 0),
                width: safeProp(node, 'width', 0), height: safeProp(node, 'height', 0) };
@@ -208,16 +224,36 @@ export function buildLayaHitTestPayload(opts: PickOpts): string {
     try { var v = node[key]; return v === undefined || v === null ? fallback : v; } catch(e) { return fallback; }
   }
 
+  function toPt(p) {
+    // LayaAir 2.8's minified transform nodes call t.setTo(x, y) on the point
+    // passed to localToGlobal/globalToLocal, which throws "t.setTo is not a
+    // function" for a plain {x,y} literal. Wrap in a real Laya.Point when the
+    // engine exposes one; otherwise pass the literal through unchanged.
+    return (window.Laya && typeof window.Laya.Point === 'function')
+      ? new window.Laya.Point(p.x, p.y)
+      : p;
+  }
+
   function localToGlobalRect(node) {
     if (!node) return { x: 0, y: 0, width: 0, height: 0 };
     try {
-      var p0 = { x: 0, y: 0 };
-      var p1 = { x: safeProp(node, 'width', 0), y: safeProp(node, 'height', 0) };
-      var lp0 = node.localToGlobal ? node.localToGlobal(p0) : p0;
-      var lp1 = node.localToGlobal ? node.localToGlobal(p1) : p1;
-      var w = Math.abs(lp1.x - lp0.x) || safeProp(node, 'width', 0);
-      var h = Math.abs(lp1.y - lp0.y) || safeProp(node, 'height', 0);
-      return { x: lp0.x, y: lp0.y, width: w, height: h };
+      var w = safeProp(node, 'width', 0);
+      var h = safeProp(node, 'height', 0);
+      if (node.localToGlobal) {
+        // Map all four corners and take the axis-aligned bounding box. The old
+        // two-corner span (0,0)→(w,h) only measured the diagonal, which collapses
+        // to zero width/height for rotated nodes (e.g. a 45° square).
+        var c0 = node.localToGlobal(toPt({ x: 0, y: 0 }));
+        var c1 = node.localToGlobal(toPt({ x: w, y: 0 }));
+        var c2 = node.localToGlobal(toPt({ x: 0, y: h }));
+        var c3 = node.localToGlobal(toPt({ x: w, y: h }));
+        var minX = Math.min(c0.x, c1.x, c2.x, c3.x);
+        var maxX = Math.max(c0.x, c1.x, c2.x, c3.x);
+        var minY = Math.min(c0.y, c1.y, c2.y, c3.y);
+        var maxY = Math.max(c0.y, c1.y, c2.y, c3.y);
+        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+      }
+      return { x: safeProp(node, 'x', 0), y: safeProp(node, 'y', 0), width: w, height: h };
     } catch(e) {
       return { x: safeProp(node, 'x', 0), y: safeProp(node, 'y', 0),
                width: safeProp(node, 'width', 0), height: safeProp(node, 'height', 0) };
@@ -227,7 +263,11 @@ export function buildLayaHitTestPayload(opts: PickOpts): string {
   function nodePath(node) {
     var parts = [];
     var cur = node;
-    while (cur && cur !== window.Laya.stage) {
+    // A malicious page can create a parent cycle (node.parent === node, or a
+    // longer loop); the visited set bounds the walk so nodePath can never hang.
+    var visited = new Set();
+    while (cur && cur !== window.Laya.stage && !visited.has(cur)) {
+      visited.add(cur);
       var name = cur.name || nodeId(cur, 0);
       parts.unshift(name);
       cur = cur.parent;
@@ -273,9 +313,16 @@ export function buildLayaHitTestPayload(opts: PickOpts): string {
     canvasY = (sy - rect.top) * (targetCanvas.height / rect.height);
   }
 
-  // Canvas → stage: use mouseX/mouseY when available (set by Laya's event system)
-  var stageX = safeProp(stage, 'mouseX', canvasX / (scaleX || 1));
-  var stageY = safeProp(stage, 'mouseY', canvasY / (scaleY || 1));
+  // Canvas → stage. Laya's stage.mouseX/mouseY stay 0 under CDP-driven mouse
+  // moves (the engine's own event system never fires), so compute the stage
+  // coordinate directly from the canvas coordinate and the client scale factor
+  // instead of trusting the stale mouseX/mouseY.
+  // Honest boundary: this assumes clientScaleX/Y scale the whole canvas
+  // uniformly. A game that letterboxes (black bars) or pillars its stage inside
+  // a differently-aspect canvas shifts the origin, so a pick that lands in a bar
+  // maps to an out-of-bounds stage coordinate.
+  var stageX = canvasX / (scaleX || 1);
+  var stageY = canvasY / (scaleY || 1);
 
   var candidates = [];
 
@@ -285,40 +332,71 @@ export function buildLayaHitTestPayload(opts: PickOpts): string {
 
   if (isLaya3 && typeof stage.hitTest === 'function') {
     try {
+      // LayaAir 3.x's stage.hitTest is called with a plain {x,y} literal, not
+      // wrapped via toPt. The only real engine the harness verified is 2.8,
+      // whose localToGlobal/globalToLocal need a Laya.Point; whether 3.x's
+      // hitTest likewise expects a Point is unverified, so this engine path
+      // deliberately skips toPt and relies on the plain literal.
       var nativeHit = stage.hitTest({ x: stageX, y: stageY });
       if (nativeHit) {
-        enginePicked = nativeHit;
+        // Map the raw Laya node into a CanvasSceneNode so downstream consumers
+        // (highlight, scene search) get the full contract, not a bare engine node.
+        // nodeId(nativeHit, 0) pins the sibling index to 0, so two id-less nodes
+        // of the same type share this id — acceptable here since path (via
+        // nodePath) stays unique and id is only a hint, not a stable key.
+        enginePicked = {
+          id: nodeId(nativeHit, 0),
+          type: nativeHit.constructor ? nativeHit.constructor.name : 'Node',
+          name: safeProp(nativeHit, 'name', undefined),
+          visible: !!(safeProp(nativeHit, 'visible', true)),
+          interactive: !!(safeProp(nativeHit, 'mouseEnabled', true)),
+          mouseEnabled: safeProp(nativeHit, 'mouseEnabled', undefined),
+          alpha: safeProp(nativeHit, 'alpha', 1),
+          x: safeProp(nativeHit, 'x', 0),
+          y: safeProp(nativeHit, 'y', 0),
+          width: safeProp(nativeHit, 'width', 0),
+          height: safeProp(nativeHit, 'height', 0),
+          worldBounds: localToGlobalRect(nativeHit),
+          path: nodePath(nativeHit)
+        };
         hitTestMethod = 'engine';
       }
     } catch(e) {}
   }
 
-  // Recursive DFS hit test (always available; 2.x fallback for 3.x too)
+  // Recursive DFS hit test (always available; 2.x fallback for 3.x too).
+  // Bounded by a depth cap (aligned with the scene-dump maxDepth default) plus
+  // a visited set, so a malicious/cyclic scene graph (e.g. a node listing
+  // itself in _children) can neither overflow the stack nor hang the pick.
+  var hitTestMaxDepth = 20;
+  var hitTestVisited = new Set();
   function hitTestDfs(node, depth, accPath) {
-    if (!node || !safeProp(node, 'visible', true)) return;
+    if (!node || depth > hitTestMaxDepth || hitTestVisited.has(node)) return;
+    hitTestVisited.add(node);
+    if (!safeProp(node, 'visible', true)) return;
 
     var wb = localToGlobalRect(node);
-    var mx = sx, my = sy;
 
-    // Convert screen → node local using parent chain
-    var cur = node;
-    var screenPt = { x: sx, y: sy };
-    while (cur) {
-      if (cur.globalToLocal) {
-        try { screenPt = cur.globalToLocal(screenPt); } catch(e) { break; }
+    // Convert stage → node local with a single full inverse chain. Applying
+    // globalToLocal at each ancestor would transform the same point repeatedly.
+    // A page can override globalToLocal to throw; fall back to stage coords so
+    // one bad node cannot abort the entire pick.
+    var localPt = { x: stageX, y: stageY };
+    if (node.globalToLocal) {
+      try {
+        localPt = node.globalToLocal(toPt({ x: stageX, y: stageY }));
+      } catch (e) {
+        localPt = { x: stageX, y: stageY };
       }
-      cur = cur.parent;
     }
-    var lx = screenPt.x, ly = screenPt.y;
+    var lx = localPt.x, ly = localPt.y;
 
-    // Check bounds against node's local coordinate frame
+    // Bounds check in the node's own local frame (top-left origin, width ×
+    // height) — never the parent-relative x/y.
     var nw = safeProp(node, 'width', 0) || (wb.width / (safeProp(node, 'scaleX', 1) || 1));
     var nh = safeProp(node, 'height', 0) || (wb.height / (safeProp(node, 'scaleY', 1) || 1));
-    var nx = safeProp(node, 'x', 0), ny = safeProp(node, 'y', 0);
-    var pivotX = safeProp(node, 'pivotX', 0), pivotY = safeProp(node, 'pivotY', 0);
 
-    var inBounds = lx >= nx - pivotX && lx <= nx - pivotX + nw &&
-                   ly >= ny - pivotY && ly <= ny - pivotY + nh;
+    var inBounds = lx >= 0 && lx <= nw && ly >= 0 && ly <= nh;
 
     var interactive = !!(safeProp(node, 'mouseEnabled', true));
 
@@ -333,7 +411,8 @@ export function buildLayaHitTestPayload(opts: PickOpts): string {
           interactive: interactive,
           mouseEnabled: safeProp(node, 'mouseEnabled', undefined),
           alpha: safeProp(node, 'alpha', 1),
-          x: nx, y: ny,
+          x: safeProp(node, 'x', 0),
+          y: safeProp(node, 'y', 0),
           width: nw, height: nh,
           worldBounds: wb,
           path: path
@@ -343,7 +422,10 @@ export function buildLayaHitTestPayload(opts: PickOpts): string {
     }
 
     var nodeChildren = getChildren(node);
-    for (var i = 0; i < nodeChildren.length; i++) {
+    // Reverse child order: the last child is drawn last and therefore topmost
+    // among siblings (Laya render order = children array order). The stable
+    // depth sort below preserves this reverse order within the same depth.
+    for (var i = nodeChildren.length - 1; i >= 0; i--) {
       var cn = nodeChildren[i];
       if (!cn) continue;
       var childPath = accPath ? accPath + '/' + nodeId(cn, i) : nodeId(cn, i);
@@ -358,8 +440,10 @@ export function buildLayaHitTestPayload(opts: PickOpts): string {
   var finalMethod = hitTestMethod;
 
   if (!picked && candidates.length > 0) {
-    // Sort by depth ascending (deepest/nested first = topmost)
-    candidates.sort(function(a, b) { return a.depth - b.depth; });
+    // Sort by depth descending: deepest node first (a child always renders
+    // above its parent). Same-depth siblings keep the reverse child order from
+    // the DFS above because Array.sort is stable.
+    candidates.sort(function(a, b) { return b.depth - a.depth; });
     picked = candidates[0].node;
     finalMethod = 'manual';
   }
@@ -493,146 +577,5 @@ export class LayaCanvasAdapter implements CanvasEngineAdapter {
       coordinates: result.coordinates,
       hitTestMethod: result.hitTestMethod,
     } as CanvasPickResult;
-  }
-
-  async traceClick(
-    env: CanvasProbeEnv,
-    opts: TraceOpts,
-    services: TraceServices,
-  ): Promise<CanvasTraceResult> {
-    const { debuggerManager, traceRecorder, evidenceStore } = services;
-
-    // Attempt to start trace recording (requires EventBus which may not be wired up)
-    let traceId = 'no-recording';
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const rec = await traceRecorder.start(null as any, null, {
-        recordMemoryDeltas: false,
-      });
-      traceId = rec.sessionId;
-    } catch {
-      // Recording not available; continue without it
-    }
-
-    await debuggerManager.enable();
-    await debuggerManager.ensureAdvancedFeatures();
-
-    // Patch EventDispatcher.prototype.event with idempotent Symbol.for guard
-    const patchResult = await env.pageController.evaluate<{
-      success: boolean;
-      instrumented: string[];
-    }>(`
-      (function() {
-        var k = Symbol.for('__laya_event_patched');
-        var instrumented = [];
-        function patchTarget(proto) {
-          if (!proto || !proto.event || proto[k]) return;
-          var original = proto.event;
-          if (typeof original !== 'function') return;
-          Object.defineProperty(proto, 'event', {
-            value: function(type, data) {
-              if (!this[k]) this[k] = new Set();
-              if (this[k].has(type)) return; // idempotent
-              this[k].add(type);
-              return original.call(this, type, data);
-            },
-            configurable: true,
-            enumerable: false
-          });
-          instrumented.push(proto.constructor ? proto.constructor.name : 'EventDispatcher');
-        }
-
-        // Walk prototype chain
-        var seen = new Set();
-        var queue = [window.Laya && window.Laya.EventDispatcher ? window.Laya.EventDispatcher.prototype : null];
-        while (queue.length) {
-          var p = queue.shift();
-          if (!p || seen.has(p)) continue;
-          seen.add(p);
-          patchTarget(p);
-          if (Object.getPrototypeOf) {
-            var mp = Object.getPrototypeOf(p);
-            if (mp) queue.push(mp);
-          }
-        }
-
-        return { success: true, instrumented: instrumented };
-      })()
-    `);
-
-    // Dispatch click at the traced coordinates
-    const breakpointType = opts.breakpointType ?? 'click';
-    const eventMgr = debuggerManager.getEventManager();
-    await eventMgr.setEventListenerBreakpoint(breakpointType);
-
-    const domEventChain = await env.pageController.evaluate<string[]>(`
-      (function() {
-        var ev = new PointerEvent(${JSON.stringify(breakpointType)}, {
-          view: window, bubbles: true, cancelable: true,
-          clientX: ${opts.targetNodeId ?? 0}, clientY: 0, pointerId: 1
-        });
-        var events = [];
-        var el = document.elementFromPoint(0, 0);
-        if (el) el.dispatchEvent(ev);
-        events.push(${JSON.stringify(breakpointType)});
-        return events;
-      })()
-    `);
-
-    const pausedState = await debuggerManager.waitForPaused(5000);
-
-    const handlerFrames = pausedState?.callFrames
-      ? pausedState.callFrames.slice(0, opts.maxFrames ?? 50).map(
-          (f): StackFrame => ({
-            functionName: f.functionName || '(anonymous)',
-            scriptUrl: f.url,
-            lineNumber: f.location?.lineNumber,
-            columnNumber: f.location?.columnNumber,
-          }),
-        )
-      : ([] as StackFrame[]);
-
-    await debuggerManager.resume();
-
-    void evidenceStore.addNode('function', `laya-click-trace:${traceId}`, {
-      engine: this.engine,
-      version: this.version,
-      handlersFound: handlerFrames.length,
-      instrumentedPrototypes: patchResult?.instrumented ?? [],
-    });
-
-    try {
-      await traceRecorder.stop();
-    } catch {
-      /* not recording */
-    }
-
-    return {
-      inputFlow: domEventChain,
-      hitTarget: null,
-      domEventChain: handlerFrames.map(
-        (
-          f,
-        ): {
-          type: string;
-          target: string | undefined;
-          phase: 'capturing' | 'at-target' | 'bubbling';
-        } => ({
-          type: breakpointType,
-          target: f.scriptUrl,
-          phase: 'at-target' as const,
-        }),
-      ),
-      engineDispatchChain: patchResult?.instrumented ?? [],
-      handlerFrames,
-      handlersTriggered: handlerFrames.map(
-        (f): StackFrame => ({
-          functionName: f.functionName,
-          scriptUrl: f.scriptUrl,
-          lineNumber: f.lineNumber,
-        }),
-      ),
-      networkEmitted: [],
-    } as CanvasTraceResult;
   }
 }

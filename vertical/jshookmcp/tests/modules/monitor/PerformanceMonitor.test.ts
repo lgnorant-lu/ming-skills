@@ -9,7 +9,7 @@ const loggerState = vi.hoisted(() => ({
 }));
 
 const writeState = vi.hoisted(() => ({
-  writeFile: vi.fn(async () => undefined),
+  writeFile: vi.fn(async (..._args: unknown[]) => undefined),
 }));
 
 const cdpState = vi.hoisted(() => ({
@@ -65,8 +65,17 @@ function createSession(
 }
 
 function createCollector(session: any, evaluateResult?: any) {
+  // First createCDPSession() returns the caller's session (used by
+  // ensureCDPSession); later calls return independent sessions so defensive
+  // cleanup (e.g. Tracing.disable) detaching its own session cannot affect
+  // the assertions on the shared one — mirrors real browser behavior.
+  let sessionCounter = 0;
   const page = {
-    createCDPSession: vi.fn(async () => session),
+    createCDPSession: vi.fn(async () => {
+      sessionCounter++;
+      if (sessionCounter === 1) return session;
+      return createSession().session;
+    }),
     evaluate: vi.fn(async () => evaluateResult ?? {}),
     coverage: {
       startJSCoverage: vi.fn(async () => undefined),
@@ -172,6 +181,60 @@ describe('PerformanceMonitor', () => {
 
     expect(send).toHaveBeenCalledWith('Profiler.start');
     expect(result).toEqual(profile);
+  });
+
+  it('throws when startCPUProfiling is called twice', async () => {
+    const { session } = createSession();
+    const { collector } = createCollector(session);
+    const monitor = new PerformanceMonitor(collector as any);
+
+    await monitor.startCPUProfiling();
+    await expect(monitor.startCPUProfiling()).rejects.toThrow('CPU profiling already in progress');
+  });
+
+  it('sets the sampling interval before Profiler.start when requested', async () => {
+    const { session, send } = createSession();
+    const { collector } = createCollector(session);
+    const monitor = new PerformanceMonitor(collector as any);
+
+    await monitor.startCPUProfiling({ samplingInterval: 500 });
+
+    expect(send).toHaveBeenCalledWith('Profiler.enable');
+    expect(send).toHaveBeenCalledWith('Profiler.setSamplingInterval', { interval: 500 });
+    expect(send).toHaveBeenCalledWith('Profiler.start');
+    const setIdx = send.mock.calls.findIndex(
+      ([method]) => method === 'Profiler.setSamplingInterval',
+    );
+    const startIdx = send.mock.calls.findIndex(([method]) => method === 'Profiler.start');
+    expect(setIdx).toBeGreaterThan(-1);
+    expect(setIdx).toBeLessThan(startIdx);
+  });
+
+  it('does not set the sampling interval when the option is omitted', async () => {
+    const { session, send } = createSession();
+    const { collector } = createCollector(session);
+    const monitor = new PerformanceMonitor(collector as any);
+
+    await monitor.startCPUProfiling();
+
+    expect(send).not.toHaveBeenCalledWith('Profiler.setSamplingInterval', expect.anything());
+  });
+
+  it('resets profiler state when Profiler.stop fails', async () => {
+    const { session } = createSession((method) => {
+      if (method === 'Profiler.stop') {
+        throw new Error('Profiler.stop exploded');
+      }
+      return {};
+    });
+    const { collector } = createCollector(session);
+    const monitor = new PerformanceMonitor(collector as any);
+
+    await monitor.startCPUProfiling();
+    await expect(monitor.stopCPUProfiling()).rejects.toThrow('Profiler.stop exploded');
+
+    // 状态必须已重置 —— 否则后续 start 会被 "already in progress" 拒绝(状态泄漏)。
+    await expect(monitor.startCPUProfiling()).resolves.toBeUndefined();
   });
 
   it('captures heap snapshot chunks and detaches listener', async () => {
@@ -602,6 +665,123 @@ describe('PerformanceMonitor', () => {
     expect(session.detach).toHaveBeenCalledTimes(1);
   });
 
+  it('detaches an orphaned CDP session when createCDPSession loses the timeout race', async () => {
+    vi.useFakeTimers();
+    try {
+      const orphan = createSession();
+      const { collector, page } = createCollector(orphan.session);
+      let resolveOrphan!: (s: unknown) => void;
+      page.createCDPSession.mockReturnValue(
+        new Promise((resolve) => {
+          resolveOrphan = resolve;
+        }),
+      );
+      const monitor = new PerformanceMonitor(collector as any);
+
+      const startPromise = monitor.startCPUProfiling();
+      // Attach the rejection handler before advancing timers so the
+      // cdp_session_timeout rejection is never flagged as unhandled.
+      const rejection = expect(startPromise).rejects.toThrow('cdp_session_timeout');
+      await vi.advanceTimersByTimeAsync(600); // past the 500ms cdp_session_timeout
+      await rejection;
+
+      // The session only resolves after the timeout — it must be detached,
+      // not silently leaked as an untracked orphan.
+      resolveOrphan(orphan.session);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(orphan.detach).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('close keeps running the remaining cleanup steps when one stop fails', async () => {
+    // HeapProfiler.stopSampling returns a malformed payload so the first
+    // LIFO cleanup step (heap sampling) throws; the rest must still run.
+    const { session } = createSession((method) => {
+      if (method === 'HeapProfiler.stopSampling') {
+        return { profile: { head: 'not a node' } };
+      }
+      if (method === 'Profiler.stop') {
+        return {
+          profile: {
+            nodes: [
+              { id: 1, callFrame: { functionName: 'fn', url: '', lineNumber: 0, columnNumber: 0 } },
+            ],
+            startTime: 1,
+            endTime: 2,
+          },
+        };
+      }
+      return {};
+    });
+    const { collector, page } = createCollector(session);
+    page.tracing.stop.mockResolvedValue(Buffer.from('{"traceEvents":[{"ph":"X"}]}'));
+    const monitor = new PerformanceMonitor(collector as any);
+
+    await monitor.startCoverage();
+    await monitor.startCPUProfiling();
+    await monitor.startTracing();
+    await monitor.startHeapSampling({ samplingInterval: 1024 });
+    await monitor.close();
+
+    expect(session.send).toHaveBeenCalledWith('HeapProfiler.stopSampling');
+    expect(page.tracing.stop).toHaveBeenCalledTimes(1);
+    expect(page.coverage.stopJSCoverage).toHaveBeenCalledTimes(1);
+    expect(session.detach).toHaveBeenCalledTimes(1);
+    expect(loggerState.warn).toHaveBeenCalled();
+  });
+
+  it('close does not block forever when a stop call hangs (per-step timeout)', async () => {
+    vi.useFakeTimers();
+    try {
+      // HeapProfiler.stopSampling never resolves — a hung CDP call on the
+      // first LIFO step; close() must time it out and finish the rest.
+      const { session } = createSession((method) => {
+        if (method === 'HeapProfiler.stopSampling') {
+          return new Promise(() => {});
+        }
+        if (method === 'Profiler.stop') {
+          return {
+            profile: {
+              nodes: [
+                {
+                  id: 1,
+                  callFrame: { functionName: 'fn', url: '', lineNumber: 0, columnNumber: 0 },
+                },
+              ],
+              startTime: 1,
+              endTime: 2,
+            },
+          };
+        }
+        return {};
+      });
+      const { collector, page } = createCollector(session);
+      page.tracing.stop.mockResolvedValue(Buffer.from('{"traceEvents":[{"ph":"X"}]}'));
+      const monitor = new PerformanceMonitor(collector as any);
+
+      await monitor.startCPUProfiling();
+      await monitor.startTracing();
+      await monitor.startHeapSampling({ samplingInterval: 1024 });
+
+      const closePromise = monitor.close();
+      const settled = closePromise.then(
+        () => true,
+        () => true,
+      );
+      await vi.advanceTimersByTimeAsync(6000); // past the 5s per-step timeout
+
+      expect(await settled).toBe(true);
+      expect(page.tracing.stop).toHaveBeenCalledTimes(1);
+      expect(session.detach).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('insertTopAllocation does nothing when topN is zero or negative', async () => {
     const { session } = createSession();
     createCollector(session);
@@ -708,5 +888,232 @@ describe('PerformanceMonitor', () => {
     expect(coverage[0]!.totalBytes).toBe(0);
     expect(coverage[0]!.coveragePercentage).toBe(0);
     expect(coverage[0]!.usedBytes).toBe(0);
+  });
+
+  // ---------- Fix 1 [P1]: trace stop failure must not deadlock state ----------
+
+  it('resets tracing state after a failed trace stop so tracing can restart', async () => {
+    const { session } = createSession();
+    const { collector, page } = createCollector(session);
+    page.tracing.stop.mockRejectedValueOnce(new Error('Tracing.stop: session closed'));
+    const monitor = new PerformanceMonitor(collector as any);
+
+    await monitor.startTracing();
+    await expect(monitor.stopTracing()).rejects.toThrow('Failed to stop performance tracing');
+
+    // Before the fix this threw 'Tracing already in progress' forever (state
+    // was never reset on failure) — a permanent user-facing deadlock.
+    await expect(monitor.startTracing()).resolves.toBeUndefined();
+    await expect(monitor.stopTracing()).resolves.toMatchObject({ eventCount: 0 });
+  });
+
+  // ---------- Fix 2 [P1]: dead metrics fields + TTFB + Navigation Timing L2 ----------
+
+  it('merges CDP engine-level metrics and navigation timing L2 sizes', async () => {
+    const { session, send } = createSession((method) => {
+      if (method === 'Performance.getMetrics') {
+        return {
+          metrics: [
+            { name: 'ScriptDuration', value: 12.5 },
+            { name: 'LayoutDuration', value: 3.2 },
+            { name: 'RecalcStyleDuration', value: 1.1 },
+            { name: 'JSHeapUsedSize', value: 2048 },
+            { name: 'JSHeapTotalSize', value: 4096 },
+            { name: 'JSHeapSizeLimit', value: 8192 },
+          ],
+        };
+      }
+      return {};
+    });
+    const { collector, page } = createCollector(session);
+    const fakePerformance = {
+      getEntriesByType: vi.fn((type: string) => {
+        if (type === 'navigation') {
+          return [
+            {
+              domContentLoadedEventEnd: 120,
+              fetchStart: 20,
+              loadEventEnd: 180,
+              responseStart: 60,
+              requestStart: 30,
+              transferSize: 500,
+              encodedBodySize: 400,
+              decodedBodySize: 450,
+            },
+          ];
+        }
+        return [];
+      }),
+      getEntries: vi.fn(() => []),
+    };
+    // @ts-expect-error — mock impl has a wider signature than page.evaluate
+    page.evaluate.mockImplementation(async (pageFunction: any) => {
+      if (typeof pageFunction === 'function') {
+        return pageFunction();
+      }
+      return pageFunction;
+    });
+    vi.stubGlobal('performance', fakePerformance as any);
+    try {
+      const monitor = new PerformanceMonitor(collector as any);
+      const metrics = await monitor.getPerformanceMetrics();
+
+      expect(metrics).toMatchObject({
+        scriptDuration: 12.5,
+        layoutDuration: 3.2,
+        recalcStyleDuration: 1.1,
+        usedJSHeapSize: 2048,
+        totalJSHeapSize: 4096,
+        jsHeapSizeLimit: 8192,
+        transferSize: 500,
+        encodedBodySize: 400,
+        decodedBodySize: 450,
+      });
+      expect(metrics).not.toHaveProperty('fid');
+      expect(send).toHaveBeenCalledWith('Performance.enable');
+      expect(send).toHaveBeenCalledWith('Performance.disable');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('returns null ttfb when navigation requestStart is 0 instead of a negative number', async () => {
+    const { session } = createSession();
+    const { collector, page } = createCollector(session);
+    const fakePerformance = {
+      getEntriesByType: vi.fn((type: string) => {
+        if (type === 'navigation') {
+          return [
+            {
+              domContentLoadedEventEnd: 120,
+              fetchStart: 20,
+              loadEventEnd: 180,
+              responseStart: 60,
+              requestStart: 0,
+            },
+          ];
+        }
+        return [];
+      }),
+      getEntries: vi.fn(() => []),
+    };
+    // @ts-expect-error — mock impl has a wider signature than page.evaluate
+    page.evaluate.mockImplementation(async (pageFunction: any) => {
+      if (typeof pageFunction === 'function') {
+        return pageFunction();
+      }
+      return pageFunction;
+    });
+    vi.stubGlobal('performance', fakePerformance as any);
+    try {
+      const monitor = new PerformanceMonitor(collector as any);
+      const metrics = await monitor.getPerformanceMetrics();
+
+      expect(metrics.ttfb).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // ---------- Fix 3 [P2]: trace size cap ----------
+
+  it('truncates oversized traces to maxSizeMB and writes the raw Buffer', async () => {
+    const { session } = createSession();
+    const { collector, page } = createCollector(session);
+    const bigTrace = Buffer.from(
+      '{"traceEvents":[' +
+        Array.from({ length: 150_000 }, () => '{"ph":"X","name":"evt"}').join(',') +
+        ']}',
+    );
+    expect(bigTrace.length).toBeGreaterThan(1024 * 1024);
+    page.tracing.stop.mockResolvedValue(bigTrace);
+    const monitor = new PerformanceMonitor(collector as any);
+
+    await monitor.startTracing();
+    const result = await monitor.stopTracing({
+      artifactPath: '/tmp/big-trace.json',
+      maxSizeMB: 1,
+    });
+
+    expect(result.sizeBytes).toBeLessThanOrEqual(1024 * 1024);
+    const written = writeState.writeFile.mock.calls[0]![1];
+    expect(Buffer.isBuffer(written)).toBe(true);
+    expect((written as Buffer).length).toBe(result.sizeBytes);
+    expect(loggerState.warn).toHaveBeenCalled();
+  });
+
+  // ---------- Fix 4 [P2]: timeline size cap ----------
+
+  it('truncates the performance timeline to maxEntries and warns', async () => {
+    const { session } = createSession();
+    const { collector, page } = createCollector(session);
+    const manyEntries = Array.from({ length: 1000 }, (_, i) => ({
+      name: `evt-${i}`,
+      entryType: 'mark',
+      startTime: i,
+      duration: 0,
+    }));
+    page.evaluate.mockResolvedValue(manyEntries);
+    const monitor = new PerformanceMonitor(collector as any);
+
+    const timeline = await monitor.getPerformanceTimeline(50);
+
+    expect(timeline).toHaveLength(50);
+    expect(timeline[0]!.name).toBe('evt-950'); // most recent entries retained
+    expect(loggerState.warn).toHaveBeenCalled();
+  });
+
+  // ---------- Fix: synchronous pre-start guards for startCoverage / startTracing / startHeapSampling ----------
+
+  it('throws when startCoverage is called while coverage is already in progress', async () => {
+    const { session } = createSession();
+    const { collector } = createCollector(session);
+    const monitor = new PerformanceMonitor(collector as any);
+
+    await monitor.startCoverage();
+    await expect(monitor.startCoverage()).rejects.toThrow('Coverage already in progress');
+  });
+
+  it('startCoverage guard throws before any page interaction', async () => {
+    const { session } = createSession();
+    const { collector, page } = createCollector(session);
+    const monitor = new PerformanceMonitor(collector as any);
+
+    await monitor.startCoverage();
+    page.coverage.startJSCoverage.mockClear();
+
+    await expect(monitor.startCoverage()).rejects.toThrow('Coverage already in progress');
+
+    // Synchronous guard must reject before coverage.startJSCoverage is called
+    expect(page.coverage.startJSCoverage).not.toHaveBeenCalled();
+  });
+
+  it('startTracing guard throws before any page interaction', async () => {
+    const { session } = createSession();
+    const { collector, page } = createCollector(session);
+    page.tracing.stop.mockResolvedValue(Buffer.from('{"traceEvents":[]}'));
+    const monitor = new PerformanceMonitor(collector as any);
+
+    await monitor.startTracing();
+    page.tracing.start.mockClear();
+
+    await expect(monitor.startTracing()).rejects.toThrow('Tracing already in progress');
+
+    // Synchronous guard must reject before page.tracing.start() is called
+    expect(page.tracing.start).not.toHaveBeenCalled();
+  });
+
+  it('startHeapSampling guard throws before creating a CDP session', async () => {
+    const { session } = createSession();
+    const { collector, page } = createCollector(session);
+    const monitor = new PerformanceMonitor(collector as any);
+
+    await monitor.startHeapSampling();
+    page.createCDPSession.mockClear();
+
+    await expect(monitor.startHeapSampling()).rejects.toThrow('Heap sampling already in progress');
+
+    // Synchronous guard must reject before ensureCDPSession creates a new session
+    expect(page.createCDPSession).not.toHaveBeenCalled();
   });
 });

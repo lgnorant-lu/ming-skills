@@ -151,7 +151,12 @@ export class SymbolicExecutor {
       }
 
       if (enableConstraintSolving) {
-        await this.solveConstraints(paths, warnings);
+        const remainingBudget = timeout - (Date.now() - startTime);
+        if (remainingBudget <= 0) {
+          warnings.push('Constraint solving skipped:budget');
+        } else {
+          await this.solveConstraints(paths, warnings, remainingBudget);
+        }
       }
 
       const coverage = this.calculateCoverage(paths, ast);
@@ -552,13 +557,35 @@ export class SymbolicExecutor {
     }
   }
 
-  private async solveConstraints(paths: ExecutionPath[], warnings: string[]): Promise<void> {
+  /**
+   * Derive the per-path Z3 solver timeout from the remaining executor budget.
+   * Each path gets an equal share (floor 1s) so the whole solve phase stays
+   * within budget even after Z3 mutex wait time is counted against it.
+   */
+  private computePerPathTimeout(pathCount: number, budgetMs: number): number {
+    if (pathCount <= 0) return Math.max(1_000, budgetMs);
+    return Math.max(1_000, Math.floor(budgetMs / pathCount));
+  }
+
+  private async solveConstraints(
+    paths: ExecutionPath[],
+    warnings: string[],
+    budgetMs?: number,
+  ): Promise<void> {
     logger.info(' ...');
 
-    const z3Used = await this.solveConstraintsZ3(paths, warnings);
+    const solveStartedAt = Date.now();
+    const z3Used = await this.solveConstraintsZ3(paths, warnings, budgetMs);
     if (!z3Used) {
-      // Z3 unavailable — fall back to simple regex solver
-      this.solveConstraintsLegacy(paths, warnings);
+      // Z3 unavailable — fall back to the simple regex solver with only the
+      // budget left over after the Z3 attempt (init/mutex time is already
+      // counted against the executor budget; reusing the full budget here
+      // would let the solve phase run up to ~2x its allowance).
+      const remainingBudget =
+        typeof budgetMs === 'number' && budgetMs > 0
+          ? Math.max(0, budgetMs - (Date.now() - solveStartedAt))
+          : budgetMs;
+      this.solveConstraintsLegacy(paths, warnings, remainingBudget);
     }
 
     logger.info(
@@ -570,8 +597,24 @@ export class SymbolicExecutor {
    * Solve path constraints with Z3 SMT.
    * @returns true if Z3 was used, false if init failed and caller should fall back
    */
-  private async solveConstraintsZ3(paths: ExecutionPath[], warnings: string[]): Promise<boolean> {
+  private async solveConstraintsZ3(
+    paths: ExecutionPath[],
+    warnings: string[],
+    budgetMs?: number,
+  ): Promise<boolean> {
     if (isZ3Failed()) return false;
+
+    // Budget governance: the Z3 phase must finish within the executor's
+    // remaining time budget. A hard deadline skips unsolved paths (they keep
+    // their heuristic feasibility), and the per-path solver timeout is derived
+    // from the remaining budget rather than the global constant. The deadline
+    // is re-checked after the Z3 mutex is acquired, so mutex wait time is
+    // counted toward the budget too.
+    const hasBudget = typeof budgetMs === 'number' && budgetMs > 0;
+    const deadline = hasBudget ? Date.now() + budgetMs : undefined;
+    const perPathTimeout = hasBudget
+      ? this.computePerPathTimeout(paths.length, budgetMs)
+      : SYMBOLIC_EXEC_Z3_TIMEOUT_MS;
 
     let z3Worked = false;
     const result = await withZ3(async (api) => {
@@ -579,6 +622,11 @@ export class SymbolicExecutor {
       const { Solver, And } = ctx;
 
       for (const path of paths) {
+        if (deadline !== undefined && Date.now() >= deadline) {
+          warnings.push(` ${path.id} skipped:budget`);
+          break;
+        }
+
         if (path.constraints.length === 0) {
           path.isFeasible = true;
           continue;
@@ -586,7 +634,7 @@ export class SymbolicExecutor {
 
         try {
           const solver = new Solver();
-          solver.set('timeout', SYMBOLIC_EXEC_Z3_TIMEOUT_MS);
+          solver.set('timeout', perPathTimeout);
 
           // Build `And(c1, c2, ...)` from all path constraints (they are
           // conjunctive — all must hold for the path to be traversed).
@@ -673,8 +721,21 @@ export class SymbolicExecutor {
    * Legacy regex-based SMT solver — kept as fallback when Z3 is unavailable.
    * @deprecated Z3 is the primary solver; this exists only for graceful degradation.
    */
-  private solveConstraintsLegacy(paths: ExecutionPath[], warnings: string[]): void {
+  private solveConstraintsLegacy(
+    paths: ExecutionPath[],
+    warnings: string[],
+    budgetMs?: number,
+  ): void {
+    // A defined numeric budget (including 0, meaning already exhausted) bounds
+    // the solver; undefined means unbounded.
+    const hasBudget = typeof budgetMs === 'number' && budgetMs >= 0;
+    const deadline = hasBudget ? Date.now() + budgetMs : undefined;
+
     for (const path of paths) {
+      if (deadline !== undefined && Date.now() >= deadline) {
+        warnings.push(` ${path.id} skipped:budget`);
+        break;
+      }
       if (path.constraints.length === 0) {
         path.isFeasible = true;
         continue;

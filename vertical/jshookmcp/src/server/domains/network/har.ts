@@ -3,7 +3,7 @@
  * Ref: http://www.softwareishard.com/blog/har-12-spec/
  */
 
-import { NETWORK_HAR_BODY_CONCURRENCY } from '@src/constants';
+import { NETWORK_HAR_BODY_CONCURRENCY, NETWORK_HAR_BODY_MAX_BYTES } from '@src/constants';
 
 export interface HarEntry {
   startedDateTime: string;
@@ -29,7 +29,11 @@ export interface HarEntry {
       size: number;
       mimeType: string;
       text?: string;
+      /** HAR 1.2 content encoding — set to `'base64'` for base64-encoded bodies. */
+      encoding?: 'base64';
       _bodyUnavailable?: boolean;
+      _bodyTruncated?: boolean;
+      _originalBodySize?: number;
     };
     redirectURL: string;
     headersSize: number;
@@ -71,6 +75,40 @@ function queryStringFromUrl(url: string): Array<{ name: string; value: string }>
   } catch {
     return [];
   }
+}
+
+/** Truncate a UTF-8 string to at most `maxBytes` bytes (may split a multi-byte char at the boundary). */
+function capBodyText(text: string, maxBytes: number): { text: string; truncated: boolean } {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return { text, truncated: false };
+  const truncated = Buffer.from(text, 'utf8').subarray(0, maxBytes).toString('utf8');
+  return { text: truncated, truncated: true };
+}
+
+/**
+ * Truncate a base64 string to at most `maxBytes` decoded bytes.
+ *
+ * Base64 encodes 3 bytes into 4 characters, so `maxBytes` decoded bytes map to
+ * at most `floor(maxBytes / 3)` full 3-byte groups, i.e. `floor(maxBytes / 3) * 4`
+ * characters. Truncating mid-group would drop the tail bytes of the final group
+ * and produce an un-decodable tail.
+ */
+export function capBodyBase64(
+  text: string,
+  maxBytes: number,
+): { text: string; truncated: boolean } {
+  const maxChars = Math.floor(maxBytes / 3) * 4;
+  if (text.length <= maxChars) return { text, truncated: false };
+  return { text: text.slice(0, maxChars), truncated: true };
+}
+
+/**
+ * Compute the byte size of a stored body string for HAR 1.2 `content.size` /
+ * `bodySize`, which are measured in bytes. Base64 bodies report the decoded
+ * byte count (`3 * floor(len / 4)` — same convention as `_originalBodySize`),
+ * not the base64 character count.
+ */
+function bodyByteSize(text: string, encoding?: 'base64'): number {
+  return encoding === 'base64' ? Math.floor((text.length * 3) / 4) : text.length;
 }
 
 /**
@@ -149,7 +187,16 @@ export async function buildHar(params: BuildHarParams): Promise<Har> {
   const entries: HarEntry[] = [];
 
   // Parallel body fetching with concurrency limit to avoid overwhelming CDP
-  const bodyResults = new Map<string, { text?: string; _bodyUnavailable?: boolean }>();
+  const bodyResults = new Map<
+    string,
+    {
+      text?: string;
+      encoding?: 'base64';
+      _bodyUnavailable?: boolean;
+      _bodyTruncated?: boolean;
+      _originalBodySize?: number;
+    }
+  >();
   if (includeBodies) {
     const BODY_CONCURRENCY = NETWORK_HAR_BODY_CONCURRENCY;
     for (let i = 0; i < requests.length; i += BODY_CONCURRENCY) {
@@ -159,7 +206,27 @@ export async function buildHar(params: BuildHarParams): Promise<Har> {
           try {
             const bodyResult = await getResponseBody(req.requestId);
             if (bodyResult) {
-              return { requestId: req.requestId, text: bodyResult.body };
+              // HAR 1.2 requires content.encoding='base64' for base64-encoded
+              // bodies, otherwise viewers decode the raw base64 as UTF-8 text.
+              // Cap each body to the byte budget so one huge response cannot
+              // inflate the retained HAR memory; mark truncation on the entry.
+              // For base64 the budget is measured in decoded bytes, so convert
+              // to a 4-char-aligned character budget (3 decoded bytes / 4 chars).
+              const isBase64 = bodyResult.base64Encoded;
+              const originalSize = isBase64
+                ? Math.floor((bodyResult.body.length * 3) / 4)
+                : Buffer.byteLength(bodyResult.body, 'utf8');
+              const { text, truncated } = isBase64
+                ? capBodyBase64(bodyResult.body, NETWORK_HAR_BODY_MAX_BYTES)
+                : capBodyText(bodyResult.body, NETWORK_HAR_BODY_MAX_BYTES);
+              return {
+                requestId: req.requestId,
+                text,
+                ...(bodyResult.base64Encoded ? { encoding: 'base64' as const } : {}),
+                ...(truncated
+                  ? { _bodyTruncated: true as const, _originalBodySize: originalSize }
+                  : {}),
+              };
             }
             return { requestId: req.requestId, _bodyUnavailable: true as const };
           } catch {
@@ -170,11 +237,18 @@ export async function buildHar(params: BuildHarParams): Promise<Har> {
       for (const result of settled) {
         if (result.status === 'fulfilled') {
           const val = result.value;
-          bodyResults.set(
-            val.requestId,
-
-            '_bodyUnavailable' in val ? { _bodyUnavailable: true } : { text: val.text },
-          );
+          if ('_bodyUnavailable' in val) {
+            bodyResults.set(val.requestId, { _bodyUnavailable: true });
+          } else {
+            bodyResults.set(val.requestId, {
+              text: val.text,
+              ...(val.encoding !== undefined && { encoding: val.encoding }),
+              ...(val._bodyTruncated !== undefined && { _bodyTruncated: val._bodyTruncated }),
+              ...(val._originalBodySize !== undefined && {
+                _originalBodySize: val._originalBodySize,
+              }),
+            });
+          }
         }
       }
     }
@@ -199,6 +273,12 @@ export async function buildHar(params: BuildHarParams): Promise<Har> {
     const reqCookieHeader = req.headers?.['cookie'] ?? '';
     const resCookieHeader = res?.headers?.['set-cookie'] ?? '';
 
+    // HAR 1.2 size/bodySize are byte counts; base64 bodies must report decoded
+    // bytes, not the base64 character count.
+    const storedBodySize = bodyContent.text
+      ? bodyByteSize(bodyContent.text, bodyContent.encoding)
+      : -1;
+
     const entry: HarEntry = {
       startedDateTime,
       time: res?.timing?.receiveHeadersEnd ?? 0,
@@ -220,13 +300,13 @@ export async function buildHar(params: BuildHarParams): Promise<Har> {
         headers: headersToHar(res?.headers),
         cookies: resCookieHeader ? parseCookies(resCookieHeader) : [],
         content: {
-          size: bodyContent.text ? bodyContent.text.length : -1,
+          size: storedBodySize,
           mimeType: res?.mimeType ?? 'application/octet-stream',
           ...bodyContent,
         },
         redirectURL: res?.headers?.['location'] ?? '',
         headersSize: -1,
-        bodySize: bodyContent.text ? bodyContent.text.length : -1,
+        bodySize: storedBodySize,
       },
       cache: {},
       timings: { send: 0, wait: res?.timing?.receiveHeadersEnd ?? 0, receive: 0 },

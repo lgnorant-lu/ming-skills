@@ -1,4 +1,5 @@
 import { buildGraphqlTypeRefSelection } from '@server/domains/graphql/handlers.impl.core.runtime.shared';
+import { GRAPHQL_REPLAY_FETCH_TIMEOUT_MS } from '@src/constants/analysis';
 
 export type GraphqlErrorPayload = {
   message?: string;
@@ -186,7 +187,10 @@ export async function postGraphqlJson(
 
   try {
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 10_000);
+    // Same configurable GraphQL POST timeout as graphql_replay (env
+    // GRAPHQL_REPLAY_FETCH_TIMEOUT_MS) — a shared constant keeps both
+    // external-endpoint paths consistent instead of a local magic number.
+    const timer = setTimeout(() => ac.abort(), GRAPHQL_REPLAY_FETCH_TIMEOUT_MS);
     try {
       const response = await fetch(endpoint, {
         method: 'POST',

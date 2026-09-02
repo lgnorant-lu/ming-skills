@@ -15,6 +15,7 @@
 import { logger } from '@utils/logger';
 import { asErrorResponse } from '@server/domains/shared/response';
 import { getToolDomain } from '@server/ToolCatalog';
+import { fastValidateToolArgs } from '@server/registry/compiled-validators';
 import { refreshDomainTtlForTool } from '@server/MCPServer.activation.ttl';
 import type { MCPServerContext } from '@server/MCPServer.context';
 import type { ToolArgs } from '@server/types';
@@ -100,7 +101,10 @@ export async function executeToolWithTracking(ctx: MCPServerContext, name: strin
   const timeoutMs = TOOL_EXEC_HANG_WATCHDOG_MS;
   const collectExecutionMetrics = shouldCollectExecutionMetrics();
   const executionStartedAt = collectExecutionMetrics ? new Date().toISOString() : null;
-  const executionStartTime = collectExecutionMetrics ? performance.now() : 0;
+  // Always record the wall-clock start — durationMs feeds the per-tool latency
+  // histogram via the 'tool:called' event (r1-2). Two performance.now() calls per
+  // tool call is negligible, unlike the E2E-gated CPU/memory snapshots below.
+  const executionStartTime = performance.now();
   const executionCpuStart = collectExecutionMetrics ? process.cpuUsage() : null;
   const executionMemoryBefore = collectExecutionMetrics ? captureExecutionMetricMemory() : null;
   try {
@@ -121,6 +125,27 @@ export async function executeToolWithTracking(ctx: MCPServerContext, name: strin
               error: `Circuit breaker open for tool "${name}"`,
               reason: `Tool has failed consecutively ${state?.failureCount ?? 0} times`,
               retryAfterSeconds: retryAfter,
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    // Level-2 fast validation (JIT compiled validator pool): rejects
+    // unambiguously invalid arguments without a Zod pass. Conservative by
+    // design — unknown/complex tools validate as OK and fall through to the
+    // SDK's strict Zod validation on MCP-envelope calls.
+    const fastArgError = fastValidateToolArgs(name, args);
+    if (fastArgError) {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              success: false,
+              error: `Invalid arguments for tool "${name}": ${fastArgError}`,
             }),
           },
         ],
@@ -230,10 +255,17 @@ export async function executeToolWithTracking(ctx: MCPServerContext, name: strin
       refreshDomainTtlForTool(ctx, name);
     }
     let toolResultSuccess = !enriched.isError;
-    if (enriched?.structuredContent && typeof enriched.structuredContent === 'object') {
+    const successFlag = enriched?.success;
+    if (typeof successFlag === 'boolean') {
+      // ResponseBuilder carries the payload's `success` boolean on the envelope,
+      // so we can read it without a full JSON.parse of the text content.
+      toolResultSuccess = successFlag;
+    } else if (enriched?.structuredContent && typeof enriched.structuredContent === 'object') {
       const resultPayload = enriched.structuredContent as Record<string, unknown>;
       toolResultSuccess = resultPayload.success !== false;
     } else if (enriched?.content?.[0]?.type === 'text' && 'text' in enriched.content[0]) {
+      // Fallback for raw (non-ResponseBuilder) handlers that still encode
+      // `success` inside the text payload.
       try {
         const parsed = JSON.parse(enriched.content[0].text) as Record<string, unknown>;
         toolResultSuccess = parsed.success !== false;
@@ -257,6 +289,7 @@ export async function executeToolWithTracking(ctx: MCPServerContext, name: strin
           : (getToolRequestContext()?.sessionId ?? null),
       timestamp: new Date().toISOString(),
       success: toolResultSuccess,
+      durationMs: Number((performance.now() - executionStartTime).toFixed(2)),
       args,
       result: {
         success: toolResultSuccess,

@@ -301,6 +301,24 @@ describe('AdvancedHandlersBase (performance)', () => {
       expect(body.success).toBe(true);
       expect(body.message).toContain('CPU profiling started');
     });
+
+    it('passes samplingInterval to the monitor', async () => {
+      performanceMonitorMethods.startCPUProfiling.mockResolvedValue(undefined);
+
+      await handler.handleProfilerCpuStart({ samplingInterval: 500 });
+      expect(performanceMonitorMethods.startCPUProfiling).toHaveBeenCalledWith({
+        samplingInterval: 500,
+      });
+    });
+
+    it('passes undefined samplingInterval when absent', async () => {
+      performanceMonitorMethods.startCPUProfiling.mockResolvedValue(undefined);
+
+      await handler.handleProfilerCpuStart({});
+      expect(performanceMonitorMethods.startCPUProfiling).toHaveBeenCalledWith({
+        samplingInterval: undefined,
+      });
+    });
   });
 
   // ---------- handleProfilerCpuStop ----------
@@ -429,6 +447,131 @@ describe('AdvancedHandlersBase (performance)', () => {
       expect(body.totalSamples).toBe(0);
       // @ts-expect-error — auto-suppressed [TS2339]
       expect(body.hotFunctions).toHaveLength(0);
+    });
+
+    it('aggregates hot functions from samples when hitCount is absent', async () => {
+      // 现代 Chrome CPU profile 是 samples + timeDeltas 形态,hitCount 已弃用恒 0。
+      // 热函数须从 samples 聚合: 每个样本沿调用链自底向上累计频次。
+      performanceMonitorMethods.stopCPUProfiling.mockResolvedValue({
+        nodes: [
+          {
+            id: 1,
+            callFrame: { functionName: 'root', url: 'app.js', lineNumber: 1 },
+            children: [2, 4],
+          },
+          {
+            id: 2,
+            callFrame: { functionName: 'hotFunc', url: 'app.js', lineNumber: 10 },
+            children: [3],
+          },
+          { id: 3, callFrame: { functionName: 'inner', url: 'app.js', lineNumber: 20 } },
+          { id: 4, callFrame: { functionName: 'warmFunc', url: 'app.js', lineNumber: 30 } },
+        ],
+        startTime: 1000,
+        endTime: 2000,
+        samples: [3, 3, 4, 3],
+      });
+      resolveArtifactPathMock.mockResolvedValue({
+        absolutePath: '/tmp/p.cpuprofile',
+        displayPath: 'p.cpuprofile',
+      });
+      writeFileMock.mockResolvedValue(undefined);
+
+      const body = parseJson<NetworkRequestsResponse>(await handler.handleProfilerCpuStop({}));
+      // 样本 3×3 次 → 节点 3/2/1 各 +3;样本 4×1 次 → 节点 4/1 各 +1
+      // counts: {1: 4, 3: 3, 2: 3, 4: 1} — 父节点(根)累计子样本;
+      // 同频节点(3/2)按 samples 首次出现序稳定排序
+      // @ts-expect-error — auto-suppressed [TS2339]
+      expect(body.hotFunctions.map((h: any) => h.functionName)).toEqual([
+        'root',
+        'inner',
+        'hotFunc',
+        'warmFunc',
+      ]);
+      // @ts-expect-error — auto-suppressed [TS2339]
+      expect(body.hotFunctions[0].hitCount).toBe(4);
+      // @ts-expect-error — auto-suppressed [TS2339]
+      expect(body.hotFunctions[1].hitCount).toBe(3);
+    });
+
+    it('prefers samples aggregation over hitCount when both are present', async () => {
+      performanceMonitorMethods.stopCPUProfiling.mockResolvedValue({
+        nodes: [
+          {
+            id: 1,
+            hitCount: 1,
+            callFrame: { functionName: 'samplesHot', url: 'app.js', lineNumber: 5 },
+          },
+          {
+            id: 2,
+            hitCount: 999,
+            callFrame: { functionName: 'hitCountHot', url: 'app.js', lineNumber: 9 },
+          },
+        ],
+        startTime: 0,
+        endTime: 100,
+        samples: [1, 1, 1],
+      });
+      resolveArtifactPathMock.mockResolvedValue({
+        absolutePath: '/tmp/p.cpuprofile',
+        displayPath: 'p.cpuprofile',
+      });
+      writeFileMock.mockResolvedValue(undefined);
+
+      const body = parseJson<NetworkRequestsResponse>(await handler.handleProfilerCpuStop({}));
+      // @ts-expect-error — auto-suppressed [TS2339]
+      expect(body.hotFunctions[0].functionName).toBe('samplesHot');
+      // @ts-expect-error — auto-suppressed [TS2339]
+      expect(body.hotFunctions[0].hitCount).toBe(3);
+    });
+
+    it('falls back to hitCount when samples are unavailable', async () => {
+      performanceMonitorMethods.stopCPUProfiling.mockResolvedValue({
+        nodes: [
+          {
+            hitCount: 100,
+            callFrame: { functionName: 'hotFunc', url: 'app.js', lineNumber: 5 },
+          },
+          {
+            hitCount: 0,
+            callFrame: { functionName: 'coldFunc', url: 'app.js', lineNumber: 9 },
+          },
+        ],
+        startTime: 0,
+        endTime: 100,
+      });
+      resolveArtifactPathMock.mockResolvedValue({
+        absolutePath: '/tmp/p.cpuprofile',
+        displayPath: 'p.cpuprofile',
+      });
+      writeFileMock.mockResolvedValue(undefined);
+
+      const body = parseJson<NetworkRequestsResponse>(await handler.handleProfilerCpuStop({}));
+      // @ts-expect-error — auto-suppressed [TS2339]
+      expect(body.hotFunctions).toHaveLength(1);
+      // @ts-expect-error — auto-suppressed [TS2339]
+      expect(body.hotFunctions[0].functionName).toBe('hotFunc');
+    });
+
+    it('notes the samples-based format when no hot data is derivable', async () => {
+      performanceMonitorMethods.stopCPUProfiling.mockResolvedValue({
+        nodes: [
+          { id: 1, hitCount: 0, callFrame: { functionName: 'fn', url: 'app.js', lineNumber: 5 } },
+        ],
+        startTime: 0,
+        endTime: 100,
+        samples: [],
+      });
+      resolveArtifactPathMock.mockResolvedValue({
+        absolutePath: '/tmp/p.cpuprofile',
+        displayPath: 'p.cpuprofile',
+      });
+      writeFileMock.mockResolvedValue(undefined);
+
+      const body = parseJson<NetworkRequestsResponse>(await handler.handleProfilerCpuStop({}));
+      // @ts-expect-error — auto-suppressed [TS2339]
+      expect(body.hotFunctions).toHaveLength(0);
+      expect(body.message).toContain('samples-based format');
     });
   });
 

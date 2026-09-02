@@ -213,13 +213,14 @@ class ContextManager(object):
             - 快速调整当前页面视口
             - 针对某个指定 context 设置 viewport
         """
-        bidi_context.set_viewport(
-            self._owner._driver,
-            context=context or self._owner.tab_id,
-            width=width,
-            height=height,
-            device_pixel_ratio=device_pixel_ratio,
-        )
+        kwargs = {
+            "context": context or self._owner.tab_id,
+            "width": width,
+            "height": height,
+        }
+        if device_pixel_ratio is not None:
+            kwargs["device_pixel_ratio"] = device_pixel_ratio
+        bidi_context.set_viewport(self._owner._driver, **kwargs)
         return self._owner
 
     def set_bypass_csp(self, enabled=True, context=None):
@@ -242,4 +243,37 @@ class ContextManager(object):
             self._owner._driver,
             context=context or self._owner.tab_id,
             enabled=enabled,
+        )
+
+    def start_screencast(
+        self,
+        context=None,
+        mime_type=None,
+        video=None,
+        audio=None,
+    ):
+        """开始录制指定或当前 browsingContext。
+
+        Args:
+            context: 可选的顶层 browsingContext ID，默认使用当前页面。
+            mime_type: 可选媒体类型，例如 ``"video/webm"``。
+            video: 可选视频约束，支持 ``width``、``height``、``frameRate``。
+            audio: 是否同时录制页面音频。
+
+        Returns:
+            dict: 包含 ``screencast`` ID 和远端 ``path``。
+        """
+        return bidi_context.start_screencast(
+            self._owner._driver,
+            context=context or self._owner.tab_id,
+            mime_type=mime_type,
+            video=video,
+            audio=audio,
+        )
+
+    def stop_screencast(self, screencast):
+        """停止录制并返回远端生成文件的路径。"""
+        return bidi_context.stop_screencast(
+            self._owner._driver,
+            screencast=screencast,
         )

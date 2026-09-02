@@ -21,7 +21,7 @@
 - browser + network
 - network + workflow
 
-## 工具清单（41）
+## 工具清单（38）
 
 | 工具 | 说明 |
 | --- | --- |
@@ -33,11 +33,8 @@
 | `network_get_response_body` | 查看某个请求的响应内容；大响应会自动截断或摘要化。 |
 | `network_get_stats` | 查看网络流量统计，包括请求量、响应量、错误率与时序信息。 |
 | `performance_get_metrics` | 查看页面性能指标，如 FCP、LCP、FID、CLS。 |
-| `performance_coverage` | 开始或停止 JavaScript 与 CSS 代码覆盖率录制。 |
-| `performance_take_heap_snapshot` | 采集一份 V8 堆内存快照。 |
 | `performance_trace` | Chrome Performance Trace 录制。start 开始捕获，stop 结束并保存跟踪文件。 |
 | `profiler_cpu` | CDP CPU 性能分析。start 开始录制，stop 结束并保存含热点函数的 Profile。 |
-| `profiler_heap_sampling` | V8 堆分配采样。start 开始追踪，stop 结束并返回主要分配热点。 |
 | `console_get_exceptions` | 获取页面中已捕获的未处理异常。 |
 | `console_inject` | 注入页面内监控器/拦截器，支持 script_monitor、xhr_interceptor、fetch_interceptor、function_tracer 等类型。 |
 | `console_inject_fetch_interceptor` | 直接注入 fetch() 拦截器。 |

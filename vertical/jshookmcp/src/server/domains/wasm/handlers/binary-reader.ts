@@ -50,7 +50,10 @@ export function readU32Leb128(bytes: Buffer, offset: number): [number, number] {
     result |= (byte & 0x7f) << shift;
     if ((byte & 0x80) === 0) break;
     shift += 7;
-    if (shift > 35) throw new Error('LEB128 exceeds u32 range');
+    // varuint32 is at most 5 bytes; a 6th byte (shift 35+) is out of range.
+    // `>=` (not `>`) so the 6-byte boundary is rejected instead of silently
+    // wrapping the continuation into a truncated value.
+    if (shift >= 35) throw new Error('LEB128 exceeds u32 range');
   }
   return [result >>> 0, pos];
 }
@@ -60,6 +63,13 @@ export function readU32Leb128(bytes: Buffer, offset: number): [number, number] {
  * Used for global init constant expressions and signed-33 memarg offsets where
  * present; the structural inspector uses it to skip past const-expr operands
  * it does not need to interpret.
+ *
+ * Precision boundary: accumulation is arithmetic (not bitwise) so payloads
+ * occupying bits 32+ decode correctly; values up to 2^53 are exact, larger
+ * magnitudes round like any double. A negative i64 whose encoding spans bit
+ * 63 (e.g. i64 min) returns its unsigned-64 approximation, matching wabt's
+ * uninterpreted u64 reading — callers needing exact i64 semantics should use
+ * BigInt.
  */
 export function readS64Leb128(bytes: Buffer, offset: number): [number, number] {
   let result = 0;
@@ -69,14 +79,20 @@ export function readS64Leb128(bytes: Buffer, offset: number): [number, number] {
   for (;;) {
     if (pos >= bytes.length) throw new Error('truncated signed LEB128');
     byte = bytes[pos++]!;
-    result |= (byte & 0x7f) << shift;
+    // Arithmetic accumulation: JS `<<` truncates to 32 bits, corrupting any
+    // varint64 payload that occupies bits 32+ (e.g. 2^40 decodes as 8).
+    result += (byte & 0x7f) * 2 ** shift;
     shift += 7;
     if ((byte & 0x80) === 0) break;
-    if (shift > 70) throw new Error('signed LEB128 exceeds i64 range');
+    // varint64 is at most 10 bytes; `>=` (not `>`) rejects an 11th byte
+    // instead of wrapping its continuation into a truncated value.
+    if (shift >= 70) throw new Error('signed LEB128 exceeds i64 range');
   }
-  // sign-extend if the last byte contributed a set sign bit
+  // sign-extend from the last payload byte's bit 6 (wasm varint semantics,
+  // matching wabt: skip when the encoding already spans bit 63, whose sign
+  // lives in the top bit — representable only approximately in a double).
   if (shift < 64 && (byte & 0x40) !== 0) {
-    result |= -1 << shift;
+    result -= 2 ** shift;
   }
   return [result, pos];
 }

@@ -8,16 +8,36 @@ def _normalize_partition(partition):
         return None
 
     partition = dict(partition)
-    if "type" in partition:
-        return partition
+    partition_type = partition.get("type")
+    if partition_type is None:
+        if "context" in partition:
+            partition_type = "context"
+            partition["type"] = partition_type
+        elif "userContext" in partition or "sourceOrigin" in partition:
+            partition_type = "storageKey"
+            partition["type"] = partition_type
+        else:
+            raise ValueError("partition must identify a context or storage key")
 
-    if "context" in partition:
-        partition["type"] = "context"
-        return partition
-
-    if "userContext" in partition or "sourceOrigin" in partition:
-        partition["type"] = "storageKey"
-        return partition
+    if partition_type == "context":
+        if not isinstance(partition.get("context"), str):
+            raise ValueError("context partition requires a string context")
+        extra_fields = set(partition) - {"type", "context"}
+        if extra_fields:
+            raise ValueError(
+                "context partition does not accept fields: {}".format(
+                    ", ".join(sorted(extra_fields))
+                )
+            )
+    elif partition_type == "storageKey":
+        for key in ("userContext", "sourceOrigin"):
+            value = partition.get(key)
+            if value is None:
+                partition.pop(key, None)
+            elif not isinstance(value, str):
+                raise ValueError("storageKey {} must be a string".format(key))
+    else:
+        raise ValueError("partition type must be context or storageKey")
 
     return partition
 

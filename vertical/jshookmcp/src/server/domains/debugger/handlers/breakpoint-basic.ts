@@ -30,7 +30,10 @@ function validateBreakpointCondition(condition: string | undefined): void {
 }
 
 export class BreakpointBasicHandlers {
-  constructor(private deps: BreakpointBasicHandlersDeps) {}
+  private deps: BreakpointBasicHandlersDeps;
+  constructor(deps: BreakpointBasicHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handleBreakpointSet(args: Record<string, unknown>) {
     const url = argString(args, 'url');

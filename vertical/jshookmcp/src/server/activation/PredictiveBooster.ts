@@ -6,8 +6,12 @@
  *    previous tool name.
  *  - Second-order Markov transitions ((A,B) → C) for richer context when
  *    the session has enough history; falls back to first-order otherwise.
- *  - Exponential decay is applied to every transition weight on each record
- *    so that stale patterns fade out and recent usage dominates predictions.
+ *  - Exponential decay keeps the tables biased toward recent behavior.
+ *    Decay is applied lazily: each entry stores the call counter of its
+ *    last touch and the accumulated decay is folded in on access. This is
+ *    mathematically equivalent to decaying every entry on each record,
+ *    but keeps recordCall O(1) instead of O(|edges|).
+ *  - Both transition tables are capped at maxSecondOrderKeys source keys.
  *
  * All tuning knobs (history cap, confidence threshold, decay factor) are
  * sourced from `src/constants.ts` and therefore overridable via `.env`.
@@ -29,20 +33,31 @@ export interface PredictiveBoosterOptions {
   maxSecondOrderKeys?: number;
 }
 
+/** Transition entry with lazy decay: value is the weight as of `lastDecayAt`. */
+interface TransitionEntry {
+  /** Weight at `lastDecayAt` (post-bump, pre-elapsed-decay). */
+  value: number;
+  /** callCounter value when the entry was last materialized or bumped. */
+  lastDecayAt: number;
+}
+
 export class PredictiveBooster {
   private readonly callHistory: string[] = [];
   private readonly maxHistory: number;
   private readonly confidenceThreshold: number;
   private readonly decayFactor: number;
 
-  /** First-order transitions: toolA → (toolB → weightedCount). */
-  private readonly transitions = new Map<string, Map<string, number>>();
+  /** First-order transitions: toolA → (toolB → entry). */
+  private readonly transitions = new Map<string, Map<string, TransitionEntry>>();
 
-  /** Second-order transitions: (toolA|toolB) → (toolC → weightedCount). */
-  private readonly transitions2 = new Map<string, Map<string, number>>();
+  /** Second-order transitions: (toolA|toolB) → (toolC → entry). */
+  private readonly transitions2 = new Map<string, Map<string, TransitionEntry>>();
 
-  /** Guards transitions2 from unbounded growth. */
+  /** Caps source-key growth in both transition tables. */
   private readonly maxSecondOrderKeys: number;
+
+  /** Monotonic recordCall counter; the decay clock for lazy materialization. */
+  private callCounter = 0;
 
   constructor(options: PredictiveBoosterOptions = {}) {
     this.maxHistory = options.maxHistory ?? PREDICTIVE_MAX_HISTORY;
@@ -55,6 +70,7 @@ export class PredictiveBooster {
    * Record a tool call and update both transition tables.
    */
   recordCall(toolName: string): void {
+    this.callCounter++;
     const previous =
       this.callHistory.length > 0 ? this.callHistory[this.callHistory.length - 1] : null;
     const prevPrev =
@@ -65,17 +81,14 @@ export class PredictiveBooster {
       this.callHistory.splice(0, this.callHistory.length - this.maxHistory);
     }
 
-    // Exponential decay keeps the tables biased toward recent behavior.
-    this.applyDecay(this.transitions);
-    this.applyDecay(this.transitions2);
-
+    // Lazy decay: entries are materialized on access, so recording a call
+    // only touches the current source's edges (O(1) instead of O(|edges|)).
     if (previous) {
       this.bumpTransition(this.transitions, previous, toolName);
     }
     if (prevPrev && previous) {
       const key = `${prevPrev}\u0001${previous}`;
       this.bumpTransition(this.transitions2, key, toolName);
-      this.enforceSecondOrderCap();
     }
   }
 
@@ -140,57 +153,83 @@ export class PredictiveBooster {
     this.callHistory.length = 0;
     this.transitions.clear();
     this.transitions2.clear();
+    this.callCounter = 0;
   }
 
   // ── internals ──
 
-  private applyDecay(table: Map<string, Map<string, number>>): void {
-    if (this.decayFactor >= 1) return;
-    for (const [, targets] of table) {
-      for (const [tool, weight] of targets) {
-        const decayed = weight * this.decayFactor;
-        if (decayed < 0.01) {
-          targets.delete(tool);
-        } else {
-          targets.set(tool, decayed);
-        }
-      }
+  /**
+   * Fold decay accumulated since the entry's last touch into its value.
+   *
+   * Eager decay multiplied every entry by decayFactor on every recordCall,
+   * so an entry with value v at call c reads v * decayFactor^(now - c) at
+   * call `now`. Applying that power once on access is mathematically
+   * equivalent and keeps recordCall independent of table size.
+   */
+  private materializeEntry(targets: Map<string, TransitionEntry>, tool: string): number {
+    const entry = targets.get(tool);
+    if (!entry) return 0;
+    if (this.decayFactor >= 1) return entry.value;
+
+    const elapsed = this.callCounter - entry.lastDecayAt;
+    if (elapsed <= 0) return entry.value;
+
+    const effective = entry.value * this.decayFactor ** elapsed;
+    if (effective < 0.01) {
+      // Same cutoff as the old eager decay: entries that per-call decay
+      // would have deleted must not resurface.
+      targets.delete(tool);
+      return 0;
     }
+    targets.set(tool, { value: effective, lastDecayAt: this.callCounter });
+    return effective;
   }
 
   private bumpTransition(
-    table: Map<string, Map<string, number>>,
+    table: Map<string, Map<string, TransitionEntry>>,
     source: string,
     target: string,
   ): void {
     let targets = table.get(source);
     if (!targets) {
-      targets = new Map<string, number>();
+      targets = new Map<string, TransitionEntry>();
       table.set(source, targets);
+      this.enforceKeyCap(table);
     }
-    targets.set(target, (targets.get(target) ?? 0) + 1);
+    const effective = this.materializeEntry(targets, target);
+    targets.set(target, { value: effective + 1, lastDecayAt: this.callCounter });
   }
 
-  private enforceSecondOrderCap(): void {
-    if (this.transitions2.size <= this.maxSecondOrderKeys) return;
-    const overflow = this.transitions2.size - this.maxSecondOrderKeys;
-    const iter = this.transitions2.keys();
+  /** Drop the oldest source keys when the table exceeds its cap. */
+  private enforceKeyCap(table: Map<string, Map<string, TransitionEntry>>): void {
+    if (table.size <= this.maxSecondOrderKeys) return;
+    const overflow = table.size - this.maxSecondOrderKeys;
+    const iter = table.keys();
     for (let i = 0; i < overflow; i++) {
       const { value, done } = iter.next();
       if (done || !value) break;
-      this.transitions2.delete(value);
+      table.delete(value);
     }
   }
 
-  private pickPredictions(targets: Map<string, number> | undefined): string[] {
+  private pickPredictions(targets: Map<string, TransitionEntry> | undefined): string[] {
     if (!targets || targets.size === 0) return [];
 
     let total = 0;
-    for (const count of targets.values()) total += count;
+    const effective = new Map<string, number>();
+    // Deleting the current entry during Map iteration is safe in JS, so no
+    // key snapshot is needed even though materializeEntry may delete.
+    for (const tool of targets.keys()) {
+      const weight = this.materializeEntry(targets, tool);
+      if (weight > 0) {
+        effective.set(tool, weight);
+        total += weight;
+      }
+    }
     if (total === 0) return [];
 
     const predictions: Array<{ tool: string; confidence: number }> = [];
-    for (const [tool, count] of targets) {
+    for (const [tool, count] of effective) {
       const confidence = count / total;
       if (confidence >= this.confidenceThreshold) {
         predictions.push({ tool, confidence });

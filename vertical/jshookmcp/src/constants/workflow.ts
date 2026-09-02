@@ -41,3 +41,12 @@ export const WORKFLOW_BUNDLE_CACHE_MAX_BYTES = int(
   'WORKFLOW_BUNDLE_CACHE_MAX_BYTES',
   100 * 1024 * 1024,
 );
+
+/**
+ * Maximum number of workflow runs retained in-memory by WorkflowRunStore.
+ * The oldest run is evicted once this cap is reached.
+ *
+ * @env WORKFLOW_MAX_RUNS
+ * @default 1000
+ */
+export const WORKFLOW_MAX_RUNS = int('WORKFLOW_MAX_RUNS', 1000);

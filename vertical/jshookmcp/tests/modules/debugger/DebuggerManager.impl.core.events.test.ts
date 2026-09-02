@@ -69,6 +69,31 @@ describe('DebuggerManager event core helpers', () => {
     expect(ctx.pausedResolvers).toEqual([]);
   });
 
+  it('skips breakpoint-hit callbacks when paused without call frames', async () => {
+    const callback = vi.fn();
+    let resolvedState: any;
+    const ctx: any = {
+      breakpointHitCallbacks: new Set([callback]),
+      breakpoints: new Map([['bp-1', { breakpointId: 'bp-1', hitCount: 0 }]]),
+      pausedState: null,
+      pausedResolvers: [(state: any) => (resolvedState = state)],
+      getScopeVariables: vi.fn(),
+    };
+
+    await handlePausedCore(ctx, {
+      reason: 'instrumentation',
+      hitBreakpoints: ['bp-1'],
+      callFrames: [],
+    });
+
+    // No TypeError on callFrames[0]; hit count still tracked and the
+    // paused-resolver is still notified so waiters do not deadlock.
+    expect(ctx.breakpoints.get('bp-1')?.hitCount).toBe(1);
+    expect(callback).not.toHaveBeenCalled();
+    expect(resolvedState.reason).toBe('instrumentation');
+    expect(ctx.pausedResolvers).toEqual([]);
+  });
+
   it('supports unregistering callbacks and clearing paused state', () => {
     const callback = vi.fn();
     const ctx: any = {

@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>inline scripts</title></head>
+<body>
+<p id="out">idle</p>
+<script>
+  // 第一段内联脚本
+  window.firstInline = function (a) {
+    const doubled = a * 2;
+    return doubled;
+  };
+</script>
+<script src="debugger_target.js"></script>
+<script>
+  // 第二段内联脚本，与第一段共用同一个文档 URL
+  window.secondInline = function (b) {
+    const tripled = b * 3;
+    return tripled;
+  };
+</script>
+</body>
+</html>

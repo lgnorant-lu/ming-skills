@@ -27,6 +27,7 @@ interface DetectProtectionsResult {
 }
 
 export class AntiDebugToolHandlers {
+  private collector: CodeCollector;
   private static readonly DEFAULT_DEBUGGER_MODE: DebuggerBypassMode = 'remove';
   private static readonly DEFAULT_MAX_DRIFT = 50;
   private static readonly DEFAULT_STACK_FILTER_PATTERNS = [
@@ -36,7 +37,9 @@ export class AntiDebugToolHandlers {
     'CDP',
   ] as const;
 
-  constructor(private collector: CodeCollector) {}
+  constructor(collector: CodeCollector) {
+    this.collector = collector;
+  }
 
   private parseDebuggerMode(value: unknown): DebuggerBypassMode {
     if (value === 'remove' || value === 'noop') {

@@ -6,6 +6,13 @@ const sandboxTestState = vi.hoisted(() => ({
   setBridgeMock: vi.fn(),
   lastOptions: undefined as any,
   lastBridge: undefined as any,
+  cpuLimitMock: vi.fn(async (fn: () => Promise<unknown>) => fn()),
+}));
+
+vi.mock('@utils/concurrency', () => ({
+  cpuLimit: sandboxTestState.cpuLimitMock,
+  ioLimit: async (fn: () => Promise<unknown>) => fn(),
+  cdpLimit: async (fn: () => Promise<unknown>) => fn(),
 }));
 
 vi.mock('@server/sandbox/QuickJSSandbox', () => {
@@ -150,6 +157,17 @@ describe('SandboxToolHandlers', () => {
       });
 
       expect(sandboxTestState.lastBridge.listAvailableTools()).toEqual(['tool_a']);
+    });
+
+    it('routes non-autoCorrect execution through the cpu concurrency limiter', async () => {
+      await handlers.handleExecuteSandboxScript({ code: 'return 42;' });
+      expect(sandboxTestState.cpuLimitMock).toHaveBeenCalledTimes(1);
+      expect(sandboxTestState.cpuLimitMock.mock.calls[0]?.[0]).toBeTypeOf('function');
+    });
+
+    it('routes autoCorrect execution through the cpu concurrency limiter', async () => {
+      await handlers.handleExecuteSandboxScript({ code: 'bad code', autoCorrect: true });
+      expect(sandboxTestState.cpuLimitMock).toHaveBeenCalledTimes(1);
     });
 
     it('should reject invalid allowedTools values', async () => {

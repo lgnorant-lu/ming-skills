@@ -1,8 +1,8 @@
-import koffi from 'koffi';
+import { requireKoffi, type KoffiLibraryHandle, type KoffiCallable } from '../koffi-loader';
 
-let _ntdll: ReturnType<typeof koffi.load> | null = null;
-function ntdll(): ReturnType<typeof koffi.load> {
-  if (!_ntdll) _ntdll = koffi.load('ntdll.dll');
+let _ntdll: KoffiLibraryHandle | null = null;
+function ntdll(): KoffiLibraryHandle {
+  if (!_ntdll) _ntdll = requireKoffi().load('ntdll.dll');
   return _ntdll;
 }
 
@@ -17,7 +17,7 @@ export function ntStatusToString(ntStatus: number): string {
 
 // ── Process ──
 
-let _NtOpenProcess: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtOpenProcess: KoffiCallable | null = null;
 function getNtOpenProcess() {
   if (!_NtOpenProcess) {
     _NtOpenProcess = ntdll().func(
@@ -51,10 +51,10 @@ export function ntOpenProcess(pid: number, desiredAccess: number, inheritHandle 
   const oa = buildObjectAttributes(attr);
   const handleBuf = Buffer.alloc(8);
   const status = getNtOpenProcess()(
-    koffi.address(handleBuf),
+    requireKoffi().address(handleBuf),
     desiredAccess,
-    koffi.address(oa),
-    koffi.address(cid),
+    requireKoffi().address(oa),
+    requireKoffi().address(cid),
   ) as number;
   if (!ntSuccess(status)) {
     throw new Error(`NtOpenProcess failed for PID ${pid}: ${ntStatusToString(status)}`);
@@ -64,7 +64,7 @@ export function ntOpenProcess(pid: number, desiredAccess: number, inheritHandle 
 
 // ── Memory ──
 
-let _NtReadVirtualMemory: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtReadVirtualMemory: KoffiCallable | null = null;
 function getNtRVM() {
   if (!_NtReadVirtualMemory) {
     _NtReadVirtualMemory = ntdll().func(
@@ -80,9 +80,9 @@ export function ntReadVirtualMemory(hProcess: bigint, baseAddress: bigint, size:
   const status = getNtRVM()(
     hProcess,
     baseAddress as unknown as bigint,
-    koffi.address(buf),
+    requireKoffi().address(buf),
     BigInt(size),
-    koffi.address(bytesRead),
+    requireKoffi().address(bytesRead),
   ) as number;
   if (!ntSuccess(status)) {
     throw new Error(`NtReadVirtualMemory failed: ${ntStatusToString(status)}`);
@@ -90,7 +90,7 @@ export function ntReadVirtualMemory(hProcess: bigint, baseAddress: bigint, size:
   return buf.subarray(0, Number(bytesRead.readBigUInt64LE(0)));
 }
 
-let _NtWriteVirtualMemory: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtWriteVirtualMemory: KoffiCallable | null = null;
 function getNtWVM() {
   if (!_NtWriteVirtualMemory) {
     _NtWriteVirtualMemory = ntdll().func(
@@ -105,9 +105,9 @@ export function ntWriteVirtualMemory(hProcess: bigint, baseAddress: bigint, data
   const status = getNtWVM()(
     hProcess,
     baseAddress as unknown as bigint,
-    koffi.address(data),
+    requireKoffi().address(data),
     BigInt(data.length),
-    koffi.address(bytesWritten),
+    requireKoffi().address(bytesWritten),
   ) as number;
   if (!ntSuccess(status)) {
     throw new Error(`NtWriteVirtualMemory failed: ${ntStatusToString(status)}`);
@@ -115,7 +115,7 @@ export function ntWriteVirtualMemory(hProcess: bigint, baseAddress: bigint, data
   return Number(bytesWritten.readBigUInt64LE(0));
 }
 
-let _NtAllocateVirtualMemory: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtAllocateVirtualMemory: KoffiCallable | null = null;
 function getNtAVM() {
   if (!_NtAllocateVirtualMemory) {
     _NtAllocateVirtualMemory = ntdll().func(
@@ -136,9 +136,9 @@ export function ntAllocateVirtualMemory(
   sizeBuf.writeBigUInt64LE(BigInt(size), 0);
   const status = getNtAVM()(
     hProcess,
-    koffi.address(addrBuf),
+    requireKoffi().address(addrBuf),
     0,
-    koffi.address(sizeBuf),
+    requireKoffi().address(sizeBuf),
     allocType,
     protect,
   ) as number;
@@ -148,7 +148,7 @@ export function ntAllocateVirtualMemory(
   return addrBuf.readBigUInt64LE(0);
 }
 
-let _NtProtectVirtualMemory: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtProtectVirtualMemory: KoffiCallable | null = null;
 function getNtPVM() {
   if (!_NtProtectVirtualMemory) {
     _NtProtectVirtualMemory = ntdll().func(
@@ -171,10 +171,10 @@ export function ntProtectVirtualMemory(
   const old = Buffer.alloc(4);
   const status = getNtPVM()(
     hProcess,
-    koffi.address(addrBuf),
-    koffi.address(sizeBuf),
+    requireKoffi().address(addrBuf),
+    requireKoffi().address(sizeBuf),
     newProtect,
-    koffi.address(old),
+    requireKoffi().address(old),
   ) as number;
   if (!ntSuccess(status)) {
     throw new Error(`NtProtectVirtualMemory failed: ${ntStatusToString(status)}`);
@@ -182,7 +182,7 @@ export function ntProtectVirtualMemory(
   return { oldProtect: old.readUInt32LE(0) };
 }
 
-let _NtFreeVirtualMemory: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtFreeVirtualMemory: KoffiCallable | null = null;
 function getNtFVM() {
   if (!_NtFreeVirtualMemory) {
     _NtFreeVirtualMemory = ntdll().func(
@@ -204,8 +204,8 @@ export function ntFreeVirtualMemory(
   sizeBuf.writeBigUInt64LE(BigInt(size), 0);
   const status = getNtFVM()(
     hProcess,
-    koffi.address(addrBuf),
-    koffi.address(sizeBuf),
+    requireKoffi().address(addrBuf),
+    requireKoffi().address(sizeBuf),
     freeType,
   ) as number;
   if (!ntSuccess(status)) {
@@ -215,7 +215,7 @@ export function ntFreeVirtualMemory(
 
 // ── Suspend / Resume ──
 
-let _NtSuspendProcess: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtSuspendProcess: KoffiCallable | null = null;
 function getNtSP() {
   if (!_NtSuspendProcess) {
     _NtSuspendProcess = ntdll().func('int32 NtSuspendProcess(void *)');
@@ -230,7 +230,7 @@ export function ntSuspendProcess(hProcess: bigint): void {
   }
 }
 
-let _NtResumeProcess: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtResumeProcess: KoffiCallable | null = null;
 function getNtRP() {
   if (!_NtResumeProcess) {
     _NtResumeProcess = ntdll().func('int32 NtResumeProcess(void *)');

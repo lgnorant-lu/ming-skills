@@ -5,7 +5,10 @@ import type { BinaryInstrumentState } from './shared';
 import { getLegacyPluginStatus, getUnidbgAvailability, jsonResponse } from './shared';
 
 export class CapabilityHandlers {
-  constructor(private readonly state: BinaryInstrumentState) {}
+  private readonly state: BinaryInstrumentState;
+  constructor(state: BinaryInstrumentState) {
+    this.state = state;
+  }
 
   async handleBinaryInstrumentCapabilities(): Promise<unknown> {
     const [

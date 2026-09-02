@@ -5,8 +5,8 @@
  * Supports: Chrome/Chromium, general macOS processes
  */
 
-import { exec, execFile, spawn } from 'child_process';
-import { promisify } from 'util';
+import { exec, execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import { logger } from '@utils/logger';
 import {
   DEBUG_PORT_CANDIDATES,

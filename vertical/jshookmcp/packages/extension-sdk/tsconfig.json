@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "target": "ES2023",
+    "target": "ES2024",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "paths": {
@@ -10,9 +10,10 @@
       "@extension-sdk/bridges/shared": ["./src/bridges/shared.ts"],
       "@extension-sdk/*": ["./src/*"]
     },
-    "lib": ["ES2023", "DOM"],
+    "lib": ["ES2024", "DOM"],
     "strict": true,
     "skipLibCheck": true,
+    "erasableSyntaxOnly": true,
     "esModuleInterop": true,
     "types": ["node"],
     "resolveJsonModule": true,

@@ -5,6 +5,7 @@ export {
   PageNavigationHandlers,
   PageInteractionHandlers,
   PageEvaluationHandlers,
+  PageDialogHandlers,
   PageDataHandlers,
   ConsoleHandlers,
   ScriptManagementHandlers,

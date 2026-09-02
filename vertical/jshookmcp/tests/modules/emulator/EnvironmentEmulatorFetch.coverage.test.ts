@@ -210,10 +210,10 @@ describe('EnvironmentEmulatorFetch – coverage gaps', () => {
       expect(result.browser).toBe(browser);
     });
 
-    it('returns browser even in error fallback when launched', async () => {
+    it('closes a self-launched browser on error fallback and does not return it', async () => {
       const page = createPage({});
       page.goto.mockRejectedValueOnce(new Error('nav failed'));
-      const browser = createBrowser(page);
+      const browser = { ...createBrowser(page), close: vi.fn().mockResolvedValue(undefined) };
       puppeteerState.launch.mockResolvedValue(browser);
 
       const result = await fetchRealEnvironmentData({
@@ -224,7 +224,8 @@ describe('EnvironmentEmulatorFetch – coverage gaps', () => {
         buildManifestFromTemplate: vi.fn(() => ({})),
       });
 
-      expect(result.browser).toBe(browser);
+      expect(browser.close).toHaveBeenCalledTimes(1);
+      expect(result.browser).toBeUndefined();
     });
   });
 

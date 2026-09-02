@@ -187,6 +187,18 @@ describe('ExtensionRegistryHandlers', () => {
     expect(result.isError).toBeUndefined();
   });
 
+  it('does not resolve "constructor" to the Object built-in via prototype chain', async () => {
+    const body = parseJson<any>(
+      await handlers.handleExecuteInContextTool({
+        pluginId: 'plugin-1',
+        contextName: 'constructor',
+        args: {},
+      } as any),
+    );
+    expect(body.success).toBe(false);
+    expect(body.error).toContain('was not found');
+  });
+
   describe('ToolResponse wrappers', () => {
     it('preserves list_installed ToolResponse results without double wrapping', async () => {
       registry.listInstalled.mockReturnValue([{ id: 'plugin-1', name: 'test-plugin' }]);

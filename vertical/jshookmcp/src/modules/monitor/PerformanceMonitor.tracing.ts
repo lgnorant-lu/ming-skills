@@ -7,6 +7,9 @@ import { writeFile } from 'node:fs/promises';
 import { resolveArtifactPath } from '@utils/artifacts';
 import { countTraceEvents } from './PerformanceMonitor.types';
 
+/** Default cap on saved trace size; larger traces are truncated with a warning. */
+export const DEFAULT_MAX_TRACE_SIZE_MB = 500;
+
 export async function startTracing(
   collector: CodeCollector,
   tracingEnabled: boolean,
@@ -47,24 +50,52 @@ export async function stopTracing(
   tracingEnabled: boolean,
   options?: {
     artifactPath?: string;
+    maxSizeMB?: number;
   },
-): Promise<{ artifactPath?: string; eventCount: number; sizeBytes: number }> {
+): Promise<{
+  artifactPath?: string;
+  eventCount: number;
+  sizeBytes: number;
+  truncated?: boolean;
+  originalSizeBytes?: number;
+}> {
   return cdpLimit(async () => {
     if (!tracingEnabled) {
       throw new PrerequisiteError('Tracing not in progress. Call startTracing() first.');
     }
 
     const page = tracingPage ?? (await collector.getActivePage());
-    const traceBuffer = await page.tracing.stop();
-    const traceData = traceBuffer ? Buffer.from(traceBuffer).toString('utf-8') : '';
+    let rawBuffer: Buffer;
+    try {
+      const stopped = await page.tracing.stop();
+      rawBuffer = stopped ? Buffer.from(stopped) : Buffer.alloc(0);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to stop performance tracing: ${msg}`, { cause: err });
+    }
+
+    // Cap trace size: toString + regex scan on a multi-GB trace multiplies
+    // memory ~3x; oversized traces are truncated and written as raw Buffer.
+    const maxSizeMB = options?.maxSizeMB ?? DEFAULT_MAX_TRACE_SIZE_MB;
+    const limitBytes = maxSizeMB * 1024 * 1024;
+    const oversized = rawBuffer.length > limitBytes;
+    const outBuffer = oversized ? rawBuffer.subarray(0, limitBytes) : rawBuffer;
+    if (oversized) {
+      logger.warn(
+        `Trace is ${rawBuffer.length} bytes, exceeding maxSizeMB=${maxSizeMB}; ` +
+          `truncated to ${limitBytes} bytes`,
+      );
+    }
 
     // Counting markers is much cheaper than materializing a large trace JSON object.
-    const eventCount = countTraceEvents(traceData);
+    const eventCount = countTraceEvents(outBuffer);
+    const sizeBytes = outBuffer.length;
+    const traceData = oversized ? undefined : outBuffer.toString('utf-8');
 
     // Save to artifact file
     let savedPath: string | undefined;
     if (options?.artifactPath) {
-      await writeFile(options.artifactPath, traceData, 'utf-8');
+      await writeFile(options.artifactPath, traceData ?? outBuffer, 'utf-8');
       savedPath = options.artifactPath;
     } else {
       const { absolutePath, displayPath } = await resolveArtifactPath({
@@ -72,20 +103,22 @@ export async function stopTracing(
         toolName: 'performance-trace',
         ext: 'json',
       });
-      await writeFile(absolutePath, traceData, 'utf-8');
+      await writeFile(absolutePath, traceData ?? outBuffer, 'utf-8');
       savedPath = displayPath;
     }
 
     logger.success('Performance trace saved', {
       eventCount,
-      sizeBytes: traceData.length,
+      sizeBytes,
       path: savedPath,
+      ...(oversized ? { truncated: true, originalSizeBytes: rawBuffer.length } : {}),
     });
 
     return {
       artifactPath: savedPath,
       eventCount,
-      sizeBytes: traceData.length,
+      sizeBytes,
+      ...(oversized ? { truncated: true, originalSizeBytes: rawBuffer.length } : {}),
     };
   });
 }

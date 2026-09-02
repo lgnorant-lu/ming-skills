@@ -9,22 +9,10 @@
  * desired Shannon entropy) so that env override stays parseable by
  * `parseInt` and avoids subtle locale-dependent float parsing.
  */
-
-const int = (key: string, fallback: number): number => {
-  const v = process.env[key];
-  if (v === undefined || v === '') return fallback;
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : fallback;
-};
+import { readEnvInteger as int, readEnvIntegerList } from '@src/config/environment';
 
 const intArray = (key: string, fallback: readonly number[]): readonly number[] => {
-  const v = process.env[key];
-  if (v === undefined || v === '') return fallback;
-  const parts = v
-    .split(',')
-    .map((s) => parseInt(s.trim(), 10))
-    .filter((n) => Number.isFinite(n) && n > 0);
-  return parts.length > 0 ? parts : fallback;
+  return readEnvIntegerList(key, [...fallback], { min: 1 });
 };
 
 /**

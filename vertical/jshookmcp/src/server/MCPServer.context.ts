@@ -1,7 +1,6 @@
-import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer, RegisteredTool, Tool } from '@modelcontextprotocol/server';
 import type { Server } from 'node:http';
 import type { Socket } from 'node:net';
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { Config } from '@internal-types/index';
 import type { ToolArgs, ToolResponse } from '@server/types';
 import type { ToolProfile } from '@server/ToolCatalog';
@@ -48,6 +47,8 @@ export interface ServerCore {
   samplingBridge: import('@server/LLMSamplingBridge').LLMSamplingBridge;
   /** Elicitation bridge — allows tools to request interactive user input from the client */
   elicitationBridge: import('@server/ElicitationBridge').ElicitationBridge;
+  /** MCP 2.0 Tasks protocol scheduler — runs long operations (frida scan, pcapng parse) in background tasks */
+  taskManager: import('@server/tasks/TaskManager').TaskManager;
   /** Structured log transport for MCP `notifications/message` */
   mcpLog: import('@server/transport/McpLogTransport').McpLogTransport;
 }
@@ -96,6 +97,29 @@ export interface TransportState {
   httpSockets: Set<Socket>;
   shutdownStarted?: boolean;
   shutdownPromise?: Promise<void>;
+  /**
+   * Stop handle for the artifact retention sweep, wired in MCPServer.start()
+   * and released in closeServer() — explicit lifecycle wiring instead of a
+   * module-level side effect (architecture hygiene, 2026-08-18).
+   */
+  artifactRetentionStop?: (() => void) | null;
+  /**
+   * Event-loop lag sampler, wired in MCPServer.start() and released in
+   * closeServer(). Exposes p50/p90/p99 + sample count through the /health
+   * verbose branch (r1-1, 2026-08-18).
+   */
+  loopLagSampler?: import('@utils/loopLag').LoopLagSampler | null;
+  /** Stop handle for the loop lag sampler (returned by `enable()`). */
+  loopLagStop?: (() => void) | null;
+  /**
+   * Per-tool latency tracker, wired in MCPServer.start() via an eventBus
+   * 'tool:called' subscription and released in closeServer(). Exposes top-N
+   * slow tools (p50/p90/p99 + sample count) through the /health verbose branch
+   * (r1-2, 2026-08-18).
+   */
+  toolLatencyTracker?: import('@utils/toolLatency').ToolLatencyTracker | null;
+  /** Unsubscribe handle for the tool-latency eventBus subscription. */
+  toolLatencyStop?: (() => void) | null;
 }
 
 /** Runtime-loaded plugins/workflows/tools from external directories. */

@@ -28,20 +28,25 @@ export interface DominatorNode {
 }
 
 /**
- * Compute retained size for a single node recursively.
+ * Compute retained size for a single node.
+ * Iterative post-order (explicit stack) — a recursive version overflows the
+ * call stack on deep dominator chains (10k+ nodes in large heap snapshots).
  * Moved to module scope since it doesn't capture any outer scope variables.
  */
 function computeRetainedSizeRecursive(node: DominatorNode): number {
-  // Start with shallow size
-  let retained = node.shallowSize;
-
-  // Add retained sizes of all children
-  for (const child of node.children) {
-    retained += computeRetainedSizeRecursive(child);
+  const order: DominatorNode[] = [];
+  const stack: DominatorNode[] = [node];
+  while (stack.length > 0) {
+    const cur = stack.pop()!;
+    order.push(cur);
+    stack.push(...cur.children);
   }
-
-  node.retainedSize = retained;
-  return retained;
+  for (let i = order.length - 1; i >= 0; i--) {
+    const cur = order[i]!;
+    cur.retainedSize =
+      cur.shallowSize + cur.children.reduce((sum, child) => sum + child.retainedSize, 0);
+  }
+  return node.retainedSize;
 }
 
 /**
@@ -332,10 +337,15 @@ export class DominatorTreeBuilder {
       if (av === 0 || aav === 0) return;
       // Recurse first so the parent path is already compressed.
       compress(av);
-      if ((semi.get(label.get(aav) ?? aav) ?? n) < (semi.get(label.get(av) ?? av) ?? n)) {
-        label.set(v, label.get(aav) ?? aav);
+      // Compare against the parent's label — after the recursion, label[av]
+      // is the min-semi vertex on the path av→root, so this propagates the
+      // path minimum into label[v]. (Previously compared label[aav] against
+      // label[av], which is always false since av→root ⊇ aav→root, so
+      // label[v] was never updated — wrong idom on graphs with cross edges.)
+      if ((semi.get(label.get(av) ?? av) ?? n) < (semi.get(label.get(v) ?? v) ?? n)) {
+        label.set(v, label.get(av) ?? av);
       }
-      ancestor.set(v, ancestor.get(aav) ?? 0);
+      ancestor.set(v, ancestor.get(av) ?? 0);
     };
 
     // eval(v): return the vertex on the compressed path from v to its forest

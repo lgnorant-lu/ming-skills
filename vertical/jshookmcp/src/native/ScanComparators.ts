@@ -1,9 +1,10 @@
 /**
  * Scan Comparators — typed value reading and comparison for iterative memory scanning.
  *
- * Implements all 10 comparison modes used by the scan engine:
+ * Implements all 14 comparison modes used by the scan engine:
  * exact, unknown_initial, changed, unchanged, increased, decreased,
- * greater_than, less_than, between, not_equal.
+ * greater_than, less_than, between, not_equal,
+ * changed_by, increased_by, decreased_by, changed_by_variable.
  *
  * Monomorphic specialization: instead of a single polymorphic compareScanValues
  * that switches on valueType every call, we pre-build a typed comparator for
@@ -106,14 +107,17 @@ function makeReader(type: ScanValueType): TypedReader {
 
 // ── Monomorphic approximate equality ───────────────────────────────────
 
-function makeApproxEqual(type: ScanValueType): (a: number | bigint, b: number | bigint) => boolean {
+function makeApproxEqual(
+  type: ScanValueType,
+  tolerance?: number,
+): (a: number | bigint, b: number | bigint) => boolean {
   if (type === 'float') {
-    return (a: number | bigint, b: number | bigint) =>
-      Math.abs(Number(a) - Number(b)) < FLOAT_EPSILON;
+    const eps = tolerance !== undefined ? tolerance : FLOAT_EPSILON;
+    return (a: number | bigint, b: number | bigint) => Math.abs(Number(a) - Number(b)) < eps;
   }
   if (type === 'double') {
-    return (a: number | bigint, b: number | bigint) =>
-      Math.abs(Number(a) - Number(b)) < DOUBLE_EPSILON;
+    const eps = tolerance !== undefined ? tolerance : DOUBLE_EPSILON;
+    return (a: number | bigint, b: number | bigint) => Math.abs(Number(a) - Number(b)) < eps;
   }
   // Integer types — bigint comparison when both are bigint, else numeric
   const isBigIntType = type === 'int64' || type === 'uint64' || type === 'pointer';
@@ -132,9 +136,14 @@ type ScanComparator = (
   target2: Buffer | null,
 ) => boolean;
 
-function makeComparator(mode: ScanCompareMode, type: ScanValueType): ScanComparator {
+function makeComparator(
+  mode: ScanCompareMode,
+  type: ScanValueType,
+  delta?: number,
+  tolerance?: number,
+): ScanComparator {
   const read = makeReader(type);
-  const approxEq = makeApproxEqual(type);
+  const approxEq = makeApproxEqual(type, tolerance);
   const isBigIntType = type === 'int64' || type === 'uint64' || type === 'pointer';
 
   const compare = isBigIntType
@@ -144,6 +153,17 @@ function makeComparator(mode: ScanCompareMode, type: ScanValueType): ScanCompara
         return ba < bb ? -1 : ba > bb ? 1 : 0;
       }
     : (a: number | bigint, b: number | bigint): number => Number(a) - Number(b);
+
+  // Helper for delta modes: compute numeric difference between current and previous
+  const deltaDiff = (cur: number | bigint, prev: number | bigint): number => {
+    if (isBigIntType) {
+      const d = BigInt(cur as bigint) - BigInt(prev as bigint);
+      return Number(d);
+    }
+    return Number(cur) - Number(prev);
+  };
+
+  const isFloatType = type === 'float' || type === 'double';
 
   switch (mode) {
     case 'exact':
@@ -193,6 +213,28 @@ function makeComparator(mode: ScanCompareMode, type: ScanValueType): ScanCompara
         if (!tgt) return false;
         return !approxEq(read(cur), read(tgt));
       };
+    case 'changed_by':
+      return (cur, prev, _tgt, _tgt2) => {
+        if (!prev || delta === undefined) return false;
+        const diff = Math.abs(deltaDiff(read(cur), read(prev)));
+        if (isFloatType && tolerance !== undefined) {
+          return Math.abs(diff - delta) <= tolerance;
+        }
+        return diff === delta;
+      };
+    case 'increased_by':
+      return (cur, prev, _tgt, _tgt2) => {
+        if (!prev || delta === undefined) return false;
+        return deltaDiff(read(cur), read(prev)) >= delta;
+      };
+    case 'decreased_by':
+      return (cur, prev, _tgt, _tgt2) => {
+        if (!prev || delta === undefined) return false;
+        return deltaDiff(read(prev), read(cur)) >= delta;
+      };
+    case 'changed_by_variable':
+      // Always include — the caller computes and stores per-address deltas.
+      return () => true;
     default:
       return () => false;
   }
@@ -202,7 +244,17 @@ function makeComparator(mode: ScanCompareMode, type: ScanValueType): ScanCompara
 
 const comparatorCache = new Map<string, ScanComparator>();
 
-function getComparator(mode: ScanCompareMode, valueType: ScanValueType): ScanComparator {
+function getComparator(
+  mode: ScanCompareMode,
+  valueType: ScanValueType,
+  delta?: number,
+  tolerance?: number,
+): ScanComparator {
+  // Skip cache when tolerance or delta is specified — these are rarely used,
+  // and the cache key would need to include them.
+  if (delta !== undefined || tolerance !== undefined) {
+    return makeComparator(mode, valueType, delta, tolerance);
+  }
   const key = `${mode}:${valueType}`;
   let comp = comparatorCache.get(key);
   if (!comp) {
@@ -228,6 +280,9 @@ export function readTypedValue(buf: Buffer, type: ScanValueType): number | bigin
  * (mode, valueType) pair. This avoids per-call switch dispatch on valueType
  * in the hot scan loop, allowing V8 TurboFan to inline and optimize the
  * typed read + compare path.
+ *
+ * @param delta - Required for changed_by/increased_by/decreased_by modes
+ * @param tolerance - Override float/double epsilon (non-negative, for float/double valueType only)
  */
 export function compareScanValues(
   current: Buffer,
@@ -236,6 +291,8 @@ export function compareScanValues(
   target2: Buffer | null,
   mode: ScanCompareMode,
   valueType: ScanValueType,
+  delta?: number,
+  tolerance?: number,
 ): boolean {
-  return getComparator(mode, valueType)(current, previous, target, target2);
+  return getComparator(mode, valueType, delta, tolerance)(current, previous, target, target2);
 }

@@ -322,4 +322,75 @@ describe('captcha-solver additional coverage', () => {
       expect(result.error).toContain('siteKey');
     });
   });
+
+  describe('task kind mapping and guards', () => {
+    it('rejects browser_check challenge type for external vision solve', async () => {
+      process.env.CAPTCHA_API_KEY = 'test-key';
+      const result = parseJson<BrowserStatusResponse>(
+        await handleCaptchaVisionSolve(
+          {
+            mode: 'external_service',
+            challengeType: 'browser_check',
+            siteKey: 'test-key',
+          },
+          createMockCollector(createMockPage()),
+        ),
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('browser_check');
+    });
+
+    it('rejects prototype-key callbackName in widget solve', async () => {
+      const result = parseJson<BrowserStatusResponse>(
+        await handleWidgetChallengeSolve(
+          {
+            mode: 'hook',
+            siteKey: 'test-key',
+            callbackName: '__proto__',
+          },
+          createMockCollector(createMockPage()),
+        ),
+      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('callbackName');
+    });
+
+    it('sends recaptcha_v3 task to anticaptcha with the correct task type', async () => {
+      process.env.CAPTCHA_PROVIDER = 'anticaptcha';
+      process.env.CAPTCHA_ANTICAPTCHA_BASE_URL = buildTestUrl('solver-anticaptcha-v3', {
+        path: 'anticaptcha',
+      });
+      const calls: Array<{ url: string; body: string }> = [];
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push({ url, body: String(init?.body ?? '') });
+        if (url.endsWith('/createTask')) {
+          return {
+            json: async () => ({ taskId: 42 }),
+          } as any;
+        }
+        return {
+          json: async () => ({
+            status: 'ready',
+            solution: { token: 'tok-v3' },
+          }),
+        } as any;
+      }) as typeof fetch;
+
+      const result = parseJson<BrowserStatusResponse>(
+        await handleCaptchaVisionSolve(
+          {
+            mode: 'external_service',
+            apiKey: 'test-key',
+            taskKind: 'recaptcha_v3',
+            siteKey: 'site-key',
+            pageUrl: buildTestUrl('page-v3', { scheme: 'http', suffix: 'local' }),
+          },
+          createMockCollector(createMockPage()),
+        ),
+      );
+      expect(result.success).toBe(true);
+      expect(calls[0]?.body).toContain('RecaptchaV3TaskProxyless');
+    });
+  });
 });

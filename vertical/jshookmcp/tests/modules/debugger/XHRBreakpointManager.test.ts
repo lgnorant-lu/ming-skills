@@ -47,13 +47,15 @@ describe('XHRBreakpointManager', () => {
     expect(session.send).toHaveBeenCalledWith('DOMDebugger.removeXHRBreakpoint', { url: '/v1/' });
   });
 
-  it('clearAll removes all known breakpoints even when a removal fails', async () => {
+  it('clearAll keeps breakpoints whose CDP removal failed', async () => {
     await manager.setXHRBreakpoint('/a/');
     await manager.setXHRBreakpoint('/b/');
     session.send.mockRejectedValueOnce(new Error('remove failed'));
 
     await manager.clearAllXHRBreakpoints();
-    expect(manager.getAllXHRBreakpoints()).toEqual([]);
+    // The failed entry stays in the local map so it can be retried — dropping
+    // it would orphan the still-active browser breakpoint.
+    expect(manager.getAllXHRBreakpoints().map((bp) => bp.urlPattern)).toEqual(['/a/']);
   });
 
   it('close delegates to clearAllXHRBreakpoints', async () => {

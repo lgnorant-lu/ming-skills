@@ -1,5 +1,5 @@
 import type { MCPServerContext } from '@server/MCPServer.context';
-import { ORCHESTRATOR_STEP_TIMEOUT_MS } from '@src/constants';
+import { ORCHESTRATOR_MAX_EXECUTION_HISTORY, ORCHESTRATOR_STEP_TIMEOUT_MS } from '@src/constants';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object';
@@ -83,6 +83,7 @@ interface WorkflowDefinition {
 export interface CrossDomainOrchestratorConfig {
   timeoutPerStep?: number;
   maxRetries?: number;
+  maxExecutionHistory?: number;
 }
 
 interface MinimalOrchestratorContext {
@@ -96,21 +97,25 @@ interface MinimalOrchestratorContext {
 }
 
 export class CrossDomainOrchestratorImpl {
+  private readonly context: MinimalOrchestratorContext;
   private readonly config: Required<CrossDomainOrchestratorConfig>;
   private readonly executionHistory: ExecutionRecord[] = [];
   private readonly workflowDefinitions = new Map<string, WorkflowDefinition>();
   private initialized = false;
 
-  constructor(
-    private readonly context: MinimalOrchestratorContext,
-    config: CrossDomainOrchestratorConfig = {},
-  ) {
+  constructor(context: MinimalOrchestratorContext, config: CrossDomainOrchestratorConfig = {}) {
+    this.context = context;
     this.config = {
       timeoutPerStep:
         typeof config.timeoutPerStep === 'number'
           ? config.timeoutPerStep
           : ORCHESTRATOR_STEP_TIMEOUT_MS,
       maxRetries: typeof config.maxRetries === 'number' ? config.maxRetries : 1,
+      maxExecutionHistory:
+        typeof config.maxExecutionHistory === 'number' &&
+        Number.isFinite(config.maxExecutionHistory)
+          ? Math.max(1, Math.trunc(config.maxExecutionHistory))
+          : ORCHESTRATOR_MAX_EXECUTION_HISTORY,
     };
     this.registerDefaultDefinitions();
   }
@@ -232,7 +237,7 @@ export class CrossDomainOrchestratorImpl {
         duration: 0,
         error: `Workflow definition "${workflowId}" not found`,
       };
-      this.executionHistory.unshift({
+      this.recordExecution({
         workflowId,
         startedAt: new Date().toISOString(),
         totalDuration: 0,
@@ -261,7 +266,7 @@ export class CrossDomainOrchestratorImpl {
       (step) => typeof step.error === 'string' && step.error.length > 0,
     );
 
-    this.executionHistory.unshift({
+    this.recordExecution({
       workflowId,
       startedAt: new Date(startedAt).toISOString(),
       totalDuration,
@@ -274,6 +279,17 @@ export class CrossDomainOrchestratorImpl {
       totalDuration,
       evidenceNodes: [...definition.evidenceNodes],
     };
+  }
+
+  /**
+   * Record an execution, evicting the oldest record once the cap is reached.
+   * History is newest-first (unshift), so the tail holds the oldest entry.
+   */
+  private recordExecution(record: ExecutionRecord): void {
+    if (this.executionHistory.length >= this.config.maxExecutionHistory) {
+      this.executionHistory.pop();
+    }
+    this.executionHistory.unshift(record);
   }
 
   async correlateDomains(

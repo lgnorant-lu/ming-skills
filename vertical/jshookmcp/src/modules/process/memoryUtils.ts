@@ -49,12 +49,13 @@ export async function batchWrite(
   return manager.batchMemoryWrite(pid, patches);
 }
 
-// Monitoring (returns monitor ID)
+// Monitoring (returns monitor ID). Defaults (size=4, intervalMs=1000) are
+// owned by MemoryMonitorManager — pass through so they cannot drift.
 export function startMonitor(
   pid: number,
   address: string,
-  size: number = 4,
-  intervalMs: number = 1000,
+  size?: number,
+  intervalMs?: number,
   onChange?: (oldValue: string, newValue: string) => void,
 ) {
   const manager = new MemoryManager();

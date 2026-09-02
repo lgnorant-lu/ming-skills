@@ -12,6 +12,7 @@ describe('ConsoleHandlers', () => {
     vi.clearAllMocks();
     consoleMonitor = {
       enable: vi.fn(),
+      disable: vi.fn(),
       getLogs: vi.fn(),
       execute: vi.fn(),
     };
@@ -19,6 +20,15 @@ describe('ConsoleHandlers', () => {
       smartHandle: vi.fn((value: any) => ({ wrapped: value })),
     };
     handlers = new ConsoleHandlers({ consoleMonitor, detailedDataManager });
+  });
+
+  it('rejects an invalid action instead of silently disabling', async () => {
+    const result = parseJson<BrowserStatusResponse>(
+      await handlers.handleConsoleMonitor({ action: 'toggle' }),
+    );
+    expect(result.success).toBe(false);
+    expect(consoleMonitor.enable).not.toHaveBeenCalled();
+    expect(consoleMonitor.disable).not.toHaveBeenCalled();
   });
 
   it('enables console monitoring and returns a success payload', async () => {
@@ -50,16 +60,13 @@ describe('ConsoleHandlers', () => {
       limit: 25,
       since: 1000,
     });
-    expect(detailedDataManager.smartHandle).toHaveBeenCalledWith(
-      {
-        count: 2,
-        logs: [
-          { type: 'error', text: 'boom' },
-          { type: 'warn', text: 'careful' },
-        ],
-      },
-      51200,
-    );
+    expect(detailedDataManager.smartHandle).toHaveBeenCalledWith({
+      count: 2,
+      logs: [
+        { type: 'error', text: 'boom' },
+        { type: 'warn', text: 'careful' },
+      ],
+    });
     expect(body.success).toBe(true);
     expect(body.wrapped).toEqual({
       count: 2,

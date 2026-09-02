@@ -21,7 +21,10 @@ type TextToolResponse = {
 };
 
 export class ExternalToolHandlersBase {
-  constructor(protected readonly state: WasmSharedState) {}
+  protected readonly state: WasmSharedState;
+  constructor(state: WasmSharedState) {
+    this.state = state;
+  }
 
   protected ok(payload: Record<string, unknown>): TextToolResponse {
     return {
@@ -56,7 +59,7 @@ export class ExternalToolHandlersBase {
   }): Promise<string> {
     const { outputPath, artifact, content, pathMode = 'display' } = options;
     if (outputPath) {
-      const safePath = validateOutputPath(outputPath);
+      const safePath = await validateOutputPath(outputPath);
       await writeFile(safePath, content, 'utf-8');
       return safePath;
     }
@@ -73,7 +76,7 @@ export class ExternalToolHandlersBase {
   }): Promise<string> {
     const { outputPath, artifact, pathMode = 'absolute' } = options;
     if (outputPath) {
-      return validateOutputPath(outputPath);
+      return await validateOutputPath(outputPath);
     }
 
     const { absolutePath, displayPath } = await resolveArtifactPath(artifact);

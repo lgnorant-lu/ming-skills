@@ -14,11 +14,12 @@
 
 import type { LLMSamplingBridge } from '@server/LLMSamplingBridge';
 import { logger } from '@utils/logger';
+import { DEOBF_LLM_MAX_CODE_SNIPPET, DEOBF_LLM_MAX_IDENTIFIERS } from '@src/constants/transform';
 
 /** Maximum code snippet size sent to the LLM (chars) to avoid token overflow */
-const MAX_CODE_SNIPPET = 2000;
+const MAX_CODE_SNIPPET = DEOBF_LLM_MAX_CODE_SNIPPET;
 /** Maximum number of identifiers to send in one request */
-const MAX_IDENTIFIERS = 20;
+const MAX_IDENTIFIERS = DEOBF_LLM_MAX_IDENTIFIERS;
 
 export interface NameSuggestion {
   original: string;
@@ -27,7 +28,10 @@ export interface NameSuggestion {
 }
 
 export class LLMDeobfuscator {
-  constructor(private readonly bridge: LLMSamplingBridge) {}
+  private readonly bridge: LLMSamplingBridge;
+  constructor(bridge: LLMSamplingBridge) {
+    this.bridge = bridge;
+  }
 
   /**
    * Check if the underlying sampling bridge supports LLM delegation.

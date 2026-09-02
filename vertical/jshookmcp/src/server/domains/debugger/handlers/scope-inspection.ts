@@ -1,5 +1,6 @@
 import type { DebuggerManager } from '@server/domains/shared/modules';
 import type { RuntimeInspector } from '@server/domains/shared/modules';
+import { ToolError } from '@errors/ToolError';
 import { argString, argNumber, argBool } from '@server/domains/shared/parse-args';
 
 interface ScopeInspectionHandlersDeps {
@@ -21,7 +22,10 @@ const getErrorMessage = (error: unknown, fallback: string): string => {
 };
 
 export class ScopeInspectionHandlers {
-  constructor(private deps: ScopeInspectionHandlersDeps) {}
+  private deps: ScopeInspectionHandlersDeps;
+  constructor(deps: ScopeInspectionHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handleGetScopeVariablesEnhanced(args: Record<string, unknown>) {
     const callFrameId = argString(args, 'callFrameId');
@@ -46,6 +50,11 @@ export class ScopeInspectionHandlers {
         ],
       };
     } catch (error: unknown) {
+      // Let classified ToolErrors (including PrerequisiteError) propagate
+      // to MCPServer's unified error handler (same convention as debugger-state)
+      if (error instanceof ToolError) {
+        throw error;
+      }
       return {
         content: [
           {
@@ -105,6 +114,9 @@ export class ScopeInspectionHandlers {
         ],
       };
     } catch (error: unknown) {
+      if (error instanceof ToolError) {
+        throw error;
+      }
       return {
         content: [
           {

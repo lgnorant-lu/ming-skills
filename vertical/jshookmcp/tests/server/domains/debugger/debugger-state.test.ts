@@ -2,6 +2,7 @@ import { parseJson } from '@tests/server/domains/shared/mock-factories';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ToolError } from '@errors/ToolError';
+import { DEBUGGER_WAIT_FOR_PAUSED_TIMEOUT_MS } from '@src/constants';
 import { DebuggerStateHandlers } from '@server/domains/debugger/handlers/debugger-state';
 import { buildTestUrl } from '@tests/shared/test-urls';
 
@@ -50,7 +51,7 @@ describe('DebuggerStateHandlers', () => {
 
     const body = parseJson<any>(await handlers.handleDebuggerWaitForPaused({}));
 
-    expect(debuggerManager.waitForPaused).toHaveBeenCalledWith(30000);
+    expect(debuggerManager.waitForPaused).toHaveBeenCalledWith(DEBUGGER_WAIT_FOR_PAUSED_TIMEOUT_MS);
     expect(body).toEqual({
       success: false,
       paused: false,

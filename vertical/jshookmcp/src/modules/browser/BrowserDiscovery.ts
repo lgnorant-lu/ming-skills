@@ -68,8 +68,8 @@ export class BrowserDiscovery {
    * discovery queries; callers keep their own try/catch and output parsing.
    */
   private async execPowerShell(command: string, maxBuffer = 10 * 1024 * 1024): Promise<string> {
-    const { execFile } = await import('child_process');
-    const { promisify } = await import('util');
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
     const execFileAsync = promisify(execFile);
     const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', command], {
       maxBuffer,
@@ -149,8 +149,8 @@ export class BrowserDiscovery {
 
     try {
       const escapedPattern = this.escapePowerShellSingleQuoted(classNamePattern);
-      const { execFile } = await import('child_process');
-      const { promisify } = await import('util');
+      const { execFile } = await import('node:child_process');
+      const { promisify } = await import('node:util');
       const execFileAsync = promisify(execFile);
       const { stdout } = await execFileAsync(
         'powershell.exe',

@@ -21,7 +21,7 @@
 - native-emulator + binary-instrument
 - native-emulator + dart-inspector
 
-## 工具清单（54）
+## 工具清单（56）
 
 | 工具 | 说明 |
 | --- | --- |
@@ -79,3 +79,5 @@
 | `nemu_regs_restore` | 从之前保存的快照（由 nemu_regs_save 创建）恢复 GPR 寄存器。部分恢复：仅写回已保存的寄存器。用于在混淆函数调用后恢复解码/上下文寄存器。 |
 | `nemu_scan_memory` | 在仿真内存中扫描字节模式（类似 Volatility）。使用 Boyer-Moore-Horspool 算法在 guest 地址范围内搜索精确字节匹配。返回匹配地址列表。静默跳过未映射区域——如需扩展扫描范围请先调用 nemu_mem_map。 |
 | `nemu_xor_region` | 用单字节密钥对仿真内存区域进行 XOR 运算。返回 XOR 结果的 base64。用于快速解密测试——用候选密钥字节 XOR 缓冲区并检查预览，不修改 guest 状态。设 dryRun=false 将 XOR 结果写回 guest 内存。 |
+| `nemu_relay` | 通过 IPC 中继连接到远程 native-emulator 会话。通过命名管道（Windows）或 Unix domain socket（Linux/macOS）以长度前缀帧的 JSON-RPC 转发 nemu 操作。适合从 Windows MCP 服务器驱动 Linux 主机上的 ARM64 nemu 会话（反之亦然）。 |
+| `nemu_gdbserver` | 基于用户提供的 TCP 监听器实现的 GDB 远程串行协议（RSP）桩。这是一个协议桩层——需要自行提供 TCP socket（例如 netcat、Python socket 脚本或自定义桥接）。该工具接收原始 RSP 数据包并分发给仿真器，返回 RSP 响应。数据包格式：$data#checksum（RFC 5.1 GDB Remote Serial Protocol）。支持的命令：?（停止原因）、g（读寄存器）、G（写寄存器）、m addr,len（读内存）、M addr,len:data（写内存）、s（单步）、c（继续）、Z0,z0（设置/清除软件断点）。可用 action：packet（处理单个 RSP 数据包——返回响应供调用方回传）、status（报告会话就绪状态）。这是与 CE 7.6+ / x64dbg gdbserver 兼容的最小实现。 |

@@ -2,7 +2,11 @@
  * TLS Key Log Extractor tests.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, afterEach } from 'vitest';
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   enableKeyLog,
   disableKeyLog,
@@ -13,6 +17,7 @@ import {
   lookupSecret,
   classifyKeyLogSecrets,
   classifySecretLabel,
+  TLSKeyLogExtractor,
 } from '@modules/boringssl-inspector/TLSKeyLogExtractor';
 
 describe('TLSKeyLogExtractor', () => {
@@ -305,6 +310,71 @@ CLIENT_HANDSHAKE_TRAFFIC_SECRET aabb0011 22223333`);
         '00 00 00 00 00 00 00 00 00 00 00 00',
       );
       expect(typeof result).toBe('string');
+    });
+  });
+
+  describe('TLSKeyLogExtractor.enableKeyLog', () => {
+    let tempDir: string;
+
+    afterEach(() => {
+      if (tempDir) {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('creates the keylog file with 0o600 permissions on POSIX', () => {
+      if (process.platform === 'win32') {
+        return; // POSIX mode bits are not meaningful on Windows ACLs.
+      }
+      tempDir = mkdtempSync(join(tmpdir(), 'jshook-keylog-perm-'));
+      const keyLogPath = join(tempDir, 'sslkeylog.log');
+      const extractor = new TLSKeyLogExtractor(keyLogPath);
+
+      return extractor.enableKeyLog().then(() => {
+        const mode = statSync(keyLogPath).mode & 0o777;
+        expect(mode).toBe(0o600);
+      });
+    });
+  });
+
+  describe('TLSKeyLogExtractor.sealKeyLog', () => {
+    let tempDir: string;
+
+    afterEach(() => {
+      if (tempDir) {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('returns null when no keylog file exists', async () => {
+      tempDir = mkdtempSync(join(tmpdir(), 'jshook-keylog-seal-'));
+      const extractor = new TLSKeyLogExtractor(join(tempDir, 'missing.log'));
+      const result = await extractor.sealKeyLog();
+      expect(result).toBeNull();
+    });
+
+    it('encrypts the plaintext keylog and wipes the source', async () => {
+      tempDir = mkdtempSync(join(tmpdir(), 'jshook-keylog-seal-'));
+      const keyLogPath = join(tempDir, 'sslkeylog.log');
+      await writeFile(
+        keyLogPath,
+        'CLIENT_RANDOM aabbccdd11223344 00112233aabbccddeeff0011\n',
+        'utf8',
+      );
+      const extractor = new TLSKeyLogExtractor(keyLogPath);
+
+      const sealed = await extractor.sealKeyLog();
+      expect(sealed).not.toBeNull();
+      expect(sealed?.entryCount).toBe(1);
+      expect(sealed?.keyHex).toMatch(/^[0-9a-f]{64}$/);
+      expect(existsSync(keyLogPath)).toBe(false);
+      expect(existsSync(sealed!.cipherPath)).toBe(true);
+
+      const rawCipher = await readFile(sealed!.cipherPath, 'utf8');
+      expect(rawCipher).not.toContain('CLIENT_RANDOM');
+      expect(rawCipher).not.toContain('AABBCCDD11223344');
+
+      rmSync(sealed!.cipherPath, { force: true });
     });
   });
 });

@@ -12,7 +12,10 @@ interface TargetControlHandlersDeps {
 }
 
 export class TargetControlHandlers {
-  constructor(private readonly deps: TargetControlHandlersDeps) {}
+  private readonly deps: TargetControlHandlersDeps;
+  constructor(deps: TargetControlHandlersDeps) {
+    this.deps = deps;
+  }
 
   private markMonitoringContextChanged(context: string): void {
     try {

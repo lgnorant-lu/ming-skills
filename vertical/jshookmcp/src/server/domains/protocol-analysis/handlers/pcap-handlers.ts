@@ -172,9 +172,9 @@ export class ProtocolAnalysisPcapHandlers extends ProtocolAnalysisPacketBuildHan
       // common user mistake (research #5). The magic is the shared pcapng.ts
       // SECTION_HEADER block-type constant.
       if (buffer.length >= 4 && buffer.readUInt32BE(0) === PCAPNG_BLOCK_TYPE.SECTION_HEADER) {
-        const offloadPacket = (hex: string, packetIndex: number): string =>
+        const offloadPacket = (hex: string, packetIndex: number): Promise<string> =>
           this.detailedDataManager.store({ packetIndex, hex });
-        const result = parsePcapng(buffer, {
+        const result = await parsePcapng(buffer, {
           maxPackets,
           maxBytesPerPacket,
           offloadPacket,

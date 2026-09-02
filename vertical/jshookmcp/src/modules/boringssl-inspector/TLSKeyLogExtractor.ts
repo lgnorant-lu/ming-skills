@@ -2,8 +2,9 @@ import { createDecipheriv, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { getTlsKeyLogDir } from '@utils/outputPaths';
+import { getEphemeralKeylogDir, getTlsKeyLogDir } from '@utils/outputPaths';
 import { TLS_KEYLOG_PATH } from '@src/constants';
+import { generateEphemeralKey, sealFileToPath } from '@utils/crypto/ephemeralCipher';
 
 export interface KeyLogEntry {
   label: string;
@@ -17,6 +18,19 @@ export interface KeyLogSummary {
   entriesByLabel: Record<string, number>;
   firstSeen?: string;
   lastSeen?: string;
+}
+
+export interface SealedKeyLogResult {
+  /** Path of the encrypted envelope written to disk. */
+  cipherPath: string;
+  /**
+   * Hex-encoded ephemeral key, held only for the caller to keep in memory
+   * (e.g. attach to the in-process session state). Never written to disk by
+   * this function — the caller decides whether/where to hold it.
+   */
+  keyHex: string;
+  /** Number of keylog entries that were present in the plaintext before sealing. */
+  entryCount: number;
 }
 
 const DEFAULT_KEYLOG_PREFIX = 'jshook-boringssl';
@@ -98,7 +112,10 @@ export class TLSKeyLogExtractor {
 
   async enableKeyLog(): Promise<string> {
     await mkdir(dirname(this.keyLogPath), { recursive: true });
-    await writeFile(this.keyLogPath, '', { flag: 'a' });
+    // 0o600: this file receives BoringSSL/Node's plaintext TLS master
+    // secrets/traffic keys the moment TLS handshakes occur — restrict it to
+    // the owning user from creation, not just at sealKeyLog() time.
+    await writeFile(this.keyLogPath, '', { flag: 'a', mode: 0o600 });
     process.env.SSLKEYLOGFILE = this.keyLogPath;
     return this.keyLogPath;
   }
@@ -197,6 +214,37 @@ export class TLSKeyLogExtractor {
     }
 
     return null;
+  }
+
+  /**
+   * Read the plaintext keylog file, encrypt its contents with a fresh
+   * ephemeral key, write the ciphertext to a sealed-directory envelope, and
+   * securely wipe the plaintext source. Call after parseKeyLog()/
+   * summarizeKeyLog() have already extracted whatever structured data the
+   * caller needs — this is the disk-forensics mitigation (pagefile/
+   * hibernation/TEMP scraping), not a substitute for parsing.
+   *
+   * The BoringSSL/Node TLS stack itself writes plaintext into keyLogPath (see
+   * enableKeyLog(); that write path is outside this process's control), so
+   * this cannot prevent the plaintext from existing on disk at all — it only
+   * shortens the exposure window between the write and the seal.
+   *
+   * Returns null if the plaintext file does not exist (nothing to seal).
+   */
+  async sealKeyLog(): Promise<SealedKeyLogResult | null> {
+    if (!existsSync(this.keyLogPath)) {
+      return null;
+    }
+
+    const entries = this.parseKeyLog();
+    const cipherDir = getEphemeralKeylogDir();
+    await mkdir(cipherDir, { recursive: true });
+    const cipherPath = resolve(cipherDir, `${DEFAULT_KEYLOG_PREFIX}-${randomUUID()}.sealed.json`);
+
+    const key = generateEphemeralKey();
+    await sealFileToPath(this.keyLogPath, cipherPath, key);
+
+    return { cipherPath, keyHex: key.toString('hex'), entryCount: entries.length };
   }
 }
 

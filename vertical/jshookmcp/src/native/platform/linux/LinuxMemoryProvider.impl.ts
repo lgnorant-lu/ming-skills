@@ -68,9 +68,12 @@ function normalizePattern(pattern: Buffer | string): Buffer {
 }
 
 export class LinuxMemoryProviderImpl implements PlatformMemoryAPI {
+  private readonly pid: number;
   readonly platform = 'linux';
 
-  constructor(private readonly pid: number = process.pid) {}
+  constructor(pid: number = process.pid) {
+    this.pid = pid;
+  }
 
   isAvailable(): boolean {
     return isLinuxRuntime();
@@ -78,12 +81,12 @@ export class LinuxMemoryProviderImpl implements PlatformMemoryAPI {
 
   async read(address: bigint, size: number): Promise<Buffer> {
     const handle = this.openProcess(this.pid, false);
-    return this.readMemory(handle, address, size).data;
+    return (await this.readMemory(handle, address, size)).data;
   }
 
   async write(address: bigint, data: Buffer): Promise<boolean> {
     const handle = this.openProcess(this.pid, true);
-    const result = this.writeMemory(handle, address, data);
+    const result = await this.writeMemory(handle, address, data);
     return result.bytesWritten === data.length;
   }
 
@@ -104,7 +107,7 @@ export class LinuxMemoryProviderImpl implements PlatformMemoryAPI {
       }
 
       try {
-        const buffer = this.readMemory(handle, region.start, size).data;
+        const buffer = (await this.readMemory(handle, region.start, size)).data;
         let offset = buffer.indexOf(patternBuffer);
         while (offset >= 0) {
           matches.push(region.start + BigInt(offset));
@@ -157,33 +160,44 @@ export class LinuxMemoryProviderImpl implements PlatformMemoryAPI {
 
   closeProcess(_handle: ProcessHandle): void {}
 
-  readMemory(handle: ProcessHandle, address: bigint, size: number): MemoryReadResult {
+  async readMemory(
+    handle: ProcessHandle,
+    address: bigint,
+    size: number,
+  ): Promise<MemoryReadResult> {
     const memPath = `/proc/${handle.pid}/mem`;
-    const fileDescriptor = fs.openSync(memPath, handle.writeAccess ? 'r+' : 'r');
+    const fileDescriptor = await fs.promises.open(memPath, handle.writeAccess ? 'r+' : 'r');
     const buffer = Buffer.alloc(size);
 
     try {
-      const bytesRead = fs.readSync(fileDescriptor, buffer, 0, size, Number(address));
+      const { bytesRead } = await fileDescriptor.read(buffer, 0, size, Number(address));
       return {
         data: buffer.subarray(0, bytesRead),
         bytesRead,
       };
     } finally {
-      fs.closeSync(fileDescriptor);
+      await fileDescriptor.close();
     }
   }
 
-  writeMemory(handle: ProcessHandle, address: bigint, data: Buffer): MemoryWriteResult {
+  async writeMemory(
+    handle: ProcessHandle,
+    address: bigint,
+    data: Buffer,
+  ): Promise<MemoryWriteResult> {
+    if (!handle.writeAccess) {
+      throw new Error('LinuxMemoryProvider: write requires a writeAccess handle');
+    }
     const memPath = `/proc/${handle.pid}/mem`;
-    const fileDescriptor = fs.openSync(memPath, 'r+');
+    const fileDescriptor = await fs.promises.open(memPath, 'r+');
 
     try {
-      const bytesWritten = fs.writeSync(fileDescriptor, data, 0, data.length, Number(address));
+      const { bytesWritten } = await fileDescriptor.write(data, 0, data.length, Number(address));
       return {
         bytesWritten,
       };
     } finally {
-      fs.closeSync(fileDescriptor);
+      await fileDescriptor.close();
     }
   }
 

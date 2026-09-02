@@ -3,6 +3,8 @@ export interface CrossDomainWorkflowStep {
   args: Record<string, unknown>;
 }
 
+import { DEBUGGER_WAIT_FOR_PAUSED_TIMEOUT_MS } from '@src/constants/analysis';
+
 export interface CrossDomainWorkflowDefinition {
   id: string;
   displayName: string;
@@ -56,7 +58,7 @@ export const WORKFLOWS: Record<string, CrossDomainWorkflowDefinition> = {
       { tool: 'canvas_engine_fingerprint', args: { canvasId: '${input.canvasId}' } },
       { tool: 'canvas_scene_dump', args: { canvasId: '${input.canvasId}' } },
       { tool: 'skia_correlate_objects', args: { skiaNodeIds: '${previous.nodeIds}' } },
-      { tool: 'performance_take_heap_snapshot', args: {} },
+      { tool: 'v8_heap_snapshot_capture', args: {} },
       { tool: 'js_heap_search', args: { pattern: '${input.searchTerm}' } },
     ],
   },
@@ -108,7 +110,7 @@ export const WORKFLOWS: Record<string, CrossDomainWorkflowDefinition> = {
       { tool: 'network_enable', args: {} },
       { tool: 'network_get_requests', args: { limit: 200 } },
       { tool: 'network_extract_auth', args: { includeHeaders: true } },
-      { tool: 'performance_take_heap_snapshot', args: {} },
+      { tool: 'v8_heap_snapshot_capture', args: {} },
       { tool: 'js_heap_search', args: { pattern: '${input.searchTerm}' } },
       {
         tool: 'cross_domain_correlate_all',
@@ -138,7 +140,7 @@ export const WORKFLOWS: Record<string, CrossDomainWorkflowDefinition> = {
     steps: [
       { tool: 'debugger_lifecycle', args: { action: 'enable' } },
       { tool: 'breakpoint', args: { action: 'set', type: 'code' } },
-      { tool: 'debugger_wait_for_paused', args: { timeout: 30000 } },
+      { tool: 'debugger_wait_for_paused', args: { timeout: DEBUGGER_WAIT_FOR_PAUSED_TIMEOUT_MS } },
       { tool: 'get_call_stack', args: {} },
       { tool: 'get_scope_variables_enhanced', args: { includeObjectProperties: true } },
       { tool: 'js_heap_search', args: { pattern: '${input.searchTerm}' } },

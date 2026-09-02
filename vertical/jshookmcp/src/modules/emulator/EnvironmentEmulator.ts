@@ -1,6 +1,6 @@
 import * as parser from '@babel/parser';
 import traverse from '@babel/traverse';
-import { existsSync } from 'fs';
+import { existsSync } from 'node:fs';
 import type {
   EnvironmentEmulatorOptions,
   EnvironmentEmulatorResult,

@@ -383,7 +383,7 @@ export const systemPhases: Phase[] = [
       'v8_bytecode_extract',
       'v8_bytecode_decompile',
       'v8_version_detect',
-      'v8_jit_inspect',
+      'v8_turbofan_inspect',
     ],
   },
   {
@@ -469,7 +469,7 @@ export const systemPhases: Phase[] = [
     concurrent: true,
     group: 'compute-browser',
     setup: [],
-    tools: ['performance_coverage', 'performance_trace', 'profiler_cpu', 'profiler_heap_sampling'],
+    tools: ['page_coverage_start', 'performance_trace', 'profiler_cpu', 'v8_heap_sampling'],
   },
   {
     name: 'Network Tools (short-name aliases)',

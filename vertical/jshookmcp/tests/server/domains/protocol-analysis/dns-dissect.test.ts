@@ -197,4 +197,59 @@ describe('ProtocolAnalysisHandlers — handleProtoDissectDns', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('packetHex');
   });
+
+  it('keeps the numeric type for known-but-unlisted records (DS 43)', async () => {
+    // DS is a real DNSSEC record type that dns-packet names but the project's
+    // mnemonic table doesn't list; the wire number must survive intact.
+    const packet =
+      `000081800001000100000000` +
+      `${EXAMPLE_COM_QNAME}00010001` +
+      `c00c002b00010000012c0004deadbeef`;
+
+    const result = await handlers.handleProtoDissectDns({ packetHex: packet });
+
+    expect(result.success).toBe(true);
+    expect(result.message!.answers[0]?.type).toBe(43);
+    expect(result.message!.answers[0]?.typeMnemonic).toBe('DS');
+    expect(result.message!.answers[0]?.rdataHex).toBe('deadbeef');
+  });
+
+  it('decodes an SRV record into priority/weight/port/target', async () => {
+    // RDATA: priority=1, weight=5, port=30, target=sip.example.com (17 bytes)
+    const packet =
+      `000081800001000100000000` +
+      `${EXAMPLE_COM_QNAME}00010001` +
+      `c00c002100010000012c0017` +
+      `00010005001e03736970076578616d706c6503636f6d00`;
+
+    const result = await handlers.handleProtoDissectDns({ packetHex: packet });
+
+    expect(result.success).toBe(true);
+    expect(result.message!.answers[0]?.typeMnemonic).toBe('SRV');
+    expect(result.message!.answers[0]?.decoded).toMatchObject({
+      priority: 1,
+      weight: 5,
+      port: 30,
+      target: 'sip.example.com',
+    });
+  });
+
+  it('keeps raw rdataHex for unknown record types (65)', async () => {
+    // Type 65 (HTTPS/SVCB) — dns-packet labels it UNKNOWN_65; the project
+    // mnemonic is TYPE65 and the raw bytes must survive for reverse
+    // engineering.
+    const packet =
+      `000081800001000100000000` +
+      `${EXAMPLE_COM_QNAME}00010001` +
+      `c00c004100010000012c0004deadbeef`;
+
+    const result = await handlers.handleProtoDissectDns({ packetHex: packet });
+
+    expect(result.success).toBe(true);
+    const answer = result.message!.answers[0];
+    expect(answer?.type).toBe(65);
+    expect(answer?.typeMnemonic).toBe('TYPE65');
+    expect(answer?.rdataHex).toBe('deadbeef');
+    expect(answer?.decoded).toBeUndefined();
+  });
 });

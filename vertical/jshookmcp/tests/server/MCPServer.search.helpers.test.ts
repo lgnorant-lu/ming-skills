@@ -79,6 +79,11 @@ vi.mock('@server/registry/generated-domains', () => ({
 vi.mock('@src/constants', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@src/constants')>()),
   SEARCH_WORKFLOW_DOMAIN_BOOST_MULTIPLIER: 1.5,
+  // Sentinel values (≠ src defaults 1.12/1.35/1.25) prove getSearchEngine reads
+  // the shared constants instead of inlining literals.
+  SEARCH_EXTENSION_TOOL_BOOST_MULTIPLIER: 3.33,
+  SEARCH_WORKFLOW_TOOL_BOOST_MULTIPLIER: 2.22,
+  SEARCH_WORKFLOW_LIST_TOOL_BOOST_MULTIPLIER: 1.11,
   SEARCH_VECTOR_ENABLED: false,
 }));
 
@@ -230,11 +235,13 @@ describe('MCPServer.search.helpers', () => {
       ]),
     );
     expect(mocks.engineInstances[0].args[2]).toEqual(new Map([['workflow', 1.5]]));
+    // Sentinel values from the mocked @src/constants: a literal regression here
+    // (back to 1.12/1.35/1.25) would fail these assertions.
     expect(mocks.engineInstances[0].args[3]).toEqual(
       new Map([
-        ['custom_tool', 1.12],
-        ['run_extension_workflow', 1.35],
-        ['list_extension_workflows', 1.25],
+        ['custom_tool', 3.33],
+        ['run_extension_workflow', 2.22],
+        ['list_extension_workflows', 1.11],
       ]),
     );
 

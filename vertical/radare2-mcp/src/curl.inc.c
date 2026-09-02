@@ -20,6 +20,17 @@
 #error please define R2__WINDOWS__ or R2__UNIX__ for platform detection
 #endif
 
+#if defined(__wasi__)
+char *curl_post_capture(const char *url, const char *msg, int *exit_code_out) {
+	(void)url;
+	(void)msg;
+	if (exit_code_out) {
+		*exit_code_out = -1;
+	}
+	errno = ENOTSUP;
+	return NULL;
+}
+#else
 // POST msg to url via `curl -sS -d`; returns response body (caller frees) or NULL on error.
 char *curl_post_capture(const char *url, const char *msg, int *exit_code_out) {
 	if (exit_code_out) {
@@ -226,3 +237,4 @@ char *curl_post_capture(const char *url, const char *msg, int *exit_code_out) {
 	buf[len] = '\0';
 	return buf;
 }
+#endif

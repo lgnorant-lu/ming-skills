@@ -1,9 +1,10 @@
-import { readdir, rm, stat } from 'node:fs/promises';
+import { readdir, rm, rmdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { getArtifactDir, getArtifactsRoot, type ArtifactCategory } from '@utils/artifacts';
 import { getConfig } from '@utils/config';
 import { getDebuggerSessionsDir, getProjectRoot } from '@utils/outputPaths';
 import { logger } from '@utils/logger';
+import { readEnvBoolean, readEnvInteger } from '@src/config/environment';
 
 export interface ArtifactRetentionConfig {
   enabled: boolean;
@@ -38,6 +39,13 @@ interface ArtifactFileEntry {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+// a4-06: retention used to default to disabled (env ?? '0'), letting artifacts
+// accumulate without bound until the disk filled and every write downstream
+// failed. The scheduler now runs by default — a 7-day age window swept every
+// 6 hours — with an unref'd timer so it never blocks process exit. Setting an
+// env var explicitly to '0' still disables the corresponding knob.
+const DEFAULT_RETENTION_DAYS = 7;
+const DEFAULT_CLEANUP_INTERVAL_MINUTES = 360;
 const MANAGED_ARTIFACT_CATEGORIES: readonly ArtifactCategory[] = Object.freeze([
   'wasm',
   'traces',
@@ -52,18 +60,19 @@ const MANAGED_ARTIFACT_CATEGORIES: readonly ArtifactCategory[] = Object.freeze([
   'heap-snapshots',
 ]);
 
-export function getArtifactRetentionConfig(
-  env: NodeJS.ProcessEnv = process.env,
-): ArtifactRetentionConfig {
-  const retentionDays = Math.max(0, parseInt(env.MCP_ARTIFACT_RETENTION_DAYS ?? '0', 10) || 0);
-  const maxTotalMb = Math.max(0, parseInt(env.MCP_ARTIFACT_MAX_TOTAL_MB ?? '0', 10) || 0);
+export function getArtifactRetentionConfig(env?: NodeJS.ProcessEnv): ArtifactRetentionConfig {
+  const retentionDays = Math.max(
+    0,
+    readEnvInteger('MCP_ARTIFACT_RETENTION_DAYS', DEFAULT_RETENTION_DAYS, { env }),
+  );
+  const maxTotalMb = Math.max(0, readEnvInteger('MCP_ARTIFACT_MAX_TOTAL_MB', 0, { env }));
   const cleanupIntervalMinutes = Math.max(
     0,
-    parseInt(env.MCP_ARTIFACT_CLEANUP_INTERVAL_MINUTES ?? '0', 10) || 0,
+    readEnvInteger('MCP_ARTIFACT_CLEANUP_INTERVAL_MINUTES', DEFAULT_CLEANUP_INTERVAL_MINUTES, {
+      env,
+    }),
   );
-  const cleanupOnStart = ['1', 'true'].includes(
-    (env.MCP_ARTIFACT_CLEANUP_ON_START ?? '').toLowerCase(),
-  );
+  const cleanupOnStart = readEnvBoolean('MCP_ARTIFACT_CLEANUP_ON_START', false, { env });
   return {
     enabled: retentionDays > 0 || maxTotalMb > 0,
     retentionDays,
@@ -73,7 +82,33 @@ export function getArtifactRetentionConfig(
   };
 }
 
+// Serializes concurrent cleanup runs: two overlapping cleanups scanning and
+// removing the same tree would double-count files and race each other's rm.
+let cleanupQueue: Promise<void> = Promise.resolve();
+
 export async function cleanupArtifacts(options?: {
+  retentionDays?: number;
+  maxTotalBytes?: number;
+  dryRun?: boolean;
+  now?: number;
+  directories?: string[];
+  categories?: ArtifactCategory[];
+  excludeCategories?: ArtifactCategory[];
+}): Promise<ArtifactCleanupResult> {
+  const previous = cleanupQueue;
+  let release!: () => void;
+  cleanupQueue = new Promise<void>((releaseQueue) => {
+    release = releaseQueue;
+  });
+  await previous;
+  try {
+    return await performCleanup(options);
+  } finally {
+    release();
+  }
+}
+
+async function performCleanup(options?: {
   retentionDays?: number;
   maxTotalBytes?: number;
   dryRun?: boolean;
@@ -111,10 +146,23 @@ export async function cleanupArtifacts(options?: {
   const root = getProjectRoot();
   const pendingRemovals: Promise<void>[] = [];
 
-  function scheduleRemoval(path: string): void {
+  function countRemoval(entry: ArtifactFileEntry, reason: 'age' | 'size'): void {
+    removedFiles++;
+    removedBytes += entry.size;
+    if (reason === 'age') removedByAge += entry.size;
+    else removedBySize += entry.size;
+    if (removedSample.length < 20) removedSample.push(entry.relativePath);
+  }
+
+  // Schedule the destructive rm only after a post-check re-stat proves the
+  // file is unchanged since the scan-time snapshot; the counters follow the
+  // actual outcome, not the scan-time candidate.
+  function scheduleRemoval(entry: ArtifactFileEntry, reason: 'age' | 'size'): void {
     pendingRemovals.push(
-      rm(path, { force: true })
-        .then(() => undefined)
+      removeFileIfUnchanged(entry.path, entry.mtimeMs, entry.size)
+        .then((removed) => {
+          if (removed) countRemoval(entry, reason);
+        })
         .catch(() => undefined),
     );
   }
@@ -124,11 +172,11 @@ export async function cleanupArtifacts(options?: {
     await walkAndProcess(directory, root, cutoff, dryRun, (entry) => {
       scannedFiles++;
       if (cutoff > 0 && entry.mtimeMs < cutoff) {
-        removedFiles++;
-        removedBytes += entry.size;
-        removedByAge += entry.size;
-        if (removedSample.length < 20) removedSample.push(entry.relativePath);
-        if (!dryRun) scheduleRemoval(entry.path);
+        if (!dryRun) {
+          scheduleRemoval(entry, 'age');
+        } else {
+          countRemoval(entry, 'age');
+        }
       } else {
         remaining.push(entry);
       }
@@ -144,11 +192,11 @@ export async function cleanupArtifacts(options?: {
       while (i < remaining.length && totalBytes > config.maxTotalBytes) {
         const entry = remaining[i]!;
         totalBytes -= entry.size;
-        removedFiles++;
-        removedBytes += entry.size;
-        removedBySize += entry.size;
-        if (removedSample.length < 20) removedSample.push(entry.relativePath);
-        if (!dryRun) scheduleRemoval(entry.path);
+        if (!dryRun) {
+          scheduleRemoval(entry, 'size');
+        } else {
+          countRemoval(entry, 'size');
+        }
         i++;
       }
       remaining.splice(0, i);
@@ -178,10 +226,20 @@ export async function cleanupArtifacts(options?: {
   };
 }
 
+// Idempotency guard for the sweep timer: the scheduler is wired both from the
+// server lifecycle (MCPServer.start) and from the CLI entry (index.ts); both
+// must share ONE unref'd interval instead of stacking timers. Reset on stop so
+// a restarted server re-arms.
+let activeSchedulerStop: (() => void) | null | undefined;
+
 export function startArtifactRetentionScheduler(): (() => void) | null {
   const config = getArtifactRetentionConfig();
   if (!config.enabled || config.cleanupIntervalMinutes <= 0) {
     return null;
+  }
+
+  if (activeSchedulerStop !== undefined) {
+    return activeSchedulerStop;
   }
 
   const handle = setInterval(
@@ -203,7 +261,15 @@ export function startArtifactRetentionScheduler(): (() => void) | null {
   );
 
   handle.unref();
-  return () => clearInterval(handle);
+  const stop = () => {
+    if (activeSchedulerStop !== stop) {
+      return;
+    }
+    clearInterval(handle);
+    activeSchedulerStop = undefined;
+  };
+  activeSchedulerStop = stop;
+  return stop;
 }
 
 function getManagedArtifactDirectories(options?: {
@@ -226,6 +292,9 @@ function getManagedArtifactDirectories(options?: {
   const projectRoot = getProjectRoot();
   const cwdDebuggerSessionsDir = resolve(process.cwd(), 'debugger-sessions');
   const projectDebuggerSessionsDir = resolve(projectRoot, 'debugger-sessions');
+  // Only the artifacts ROOT is listed: walkAndProcess recurses, so adding
+  // every category subdirectory too would scan and remove each artifact file
+  // twice (inflated counters, wrong size trimming).
   const directories = new Set<string>([
     getArtifactsRoot(),
     getConfig().paths.screenshotDir,
@@ -233,10 +302,6 @@ function getManagedArtifactDirectories(options?: {
     cwdDebuggerSessionsDir,
     projectDebuggerSessionsDir,
   ]);
-
-  for (const category of MANAGED_ARTIFACT_CATEGORIES) {
-    directories.add(getArtifactDir(category));
-  }
 
   return [...directories];
 }
@@ -288,7 +353,28 @@ async function walkAndProcess(
   }
 }
 
-async function pruneEmptyDirectories(directory: string): Promise<void> {
+async function removeFileIfUnchanged(
+  path: string,
+  mtimeMs: number,
+  size: number,
+): Promise<boolean> {
+  try {
+    const current = await stat(path);
+    // Post-check: a concurrent writer that touched the file after the scan
+    // must not be deleted. Compare mtime AND size so a write that preserved
+    // the mtime tick is still vetoed.
+    if (current.mtimeMs !== mtimeMs || current.size !== size) {
+      return false;
+    }
+    await rm(path, { force: true });
+    return true;
+  } catch {
+    // Already gone or unreadable — best effort.
+    return false;
+  }
+}
+
+async function pruneEmptyDirectories(directory: string, keepRoot = true): Promise<void> {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
@@ -299,16 +385,24 @@ async function pruneEmptyDirectories(directory: string): Promise<void> {
   await Promise.all(
     entries
       .filter((entry) => entry.isDirectory())
-      .map((entry) => pruneEmptyDirectories(join(directory, entry.name))),
+      .map((entry) => pruneEmptyDirectories(join(directory, entry.name), false)),
   );
+
+  if (keepRoot) {
+    // Managed root directories are the mkdir targets of resolveArtifactPath —
+    // deleting them would race concurrent writers into ENOENT.
+    return;
+  }
 
   try {
     const after = await readdir(directory);
     if (after.length === 0) {
-      await rm(directory, { recursive: true, force: true });
+      // Plain rmdir: refuses to remove a directory that gained a file after
+      // the emptiness re-check (rm recursive would destroy that file).
+      await rmdir(directory);
     }
   } catch {
-    // Non-critical cleanup — directory may already be gone
+    // Non-critical cleanup — directory may already be gone or non-empty.
   }
 }
 

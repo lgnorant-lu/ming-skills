@@ -2,6 +2,8 @@ import type { ChildProcess } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { SYSCALL_TRACE_SPAWN_TIMEOUT_MS } from '@src/constants';
+import { RingBuffer } from '@utils/RingBuffer';
+import { readEnvBoolean } from '@src/config/environment';
 
 export type SyscallBackend = 'etw' | 'strace' | 'dtrace';
 
@@ -44,6 +46,20 @@ interface SyntheticEventSeed {
 }
 
 const SUPPORTED_BACKENDS: ReadonlyArray<SyscallBackend> = ['etw', 'strace', 'dtrace'];
+
+/**
+ * Hard cap on retained syscall events. When the buffer is full the oldest
+ * event is shifted out and counted in `droppedEvents` (surfaced via
+ * getStats) so callers can detect silent loss instead of the process
+ * growing without bound under sustained syscall traffic.
+ */
+export const MAX_CAPTURED_EVENTS = 100_000;
+
+/**
+ * Grace period between SIGTERM and SIGKILL when terminating a live tracer
+ * subprocess on restart (start() while a session is active).
+ */
+export const SYSCALL_TRACE_KILL_GRACE_MS = 1_000;
 
 /**
  * Named ETW kernel providers (Windows) beyond the legacy "NT Kernel Logger"
@@ -306,6 +322,21 @@ function matchesFilter(event: SyscallEvent, filter?: CaptureFilter): boolean {
 }
 
 /**
+ * Fold a chunk into an incremental line buffer: complete lines are handed to
+ * `onLine`, the unterminated tail is returned as the new buffer.
+ */
+function consumeLines(current: string, chunk: string, onLine: (line: string) => void): string {
+  const lines = (current + chunk).split(/\r?\n/u);
+  const remainder = lines.pop() ?? '';
+  for (const line of lines) {
+    if (line.length > 0) {
+      onLine(line);
+    }
+  }
+  return remainder;
+}
+
+/**
  * Parse a strace output line into a SyscallEvent.
  *
  * Example strace line:
@@ -454,7 +485,8 @@ function parseDTraceLine(
 
 export class SyscallMonitor {
   private activeState?: MonitorState;
-  private readonly capturedEvents: SyscallEvent[] = [];
+  private readonly capturedEvents = new RingBuffer<SyscallEvent>(MAX_CAPTURED_EVENTS);
+  private droppedEvents = 0;
   private lastBackend: SyscallBackend = chooseDefaultBackend();
   private subprocessError?: string;
   /**
@@ -479,8 +511,14 @@ export class SyscallMonitor {
       );
     }
 
+    // Restart semantics: a replacement session must not orphan the previous
+    // tracer subprocess — terminate it before any new capture is spawned.
+    if (this.activeState?.subprocess) {
+      await this.terminateSubprocess(this.activeState.subprocess);
+    }
+
     // If --simulate flag or JSHOOK_SIMULATE=1, use synthetic mode
-    const simulate = options?.simulate ?? process.env['JSHOOK_SIMULATE'] === '1';
+    const simulate = options?.simulate ?? readEnvBoolean('JSHOOK_SIMULATE', false);
     if (simulate) {
       this.activeState = {
         backend: requestedBackend,
@@ -490,7 +528,7 @@ export class SyscallMonitor {
         etwProviders: requestedBackend === 'etw' ? options?.etwProviders : undefined,
       };
       this.lastBackend = requestedBackend;
-      this.capturedEvents.length = 0;
+      this.resetCapture();
       this.generateSyntheticEvents();
       return;
     }
@@ -518,7 +556,7 @@ export class SyscallMonitor {
         etwProviders: requestedBackend === 'etw' ? options?.etwProviders : undefined,
       };
       this.lastBackend = requestedBackend;
-      this.capturedEvents.length = 0;
+      this.resetCapture();
       this.generateSyntheticEvents();
       return;
     }
@@ -532,7 +570,7 @@ export class SyscallMonitor {
       etwProviders: requestedBackend === 'etw' ? options?.etwProviders : undefined,
     };
     this.lastBackend = requestedBackend;
-    this.capturedEvents.length = 0;
+    this.resetCapture();
     this.subprocessError = undefined;
   }
 
@@ -549,11 +587,16 @@ export class SyscallMonitor {
       this.generateSyntheticEvents();
     }
 
-    return this.capturedEvents.filter((event) => matchesFilter(event, filter)).map(cloneEvent);
+    return this.capturedEvents
+      .toArray()
+      .filter((event) => matchesFilter(event, filter))
+      .map(cloneEvent);
   }
 
   getStats(): {
     eventsCaptured: number;
+    /** Events dropped because the buffer hit {@link MAX_CAPTURED_EVENTS}. */
+    droppedEvents: number;
     uptime: number;
     backend: SyscallBackend;
     subprocessActive: boolean;
@@ -568,6 +611,7 @@ export class SyscallMonitor {
     const state = this.activeState;
     return {
       eventsCaptured: this.capturedEvents.length,
+      droppedEvents: this.droppedEvents,
       uptime,
       backend,
       subprocessActive: !!state?.subprocess,
@@ -615,27 +659,24 @@ export class SyscallMonitor {
         subprocess.kill('SIGTERM'),
       );
 
+      let stdoutBuffer = '';
       let stderrBuffer = '';
-      let lineAccumulator = '';
+      const handleLine = (line: string) => {
+        const event = parseStraceLine(line, pid, startedAt);
+        if (event) {
+          this.pushCapturedEvent(event);
+        }
+      };
 
+      // strace normally writes trace lines to stderr, but some wrappers and
+      // strace variants emit on stdout — both streams are parsed so stdout
+      // output is captured instead of accumulating unbounded in a dead buffer.
       subprocess.stdout?.on('data', (chunk: Buffer) => {
-        lineAccumulator += chunk.toString();
-        this.processLineBuffer(lineAccumulator, pid, 'strace');
+        stdoutBuffer = consumeLines(stdoutBuffer, chunk.toString(), handleLine);
       });
 
       subprocess.stderr?.on('data', (chunk: Buffer) => {
-        stderrBuffer += chunk.toString();
-        const lines = stderrBuffer.split(/\r?\n/u);
-        // Keep the last incomplete line in the buffer
-        stderrBuffer = lines.pop() ?? '';
-        for (const line of lines) {
-          if (line.length > 0) {
-            const event = parseStraceLine(line, pid, startedAt);
-            if (event) {
-              this.capturedEvents.push(event);
-            }
-          }
-        }
+        stderrBuffer = consumeLines(stderrBuffer, chunk.toString(), handleLine);
       });
 
       subprocess.on('error', (error: Error) => {
@@ -690,7 +731,7 @@ export class SyscallMonitor {
         for (const line of lines) {
           const event = parseETWLine(line, pid, startedAt);
           if (event) {
-            this.capturedEvents.push(event);
+            this.pushCapturedEvent(event);
           }
         }
       });
@@ -769,7 +810,7 @@ export class SyscallMonitor {
         for (const line of lines) {
           const event = parseDTraceLine(line, pid, startedAt, this.dtracePendingEntries);
           if (event) {
-            this.capturedEvents.push(event);
+            this.pushCapturedEvent(event);
           }
         }
       });
@@ -810,7 +851,7 @@ export class SyscallMonitor {
       }
       const timestamp = this.activeState.generatedEvents * 75;
 
-      this.capturedEvents.push({
+      this.pushCapturedEvent({
         timestamp,
         pid,
         syscall: seed.syscall,
@@ -822,12 +863,47 @@ export class SyscallMonitor {
     }
   }
 
-  private processLineBuffer(
-    _buffer: string,
-    _pid: number,
-    _parser: 'strace' | 'etw' | 'dtrace',
-  ): void {
-    // Placeholder for incremental parsing logic
-    // Currently handled inline in each subprocess handler
+  /**
+   * Append an event while enforcing the {@link MAX_CAPTURED_EVENTS} ring cap:
+   * beyond the cap the oldest event is overwritten (O(1) ring-buffer drop) and
+   * counted in `droppedEvents` (surfaced via getStats) so silent loss stays
+   * visible.
+   */
+  private pushCapturedEvent(event: SyscallEvent): void {
+    if (this.capturedEvents.length >= MAX_CAPTURED_EVENTS) {
+      this.droppedEvents += 1;
+    }
+    this.capturedEvents.push(event);
+  }
+
+  /** Clear retained events and the drop counter for a fresh session. */
+  private resetCapture(): void {
+    this.capturedEvents.clear();
+    this.droppedEvents = 0;
+  }
+
+  /**
+   * Terminate a live tracer subprocess before replacing it: SIGTERM first,
+   * escalating to SIGKILL after {@link SYSCALL_TRACE_KILL_GRACE_MS} if it has
+   * not exited. Returns immediately when the process already exited or the
+   * SIGTERM delivery itself failed.
+   */
+  private async terminateSubprocess(subprocess: ChildProcess): Promise<void> {
+    if (subprocess.exitCode !== null || subprocess.signalCode !== null) {
+      return;
+    }
+    if (!subprocess.kill('SIGTERM')) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const graceTimer = setTimeout(() => {
+        subprocess.kill('SIGKILL');
+        resolve();
+      }, SYSCALL_TRACE_KILL_GRACE_MS);
+      subprocess.once('exit', () => {
+        clearTimeout(graceTimer);
+        resolve();
+      });
+    });
   }
 }

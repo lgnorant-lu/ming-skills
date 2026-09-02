@@ -23,6 +23,7 @@ import type {
 import type { WorkflowContract } from '@server/workflows/WorkflowContract';
 import { allTools } from '@server/ToolCatalog';
 import { logger } from '@utils/logger';
+import { readEnvNullableString } from '@src/config/environment';
 import { INSTALLED_EXTENSION_METADATA_FILENAME } from '@server/extensions/types';
 import type {
   ExtensionListResult,
@@ -62,9 +63,11 @@ import {
 } from './ExtensionManager.tools';
 
 export function listExtensions(ctx: MCPServerContext): ExtensionListResult {
-  const pluginRoots = resolveRoots(parseRoots(process.env.MCP_PLUGIN_ROOTS, DEFAULT_PLUGIN_ROOTS));
+  const pluginRoots = resolveRoots(
+    parseRoots(readEnvNullableString('MCP_PLUGIN_ROOTS') ?? undefined, DEFAULT_PLUGIN_ROOTS),
+  );
   const workflowRoots = resolveRoots(
-    parseRoots(process.env.MCP_WORKFLOW_ROOTS, DEFAULT_WORKFLOW_ROOTS),
+    parseRoots(readEnvNullableString('MCP_WORKFLOW_ROOTS') ?? undefined, DEFAULT_WORKFLOW_ROOTS),
   );
   return buildListResult(ctx, pluginRoots, workflowRoots);
 }
@@ -202,10 +205,10 @@ export async function ensureWorkflowsLoaded(ctx: MCPServerContext): Promise<void
     const warnings: string[] = [];
     const errors: string[] = [];
     const pluginRoots = resolveRoots(
-      parseRoots(process.env.MCP_PLUGIN_ROOTS, DEFAULT_PLUGIN_ROOTS),
+      parseRoots(readEnvNullableString('MCP_PLUGIN_ROOTS') ?? undefined, DEFAULT_PLUGIN_ROOTS),
     );
     const workflowRoots = resolveRoots(
-      parseRoots(process.env.MCP_WORKFLOW_ROOTS, DEFAULT_WORKFLOW_ROOTS),
+      parseRoots(readEnvNullableString('MCP_WORKFLOW_ROOTS') ?? undefined, DEFAULT_WORKFLOW_ROOTS),
     );
     await loadPluginWorkflowContributions(ctx, pluginRoots, warnings, errors);
     const workflowFiles = await discoverWorkflowFiles(workflowRoots);
@@ -301,7 +304,9 @@ async function loadPluginWorkflowContributions(
   warnings: string[],
   errors: string[],
 ): Promise<void> {
-  const allowedDigests = parseDigestAllowlist(process.env.MCP_PLUGIN_ALLOWED_DIGESTS);
+  const allowedDigests = parseDigestAllowlist(
+    readEnvNullableString('MCP_PLUGIN_ALLOWED_DIGESTS') ?? undefined,
+  );
   const strictLoad = isPluginStrictLoad();
   if (strictLoad && allowedDigests.size === 0) {
     errors.push(STRICT_PLUGIN_ALLOWLIST_ERROR);
@@ -395,11 +400,15 @@ async function reloadExtensionsInner(ctx: MCPServerContext): Promise<ExtensionRe
   const warnings: string[] = [];
   const errors: string[] = [];
   const removedTools = await clearLoadedExtensionTools(ctx);
-  const pluginRoots = resolveRoots(parseRoots(process.env.MCP_PLUGIN_ROOTS, DEFAULT_PLUGIN_ROOTS));
-  const workflowRoots = resolveRoots(
-    parseRoots(process.env.MCP_WORKFLOW_ROOTS, DEFAULT_WORKFLOW_ROOTS),
+  const pluginRoots = resolveRoots(
+    parseRoots(readEnvNullableString('MCP_PLUGIN_ROOTS') ?? undefined, DEFAULT_PLUGIN_ROOTS),
   );
-  const allowedDigests = parseDigestAllowlist(process.env.MCP_PLUGIN_ALLOWED_DIGESTS);
+  const workflowRoots = resolveRoots(
+    parseRoots(readEnvNullableString('MCP_WORKFLOW_ROOTS') ?? undefined, DEFAULT_WORKFLOW_ROOTS),
+  );
+  const allowedDigests = parseDigestAllowlist(
+    readEnvNullableString('MCP_PLUGIN_ALLOWED_DIGESTS') ?? undefined,
+  );
   let activatedOnReload = 0;
 
   // ── Critical security gate: pre-import trust boundary ──

@@ -169,7 +169,7 @@ export class BrowserHandlers {
       hash = createHash('sha256').update(buffer).digest('hex').substring(0, 16);
 
       if (outputPath) {
-        const safePath = validateOutputPath(outputPath);
+        const safePath = await validateOutputPath(outputPath);
         await writeFile(safePath, buffer);
         savedPath = safePath;
       } else {

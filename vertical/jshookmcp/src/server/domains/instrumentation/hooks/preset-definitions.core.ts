@@ -72,7 +72,7 @@ export const CORE_PRESETS: Record<string, PresetEntry> = {
   window.btoa = function(s) {
     {{STACK_CODE}}
     const result = _btoa(s);
-    const __msg = '[Hook:btoa] in=' + String(s).substring(0,100) + ' out=' + result;
+    const __msg = '[Hook:btoa] in=' + String(s).substring(0,100) + ' out=' + result.substring(0,100);
     {{LOG_FN}}
     window.__aiHooks['preset-atob-btoa'].push(
       {
@@ -267,15 +267,16 @@ export const CORE_PRESETS: Record<string, PresetEntry> = {
       buildHookCode(
         'postmessage',
         `
+  const __safeStr = function(v) { try { return JSON.stringify(v); } catch (e) { return '[unserializable]'; } };
   const _orig = window.postMessage.bind(window);
   window.postMessage = function(data, origin, transfer) {
     {{STACK_CODE}}
-    const __msg = '[Hook:postMessage] origin=' + origin + ' data=' + JSON.stringify(data).substring(0,100);
+    const __msg = '[Hook:postMessage] origin=' + origin + ' data=' + __safeStr(data).substring(0,100);
     {{LOG_FN}}
     window.__aiHooks['preset-postmessage'].push(
       {
         origin,
-        data: JSON.stringify(data||{}).substring(0,300),
+        data: __safeStr(data||{}).substring(0,300),
         stack: __stack,
         ts: Date.now(),
       });
@@ -450,11 +451,12 @@ export const CORE_PRESETS: Record<string, PresetEntry> = {
       get: function() {
         {{STACK_CODE}}
         const result = _origGet.call(this);
-        const __msg = '[Hook:navigator.userAgent] ua=' + result.substring(0,80);
+        const __result = (result == null ? '' : result);
+        const __msg = '[Hook:navigator.userAgent] ua=' + __result.substring(0,80);
         {{LOG_FN}}
         window.__aiHooks['preset-navigator-useragent'].push(
           {
-            ua: result.substring(0,200),
+            ua: __result.substring(0,200),
             stack: __stack,
             ts: Date.now(),
           });

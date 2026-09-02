@@ -1,4 +1,5 @@
 import { logger } from '@utils/logger';
+import { RingBuffer } from '@utils/RingBuffer';
 import { TOKEN_BUDGET_MAX_TOKENS } from '@src/constants';
 
 export interface ToolCallRecord {
@@ -33,13 +34,23 @@ export class TokenBudgetManager {
   private readonly AUTO_CLEANUP_THRESHOLD = 0.9;
   private readonly AUTO_CLEANUP_REARM_THRESHOLD = 0.8;
   private readonly HISTORY_RETENTION = 5 * 60 * 1000;
+  /** Hard cap on retained tool-call records; bounds memory in long-lived sessions. */
+  private readonly HISTORY_MAX_RECORDS = 2000;
 
   private currentUsage = 0;
-  private toolCallHistory: ToolCallRecord[] = [];
+  private toolCallHistory = new RingBuffer<ToolCallRecord>(this.HISTORY_MAX_RECORDS);
+  /** Timestamp of the oldest buffered record (records are pushed in time order). */
+  private headTimestamp: number | null = null;
   private warnings = new Set<number>();
   private sessionStartTime = Date.now();
   private trackingEnabled = true;
   private autoCleanupArmed = true;
+
+  /** Guards against re-entrant auto-cleanup through the external cleanup callback. */
+  private cleanupRunning = false;
+  /** Cooldown after an auto-cleanup before another one may trigger (prevents async callback loops). */
+  private lastCleanupAt = 0;
+  private static readonly AUTO_CLEANUP_COOLDOWN_MS = 1000;
 
   private readonly MAX_ESTIMATION_DEPTH = 4;
   private readonly MAX_ESTIMATION_ARRAY_ITEMS = 50;
@@ -90,7 +101,15 @@ export class TokenBudgetManager {
         estimatedTokens,
         cumulativeTokens: this.currentUsage,
       };
+      // Bound the history: drop over-age records, then make room at the hard
+      // cap (RingBuffer would otherwise silently overwrite the oldest record
+      // and drift the running token total).
+      this.pruneStaleHistory();
+      this.evictForCap();
       this.toolCallHistory.push(record);
+      if (this.headTimestamp === null) {
+        this.headTimestamp = record.timestamp;
+      }
 
       logger.debug(
         `Token usage: ${this.currentUsage}/${this.MAX_TOKENS} (${this.getUsagePercentage()}%) | ` +
@@ -99,7 +118,7 @@ export class TokenBudgetManager {
 
       this.checkWarnings();
 
-      if (this.shouldAutoCleanup()) {
+      if (this.isAutoCleanupDue()) {
         this.autoCleanup();
       }
     } catch (error) {
@@ -315,47 +334,133 @@ export class TokenBudgetManager {
     return this.autoCleanupArmed && ratio >= this.AUTO_CLEANUP_THRESHOLD;
   }
 
+  /**
+   * Whether an automatic cleanup may fire right now. Enforces both the armed
+   * state and a cooldown after the last cleanup, so an async external cleanup
+   * callback that records more tool calls cannot chain-trigger cleanups.
+   */
+  private isAutoCleanupDue(): boolean {
+    if (Date.now() - this.lastCleanupAt < TokenBudgetManager.AUTO_CLEANUP_COOLDOWN_MS) {
+      return false;
+    }
+    return this.shouldAutoCleanup();
+  }
+
   private autoCleanup(): void {
-    this.autoCleanupArmed = false;
-    logger.info('Auto-cleanup triggered at 90% usage.');
+    // Re-entrance guard: the external cleanup callback may synchronously call
+    // manualCleanup() or recordToolCall(), which would otherwise recurse into
+    // autoCleanup() until the stack overflows.
+    if (this.cleanupRunning) {
+      return;
+    }
+    this.cleanupRunning = true;
+    try {
+      this.autoCleanupArmed = false;
+      logger.info('Auto-cleanup triggered at 90% usage.');
 
-    const beforeUsage = this.currentUsage;
+      const beforeUsage = this.currentUsage;
 
-    if (this.externalCleanupFn) {
-      try {
-        this.externalCleanupFn();
-        logger.info('External cleanup callback invoked');
-      } catch (e) {
-        logger.warn('External cleanup callback failed:', e);
+      if (this.externalCleanupFn) {
+        try {
+          this.externalCleanupFn();
+          logger.info('External cleanup callback invoked');
+        } catch (e) {
+          logger.warn('External cleanup callback failed:', e);
+        }
+      }
+
+      const cutoff = Date.now() - this.HISTORY_RETENTION;
+      const beforeCount = this.toolCallHistory.length;
+      const retained = this.toolCallHistory.toArray().filter((call) => call.timestamp > cutoff);
+      const next = new RingBuffer<ToolCallRecord>(this.HISTORY_MAX_RECORDS);
+      for (const call of retained) {
+        next.push(call);
+      }
+      this.toolCallHistory = next;
+      this.headTimestamp = retained[0]?.timestamp ?? null;
+      const removedCount = beforeCount - this.toolCallHistory.length;
+      logger.info(`Removed ${removedCount} old tool call records`);
+
+      this.recalculateUsage();
+
+      const afterUsage = this.currentUsage;
+      const freed = beforeUsage - afterUsage;
+      const freedPercentage = Math.round((freed / this.MAX_TOKENS) * 100);
+
+      logger.info(
+        `Cleanup complete. Freed ${freed} tokens (${freedPercentage}%). ` +
+          `Usage: ${afterUsage}/${this.MAX_TOKENS} (${this.getUsagePercentage()}%)`,
+      );
+
+      const newRatio = afterUsage / this.MAX_TOKENS;
+      if (newRatio < this.AUTO_CLEANUP_REARM_THRESHOLD) {
+        this.autoCleanupArmed = true;
+      }
+      this.warnings = new Set(
+        Array.from(this.warnings).filter((threshold) => newRatio >= threshold),
+      );
+    } finally {
+      this.cleanupRunning = false;
+      this.lastCleanupAt = Date.now();
+    }
+  }
+
+  /**
+   * Drop records that fell out of the retention window. Records are pushed
+   * in time order, so stale entries form a contiguous prefix. The O(1)
+   * fast path (fresh head) keeps the per-push cost constant.
+   */
+  private pruneStaleHistory(): void {
+    if (this.headTimestamp === null) {
+      return;
+    }
+    const cutoff = Date.now() - this.HISTORY_RETENTION;
+    if (this.headTimestamp > cutoff) {
+      return;
+    }
+
+    const snapshot = this.toolCallHistory.toArray();
+    let staleCount = 0;
+    while (staleCount < snapshot.length) {
+      const candidate = snapshot[staleCount];
+      if (!candidate || candidate.timestamp > cutoff) {
+        break;
+      }
+      staleCount++;
+    }
+
+    let prunedTokens = 0;
+    for (let i = 0; i < staleCount; i++) {
+      const evicted = this.toolCallHistory.shift();
+      if (evicted) {
+        prunedTokens += evicted.estimatedTokens;
       }
     }
+    this.currentUsage -= prunedTokens;
+    this.headTimestamp = snapshot[staleCount]?.timestamp ?? null;
+  }
 
-    const cutoff = Date.now() - this.HISTORY_RETENTION;
-    const beforeCount = this.toolCallHistory.length;
-    this.toolCallHistory = this.toolCallHistory.filter((call) => call.timestamp > cutoff);
-    const removedCount = beforeCount - this.toolCallHistory.length;
-    logger.info(`Removed ${removedCount} old tool call records`);
-
-    this.recalculateUsage();
-
-    const afterUsage = this.currentUsage;
-    const freed = beforeUsage - afterUsage;
-    const freedPercentage = Math.round((freed / this.MAX_TOKENS) * 100);
-
-    logger.info(
-      `Cleanup complete. Freed ${freed} tokens (${freedPercentage}%). ` +
-        `Usage: ${afterUsage}/${this.MAX_TOKENS} (${this.getUsagePercentage()}%)`,
-    );
-
-    const newRatio = afterUsage / this.MAX_TOKENS;
-    if (newRatio < this.AUTO_CLEANUP_REARM_THRESHOLD) {
-      this.autoCleanupArmed = true;
+  /**
+   * Drop the oldest record when the buffer sits at the hard cap, so evicted
+   * tokens leave the running total instead of being silently overwritten.
+   */
+  private evictForCap(): void {
+    if (this.toolCallHistory.length < this.HISTORY_MAX_RECORDS) {
+      return;
     }
-    this.warnings = new Set(Array.from(this.warnings).filter((threshold) => newRatio >= threshold));
+    const evicted = this.toolCallHistory.shift();
+    if (evicted) {
+      this.currentUsage -= evicted.estimatedTokens;
+    }
+    this.headTimestamp = this.toolCallHistory.peek()?.timestamp ?? null;
   }
 
   private recalculateUsage(): void {
-    this.currentUsage = this.toolCallHistory.reduce((sum, call) => sum + call.estimatedTokens, 0);
+    let sum = 0;
+    for (const call of this.toolCallHistory) {
+      sum += call.estimatedTokens;
+    }
+    this.currentUsage = sum;
   }
 
   getStats(): TokenBudgetStats & { sessionStartTime: number } {
@@ -376,7 +481,7 @@ export class TokenBudgetManager {
 
     const suggestions = this.generateSuggestions(topTools);
 
-    const recentCalls = this.toolCallHistory.slice(-20);
+    const recentCalls = this.toolCallHistory.toArray().slice(-20);
 
     return {
       currentUsage: this.currentUsage,
@@ -451,7 +556,8 @@ export class TokenBudgetManager {
   reset(): void {
     logger.info('Resetting token budget...');
     this.currentUsage = 0;
-    this.toolCallHistory = [];
+    this.toolCallHistory = new RingBuffer<ToolCallRecord>(this.HISTORY_MAX_RECORDS);
+    this.headTimestamp = null;
     this.warnings.clear();
     this.autoCleanupArmed = true;
     this.sessionStartTime = Date.now();

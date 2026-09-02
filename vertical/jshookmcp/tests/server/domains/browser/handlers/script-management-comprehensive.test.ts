@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@src/constants', () => ({
   SCRIPTS_MAX_CAP: 500,
+  DETAILED_DATA_SMART_THRESHOLD_BYTES: 50 * 1024,
 }));
 
 import { ScriptManagementHandlers } from '@server/domains/browser/handlers/script-management';
@@ -414,7 +415,7 @@ describe('ScriptManagementHandlers — comprehensive coverage', () => {
           await handlers.handleGetScriptSource({ scriptId: 'script-1', preview: false }),
         );
 
-        expect(detailedDataManager.smartHandle).toHaveBeenCalledWith(script, 51200);
+        expect(detailedDataManager.smartHandle).toHaveBeenCalledWith(script);
         expect(body.detailId).toBe('detail-123');
         expect(body.truncated).toBe(true);
       });
@@ -431,7 +432,7 @@ describe('ScriptManagementHandlers — comprehensive coverage', () => {
         expect(detailedDataManager.smartHandle).not.toHaveBeenCalled();
       });
 
-      it('uses 51200 byte limit for smartHandle', async () => {
+      it('does not pass a hard-coded threshold to smartHandle (config default applies)', async () => {
         const script = {
           scriptId: 'script-1',
           url: 'test.js',
@@ -442,7 +443,7 @@ describe('ScriptManagementHandlers — comprehensive coverage', () => {
 
         await handlers.handleGetScriptSource({ scriptId: 'script-1', preview: false });
 
-        expect(detailedDataManager.smartHandle).toHaveBeenCalledWith(script, 51200);
+        expect(detailedDataManager.smartHandle).toHaveBeenCalledWith(script);
       });
     });
 

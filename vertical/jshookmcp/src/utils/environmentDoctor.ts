@@ -4,11 +4,15 @@ import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { ToolRegistry } from '@modules/external/ToolRegistry';
+import type { ProbeResult } from '@modules/external/ToolProbe';
 import { GHIDRA_BRIDGE_ENDPOINT, IDA_BRIDGE_ENDPOINT } from '@src/constants';
 import { getProjectRoot } from '@utils/outputPaths';
 import { getArtifactRetentionConfig } from '@utils/artifactRetention';
 import { probeBetterSqlite3 } from '@utils/betterSqlite3';
 import { ioLimit } from '@utils/concurrency';
+import { logger } from '@utils/logger';
+import { readEnvNullableString, readEnvString } from '@src/config/environment';
+import { getConfig } from '@utils/config';
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
@@ -73,28 +77,78 @@ function readInstalledPackageJson(packageName: string): { version?: string } {
   return require(resolvePackageJsonPath(packageName)) as { version?: string };
 }
 
+/**
+ * Convert a single check's rejection into a warn entry so that one failing
+ * sub-check (e.g. an endpoint probe) can never cascade into failing the whole
+ * doctor report.
+ */
+function toSafeCheck(name: string, check: Promise<DoctorCheck>): Promise<DoctorCheck> {
+  return check.catch((error: unknown) => ({
+    name,
+    status: 'warn' as DoctorStatus,
+    detail: `Check failed: ${error instanceof Error ? error.message : String(error)}`,
+  }));
+}
+
+/** External-tool probe with the same no-cascade guarantee (degrades to empty). */
+function safeExternalProbe(registry: ToolRegistry): Promise<Record<string, ProbeResult>> {
+  return registry.probeAll(true).catch((error: unknown) => {
+    logger.warn(`[environmentDoctor] External tool probing failed: ${String(error)}`);
+    return {};
+  });
+}
+
 export async function runEnvironmentDoctor(options?: {
   includeBridgeHealth?: boolean;
 }): Promise<EnvironmentDoctorReport> {
   const includeBridgeHealth = options?.includeBridgeHealth ?? true;
+  const runtimeConfig = getConfig();
+  const signatureRequiredOverride = readEnvNullableString('MCP_PLUGIN_SIGNATURE_REQUIRED', {
+    trim: true,
+  });
+  const strictLoadOverride = readEnvNullableString('MCP_PLUGIN_STRICT_LOAD', { trim: true });
   const registry = getSharedRegistry();
-  const externalResultsPromise = registry.probeAll(true);
-  const gitCommandPromise = ioLimit(() => checkCommand('git', ['--version']));
-  const pythonCommandPromise = ioLimit(() => checkCommand('python', ['--version']));
-  const pnpmCommandPromise = ioLimit(() => checkPnpmCommand());
-  const corepackCheckPromise = ioLimit(() => checkCommand('corepack', ['--version']));
+  const externalResultsPromise = safeExternalProbe(registry);
+  const gitCommandPromise = toSafeCheck(
+    'git',
+    ioLimit(() => checkCommand('git', ['--version'])),
+  );
+  const pythonCommandPromise = toSafeCheck(
+    'python',
+    ioLimit(() => checkCommand('python', ['--version'])),
+  );
+  const pnpmCommandPromise = toSafeCheck(
+    'pnpm',
+    ioLimit(() => checkPnpmCommand()),
+  );
+  const corepackCheckPromise = toSafeCheck(
+    'corepack',
+    ioLimit(() => checkCommand('corepack', ['--version'])),
+  );
   const bridgesPromise = includeBridgeHealth
     ? Promise.all([
-        ioLimit(() =>
-          checkHttpEndpoint('ghidra-bridge', `${GHIDRA_BRIDGE_ENDPOINT.replace(/\/$/, '')}/health`),
+        toSafeCheck(
+          'ghidra-bridge',
+          ioLimit(() =>
+            checkHttpEndpoint(
+              'ghidra-bridge',
+              `${GHIDRA_BRIDGE_ENDPOINT.replace(/\/$/, '')}/health`,
+            ),
+          ),
         ),
-        ioLimit(() =>
-          checkHttpEndpoint('ida-bridge', `${IDA_BRIDGE_ENDPOINT.replace(/\/$/, '')}/health`),
+        toSafeCheck(
+          'ida-bridge',
+          ioLimit(() =>
+            checkHttpEndpoint('ida-bridge', `${IDA_BRIDGE_ENDPOINT.replace(/\/$/, '')}/health`),
+          ),
         ),
-        ioLimit(() =>
-          checkHttpEndpoint(
-            'burp-mcp-sse',
-            process.env.BURP_MCP_SSE_URL?.trim() || 'http://127.0.0.1:9876',
+        toSafeCheck(
+          'burp-mcp-sse',
+          ioLimit(() =>
+            checkHttpEndpoint(
+              'burp-mcp-sse',
+              readEnvString('BURP_MCP_SSE_URL', 'http://127.0.0.1:9876', { trim: true }),
+            ),
           ),
         ),
       ])
@@ -112,7 +166,10 @@ export async function runEnvironmentDoctor(options?: {
   const corepackCommand = normalizeCorepackCheck(corepackCheck, pnpmCommand);
 
   const packages: DoctorCheck[] = [
-    checkPackage('@modelcontextprotocol/sdk'),
+    checkPackage('@modelcontextprotocol/core'),
+    checkPackage('@modelcontextprotocol/node'),
+    checkPackage('@modelcontextprotocol/server'),
+    checkPackage('@modelcontextprotocol/client'),
     checkPackage('rebrowser-puppeteer-core'),
     checkBetterSqlite3(),
     checkPackage('camoufox-js', 'Optional Firefox anti-detect driver'),
@@ -152,16 +209,17 @@ export async function runEnvironmentDoctor(options?: {
     commands,
     bridges,
     config: {
-      transport: (process.env.MCP_TRANSPORT ?? 'stdio').toLowerCase(),
-      toolProfile: (process.env.MCP_TOOL_PROFILE ?? 'search').toLowerCase(),
-      pluginRoots: process.env.MCP_PLUGIN_ROOTS ?? '<jshook-install>/plugins',
-      workflowRoots: process.env.MCP_WORKFLOW_ROOTS ?? '<jshook-install>/workflows',
+      transport: runtimeConfig.server.transport,
+      toolProfile: runtimeConfig.mcp.toolProfile,
+      pluginRoots: runtimeConfig.extensions.pluginRoots.join(',') || '<jshook-install>/plugins',
+      workflowRoots:
+        runtimeConfig.extensions.workflowRoots.join(',') || '<jshook-install>/workflows',
       pluginSignatureRequired:
-        process.env.MCP_PLUGIN_SIGNATURE_REQUIRED ??
-        (process.env.NODE_ENV === 'production' ? 'true (production default)' : 'false'),
+        signatureRequiredOverride ??
+        (runtimeConfig.extensions.signatureRequired ? 'true (production default)' : 'false'),
       pluginStrictLoad:
-        process.env.MCP_PLUGIN_STRICT_LOAD ??
-        (process.env.NODE_ENV === 'production' ? 'true (production default)' : 'false'),
+        strictLoadOverride ??
+        (runtimeConfig.extensions.strictLoad ? 'true (production default)' : 'false'),
       artifactRetention: getArtifactRetentionConfig(),
     },
     limitations,

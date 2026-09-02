@@ -74,6 +74,44 @@ describe('scanner.patterns', () => {
     it('throws on invalid double', () => {
       expect(() => buildPatternBytesAndMask('notanumber', 'double')).toThrow('Invalid pattern');
     });
+
+    // ── shared-core options (used by BaseMemoryManager / macOS scanner) ──
+
+    it('returns empty arrays with throwOnEmpty:false (BaseMemoryManager contract)', () => {
+      expect(buildPatternBytesAndMask('', 'hex', { throwOnEmpty: false })).toEqual({
+        patternBytes: [],
+        mask: [],
+      });
+      expect(buildPatternBytesAndMask('   ', 'hex', { throwOnEmpty: false })).toEqual({
+        patternBytes: [],
+        mask: [],
+      });
+      expect(buildPatternBytesAndMask('not-a-number', 'int32', { throwOnEmpty: false })).toEqual({
+        patternBytes: [],
+        mask: [],
+      });
+    });
+
+    it('still skips malformed tokens in lenient mode with throwOnEmpty:false', () => {
+      const result = buildPatternBytesAndMask('AA ZZ CC', 'hex', { throwOnEmpty: false });
+      expect(result.patternBytes).toEqual([0xaa, 0xcc]);
+      expect(result.mask).toEqual([1, 1]);
+    });
+
+    it('throws specific messages in strict mode (macOS scanner contract)', () => {
+      expect(() => buildPatternBytesAndMask('AA ZZ CC', 'hex', { strict: true })).toThrow(
+        'Invalid hex byte: ZZ',
+      );
+      expect(() => buildPatternBytesAndMask('abc', 'int32', { strict: true })).toThrow(
+        'Invalid int32 value',
+      );
+      expect(() => buildPatternBytesAndMask('xyz', 'float', { strict: true })).toThrow(
+        'Invalid float value',
+      );
+      expect(() => buildPatternBytesAndMask('test', 'binary', { strict: true })).toThrow(
+        'Unsupported pattern type: binary',
+      );
+    });
   });
 
   describe('patternToBytesMac', () => {

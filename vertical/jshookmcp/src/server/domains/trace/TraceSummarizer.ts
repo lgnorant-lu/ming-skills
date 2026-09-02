@@ -85,10 +85,14 @@ export function summarizeEvents(
     };
   }
 
-  // Time range
-  const timestamps = events.map((e) => e.timestamp);
-  const start = Math.min(...timestamps);
-  const end = Math.max(...timestamps);
+  // Time range — loop instead of Math.min(...spread): a spread of 100k+
+  // timestamps exceeds the argument limit and throws RangeError on big traces.
+  let start = Infinity;
+  let end = -Infinity;
+  for (const e of events) {
+    if (e.timestamp < start) start = e.timestamp;
+    if (e.timestamp > end) end = e.timestamp;
+  }
 
   // Category aggregation (always included)
   const catMap = new Map<

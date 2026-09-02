@@ -371,6 +371,7 @@ describe('GhidraAnalyzer', () => {
 });
 
 class RecordingGhidraAnalyzer extends GhidraAnalyzer {
+  private readonly commandResult: { stdout: string; stderr?: string };
   calls: Array<{
     file: string;
     args: string[];
@@ -379,8 +380,9 @@ class RecordingGhidraAnalyzer extends GhidraAnalyzer {
     scriptContent?: string;
   }> = [];
 
-  constructor(private readonly commandResult: { stdout: string; stderr?: string }) {
+  constructor(commandResult: { stdout: string; stderr?: string }) {
     super({ discoveryPaths: [] });
+    this.commandResult = commandResult;
   }
 
   override async getAvailability() {

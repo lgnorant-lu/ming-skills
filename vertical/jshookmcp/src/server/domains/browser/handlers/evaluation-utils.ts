@@ -53,12 +53,14 @@ function stripBase64Values(value: unknown): unknown {
   return value;
 }
 
-export function applyEvaluationPostFilters(
+export async function applyEvaluationPostFilters(
   raw: unknown,
   detailedDataManager: DetailedDataManager,
   options: EvaluationPostFilterOptions,
-): unknown {
-  let result = options.autoSummarize ? detailedDataManager.smartHandle(raw, options.maxSize) : raw;
+): Promise<unknown> {
+  let result = options.autoSummarize
+    ? await detailedDataManager.smartHandle(raw, options.maxSize)
+    : raw;
   if (options.fieldFilter && options.fieldFilter.length > 0) {
     result = filterFields(result, new Set(options.fieldFilter));
   }

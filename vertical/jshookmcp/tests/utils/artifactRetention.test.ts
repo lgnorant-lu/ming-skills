@@ -51,6 +51,9 @@ describe('artifactRetention', () => {
     await utimes(newer, newTime, newTime);
 
     const result = await cleanupArtifacts({
+      // Isolate the size-cap path: since the a4-06 fix the env default is
+      // retentionDays=7, which would also age-remove both files here.
+      retentionDays: 0,
       maxTotalBytes: 10,
       dryRun: false,
       directories: [

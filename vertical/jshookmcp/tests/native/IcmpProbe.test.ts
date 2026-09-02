@@ -22,9 +22,10 @@ const { state, mockKoffi, posixMocks } = vi.hoisted(() => {
       replySize: number,
     ) => {
       shared.replySizes.push(replySize);
-      if (process.arch === 'x64') {
-        // ICMP_ECHO_REPLY (x64): Address is a ULONG_PTR at 0 (8B), Status at 8,
-        // RoundTripTime at 12.
+      if (process.arch !== 'ia32') {
+        // ICMP_ECHO_REPLY (64-bit pointer width; x64 and ARM64 both use
+        // 8-byte pointers): Address is a ULONG_PTR at 0 (8B), Status at 8,
+        // RoundTripTime at 12. Mirrors the source gate in parseReply().
         replyBuf.writeBigUInt64LE(BigInt(destAddr >>> 0), 0);
         replyBuf.writeUInt32LE(0, 8);
         replyBuf.writeUInt32LE(7, 12);
@@ -70,6 +71,9 @@ const { state, mockKoffi, posixMocks } = vi.hoisted(() => {
   const posixClose = vi.fn(() => 0);
   const posixSendto = vi.fn(() => 32);
   const posixRecv = vi.fn(() => 0);
+  const posixSetSockOpt = vi.fn(
+    (_fd: number, _level: number, _optname: number, _optval: Buffer, _optlen: number) => 0,
+  );
 
   return {
     state: shared,
@@ -84,13 +88,13 @@ const { state, mockKoffi, posixMocks } = vi.hoisted(() => {
           if (signature.includes('close')) return posixClose;
           if (signature.includes('sendto')) return posixSendto;
           if (signature.includes('recv')) return posixRecv;
-          if (signature.includes('setsockopt')) return vi.fn(() => 0);
+          if (signature.includes('setsockopt')) return posixSetSockOpt;
           return vi.fn();
         }),
         unload: vi.fn(),
       })),
     },
-    posixMocks: { posixSocket, posixClose, posixSendto, posixRecv },
+    posixMocks: { posixSocket, posixClose, posixSendto, posixRecv, posixSetSockOpt },
   };
 });
 
@@ -173,7 +177,10 @@ describe('IcmpProbe Windows ICMP_ECHO_REPLY32 (x86 layout)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     Object.defineProperty(process, 'platform', { value: 'win32' });
-    Object.defineProperty(process, 'arch', { value: 'x86' });
+    // Node's real 32-bit arch value is 'ia32' (Windows/other platforms use
+    // 'x64' / 'arm64' / 'ia32' — never 'x86'). Using the real value keeps the
+    // width gate (`process.arch !== 'ia32'`) exercising the 32-bit layout.
+    Object.defineProperty(process, 'arch', { value: 'ia32' });
   });
 
   afterEach(() => {
@@ -267,6 +274,46 @@ describe('IcmpProbe POSIX reply source-IP validation', () => {
     // Same id (raw socket broadcast), wrong source → treated as noise.
     expect(result.alive).toBe(false);
     expect(result.icmpStatus).toBe('UNEXPECTED_REPLY');
+
+    unloadIcmpLibraries();
+  });
+});
+
+describe('IcmpProbe POSIX default TTL from config', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: originalPlatform });
+  });
+
+  /** Find the setsockopt(fd, IPPROTO_IP=0, IP_TTL=2, ...) call that set the TTL. */
+  function ttlSetCalls(): number[] {
+    return posixMocks.posixSetSockOpt.mock.calls
+      .filter(([, level, optname]) => level === 0 && optname === 2)
+      .map(([, , , buf]) => (buf as Buffer).readInt32LE(0));
+  }
+
+  it('uses ICMP_DEFAULT_TTL (128) when the caller does not override ttl', async () => {
+    vi.resetModules();
+    const { icmpProbe, unloadIcmpLibraries } = await import('@src/native/IcmpProbe');
+
+    await icmpProbe({ target: '1.2.3.4', timeout: 1000 });
+
+    expect(ttlSetCalls()).toContain(128);
+
+    unloadIcmpLibraries();
+  });
+
+  it('honours an explicit ttl override', async () => {
+    vi.resetModules();
+    const { icmpProbe, unloadIcmpLibraries } = await import('@src/native/IcmpProbe');
+
+    await icmpProbe({ target: '1.2.3.4', ttl: 64, timeout: 1000 });
+
+    expect(ttlSetCalls()).toEqual([64]);
 
     unloadIcmpLibraries();
   });

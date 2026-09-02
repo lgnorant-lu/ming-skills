@@ -98,6 +98,19 @@ describe('ntCreateThreadEx', () => {
     expect(r.status).toBeLessThan(0);
     expect(r.handle).toBe(0n);
   });
+
+  it('passes the full thread access mask (0x1fffff) as the desired-access arg', () => {
+    ffiCall.mockImplementation((handleBuf) => {
+      handleBuf.writeBigUInt64LE(0x100n, 0);
+      return 0;
+    });
+    ntCreateThreadEx(1n, 0x2000n, 0n);
+    expect(ffiCall).toHaveBeenCalledTimes(1);
+    // arg order: handle-out, access mask, attr, hProcess, startAddr, param,
+    // flags, stackSize, 0, 0, reserved
+    const args = ffiCall.mock.calls[0]!;
+    expect(args[1]).toBe(0x1fffff);
+  });
 });
 
 describe('ntClose', () => {

@@ -139,6 +139,16 @@ export const FPCR_TRAP_MASK =
   (1 << FPCR_IXE) |
   (1 << FPCR_IDE);
 
+/**
+ * FPCR trap-enable bits remapped to FPSR flag-bit positions, for the
+ * `flags & ((fpcr >> 8) & this)` checks used by the inlined slow paths:
+ * FPCR bits 8-12 (IOE..IXE) → bits 0-4 and FPCR bit 15 (IDE) → bit 7, which
+ * aligns with FPSR_IOC..FPSR_IXC (0-4) and FPSR_IDC (7). A full low-byte mask
+ * is exact because FPCR bits 13-14 are RES0 — a narrower 0x3f mask would drop
+ * the IDE trap enable (bit 15) entirely.
+ */
+export const FPCR_TRAP_MASK_FPSR_ALIGNED = 0xff;
+
 /** Mask for all cumulative exception flags in FPSR */
 export const FPSR_EXCEPTION_MASK =
   (1 << FPSR_IOC) |

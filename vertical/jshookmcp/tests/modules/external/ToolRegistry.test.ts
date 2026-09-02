@@ -102,4 +102,43 @@ describe('ToolRegistry', () => {
       version: '3.1.4',
     });
   });
+
+  it('a rejecting probe does not fail the whole batch — it degrades to unavailable', async () => {
+    probeState.probeCommand
+      .mockRejectedValueOnce(new Error('EPERM: operation not permitted'))
+      .mockResolvedValue(available());
+
+    const registry = new ToolRegistry();
+    const results = await registry.probeAll(true);
+
+    // The rejecting probe is reported as unavailable with the error surfaced…
+    const failed = Object.entries(results).find(([, r]) => r.available === false);
+    expect(failed).toBeDefined();
+    expect(failed![1].reason).toContain('EPERM');
+    // …while every other tool still resolved normally.
+    expect(Object.values(results).filter((r) => r.available).length).toBe(
+      registry.getRegisteredTools().length - 1,
+    );
+  });
+
+  it('caches partial-failure results within the TTL — no full re-probe on the next call', async () => {
+    probeState.probeCommand.mockRejectedValueOnce(new Error('boom')).mockResolvedValue(available());
+    const registry = new ToolRegistry();
+
+    await registry.probeAll(true);
+    const callCount = probeState.probeCommand.mock.calls.length;
+
+    // Cache is now valid (even though one probe failed), so an unforced call
+    // reuses the previous results instead of re-probing everything.
+    const second = await registry.probeAll();
+    expect(probeState.probeCommand.mock.calls.length).toBe(callCount);
+
+    // The failed tool's degradation is visible through the cache too.
+    const failed = registry
+      .getRegisteredTools()
+      .map((name) => registry.getCachedProbe(name))
+      .find((r) => r && r.available === false);
+    expect(failed?.reason).toContain('boom');
+    expect(second).toBeDefined();
+  });
 });

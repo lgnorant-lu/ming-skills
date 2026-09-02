@@ -20,13 +20,14 @@ BoringSSL/TLS inspection domain supporting TLS traffic analysis and certificate 
 - boringssl-inspector + network
 - boringssl-inspector + browser
 
-## Full tool list (28)
+## Full tool list (29)
 
 | Tool | Description |
 | --- | --- |
 | `tls_keylog_enable` | Enable SSLKEYLOGFILE output for TLS library clients. |
 | `tls_keylog_parse` | Parse an SSLKEYLOGFILE and summarize available key material. |
 | `tls_keylog_disable` | Disable SSLKEYLOGFILE capture and unset the environment variable. |
+| `tls_keylog_seal` | Encrypt the current keylog file in place with a fresh ephemeral key and securely wipe the plaintext source. Mitigates disk-forensics exposure (pagefile/hibernation/TEMP scraping) of captured TLS secrets. The returned keyHex is not persisted anywhere — hold onto it to decrypt the sealed envelope later, or it is unrecoverable once the process exits. |
 | `tls_decrypt_payload` | Decrypt a TLS payload using a provided key, nonce, and algorithm. |
 | `tls_keylog_summarize` | Summarize an SSLKEYLOGFILE: per-label distribution, secret-type classification (TLS 1.2 master-secret vs TLS 1.3 traffic-secret kinds), TLS version inference, and unique session (client_random) count. |
 | `tls_keylog_lookup_secret` | Look up a TLS secret by client random hex from the parsed keylog. |

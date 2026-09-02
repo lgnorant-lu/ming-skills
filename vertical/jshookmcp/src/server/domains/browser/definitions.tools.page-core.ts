@@ -1,4 +1,5 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
+import { PAGE_EVAL_MAX_SIZE_BYTES } from '@src/constants/browser';
 import { tool } from '@server/registry/tool-builder';
 import { PAGE_NAVIGATION_WAIT_UNTIL_VALUES } from '@modules/browser/navigation-wait-until';
 
@@ -25,9 +26,7 @@ export const browserPageCoreTools: Tool[] = [
       .idempotent()
       .openWorld(),
   ),
-  tool('page_reload', (t) =>
-    t.desc('Reload the page with optional cache bypass.').idempotent().openWorld(),
-  ),
+  tool('page_reload', (t) => t.desc('Reload the current page.').idempotent().openWorld()),
   tool('page_back', (t) => t.desc('Navigate back in browser history.').openWorld()),
   tool('page_forward', (t) => t.desc('Navigate forward in browser history.').openWorld()),
   tool('page_list_frames', (t) => t.desc('List page frames for frame targeting.').query()),
@@ -122,7 +121,7 @@ export const browserPageCoreTools: Tool[] = [
       .string('expression', 'Alias of code')
       .boolean('autoSummarize', 'Auto-summarize large results', { default: true })
       .number('maxSize', 'Max result size in bytes before summarizing', {
-        default: 51200,
+        default: PAGE_EVAL_MAX_SIZE_BYTES,
         minimum: 1024,
         maximum: 10485760,
       })

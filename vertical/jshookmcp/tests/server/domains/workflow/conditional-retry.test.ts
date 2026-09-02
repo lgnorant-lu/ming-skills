@@ -237,16 +237,11 @@ describe('WorkflowHandlers — conditional_step + retry_policy', () => {
       expect(body.branch).toBe('whenTrue');
     });
 
-    it('reads stepResults from last workflow success when not provided', async () => {
+    it('does not read prior-run step outputs when stepResults is omitted', async () => {
       mockRunStore.getLastSuccess.mockReturnValue({
         workflowId: 'workflow.demo.v1',
-        stepResults: {
-          'check-auth': {
-            content: [
-              { type: 'text', text: JSON.stringify({ success: false, error: 'unauthorized' }) },
-            ],
-          },
-        },
+        runId: 'run-1',
+        stepResultKeys: ['check-auth'],
       });
 
       const body = parseJson<ConditionalStepResponse>(
@@ -256,9 +251,11 @@ describe('WorkflowHandlers — conditional_step + retry_policy', () => {
           workflowId: 'workflow.demo.v1',
         }),
       );
+      // The bounded run store retains only step-result keys, not the raw step
+      // outputs, so prior-run values cannot back value-based predicates.
       expect(body.success).toBe(true);
-      expect(body.branch).toBe('whenTrue');
-      expect(mockRunStore.getLastSuccess).toHaveBeenCalledWith('workflow.demo.v1');
+      expect(body.branch).toBe('skipped');
+      expect(mockRunStore.getLastSuccess).not.toHaveBeenCalled();
     });
 
     it('rejects unknown predicateId', async () => {

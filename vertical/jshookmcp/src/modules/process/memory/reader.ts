@@ -5,7 +5,7 @@
 import { promises as fs } from 'node:fs';
 import { logger } from '@utils/logger';
 import { nativeMemoryManager } from '@native/NativeMemoryManager';
-import { isKoffiAvailable } from '@native/Win32API';
+import { isKoffiBindingUsable } from '@native/Win32API';
 import {
   MEMORY_MAX_READ_BYTES,
   MEMORY_READ_TIMEOUT_MS,
@@ -146,7 +146,7 @@ async function readMemoryLinux(
     if (provider) {
       const handle = provider.openProcess(pid, false);
       try {
-        const result = provider.readMemory(handle, BigInt(address), size);
+        const result = await provider.readMemory(handle, BigInt(address), size);
         logger.debug('Native Linux memory read succeeded');
         return { success: true, data: bufferToHex(result.data, result.bytesRead).trim() };
       } finally {
@@ -215,7 +215,7 @@ async function readMemoryMac(
     if (avail.available) {
       const handle = provider.openProcess(pid, false);
       try {
-        const result = provider.readMemory(handle, BigInt(address), size);
+        const result = await provider.readMemory(handle, BigInt(address), size);
         const hex = Array.from(result.data.subarray(0, result.bytesRead))
           .map((b) => b.toString(16).padStart(2, '0').toUpperCase())
           .join(' ');
@@ -291,7 +291,7 @@ export async function readMemory(
     }
 
     // Try native FFI first on Windows (10-100x faster)
-    if (platform === 'win32' && isKoffiAvailable()) {
+    if (platform === 'win32' && isKoffiBindingUsable()) {
       try {
         const result = await nativeMemoryManager.readMemory(pid, address, size);
         if (result.success) {

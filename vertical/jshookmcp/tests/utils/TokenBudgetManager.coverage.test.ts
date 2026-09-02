@@ -1,5 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TokenBudgetManager } from '@utils/TokenBudgetManager';
+import type { ToolCallRecord } from '@utils/TokenBudgetManager';
+import { RingBuffer } from '@utils/RingBuffer';
+
+/** Replace the private history buffer with a RingBuffer seeded from records. */
+function setHistory(m: TokenBudgetManager, records: ToolCallRecord[]): void {
+  const buffer = new RingBuffer<ToolCallRecord>(2000);
+  for (const record of records) {
+    buffer.push(record);
+  }
+  (m as any).toolCallHistory = buffer;
+  (m as any).headTimestamp = records[0]?.timestamp ?? null;
+}
 
 /**
  * Coverage tests targeting the v8 ignore next branches and
@@ -379,7 +391,7 @@ describe('TokenBudgetManager – v8 ignore branch coverage', () => {
 
   it('autoCleanup filters old records and recalculates usage', () => {
     const now = Date.now();
-    (manager as any).toolCallHistory = [
+    setHistory(manager, [
       {
         toolName: 'old',
         timestamp: now - 10 * 60 * 1000, // older than HISTORY_RETENTION
@@ -396,14 +408,14 @@ describe('TokenBudgetManager – v8 ignore branch coverage', () => {
         estimatedTokens: 50,
         cumulativeTokens: 550,
       },
-    ];
+    ]);
     (manager as any).currentUsage = 550;
     (manager as any).warnings = new Set([0.8]);
 
     (manager as any).autoCleanup();
 
     expect((manager as any).toolCallHistory.length).toBe(1);
-    expect((manager as any).toolCallHistory[0]?.toolName).toBe('recent');
+    expect((manager as any).toolCallHistory.toArray()[0]?.toolName).toBe('recent');
     expect((manager as any).currentUsage).toBe(50); // recalculated
     // Warnings should be cleared since usage dropped below threshold
     expect((manager as any).warnings.size).toBe(0);
@@ -418,7 +430,7 @@ describe('TokenBudgetManager – v8 ignore branch coverage', () => {
   // ── recalculateUsage ───────────────────────────────────────────────────
 
   it('recalculateUsage sums all token estimates', () => {
-    (manager as any).toolCallHistory = [
+    setHistory(manager, [
       {
         estimatedTokens: 100,
         timestamp: Date.now(),
@@ -443,7 +455,7 @@ describe('TokenBudgetManager – v8 ignore branch coverage', () => {
         toolName: 'c',
         cumulativeTokens: 350,
       },
-    ];
+    ]);
     (manager as any).currentUsage = 1000;
     (manager as any).recalculateUsage();
     expect((manager as any).currentUsage).toBe(350);
@@ -453,7 +465,7 @@ describe('TokenBudgetManager – v8 ignore branch coverage', () => {
 
   it('getStats returns healthy suggestion when usage is low', () => {
     (manager as any).currentUsage = 1000;
-    (manager as any).toolCallHistory = [
+    setHistory(manager, [
       {
         estimatedTokens: 1000,
         timestamp: Date.now(),
@@ -462,14 +474,14 @@ describe('TokenBudgetManager – v8 ignore branch coverage', () => {
         toolName: 'tool1',
         cumulativeTokens: 1000,
       },
-    ];
+    ]);
     const stats = (manager as any).getStats();
     expect(stats.suggestions.some((s: string) => s.includes('healthy'))).toBe(true);
   });
 
   it('getStats handles top tools sorted by token usage', () => {
     const now = Date.now();
-    (manager as any).toolCallHistory = [
+    setHistory(manager, [
       {
         toolName: 'small',
         estimatedTokens: 100,
@@ -486,7 +498,7 @@ describe('TokenBudgetManager – v8 ignore branch coverage', () => {
         responseSize: 0,
         cumulativeTokens: 1000,
       },
-    ];
+    ]);
     (manager as any).currentUsage = 1000;
     const stats = (manager as any).getStats();
     expect(stats.topTools[0]?.tool).toBe('big');
@@ -512,7 +524,7 @@ describe('TokenBudgetManager – v8 ignore branch coverage', () => {
 
   it('generateSuggestions provides network_get_requests advice', () => {
     (manager as any).currentUsage = 150000;
-    (manager as any).toolCallHistory = [
+    setHistory(manager, [
       {
         toolName: 'network_get_requests_helper',
         estimatedTokens: 100000,
@@ -521,14 +533,14 @@ describe('TokenBudgetManager – v8 ignore branch coverage', () => {
         responseSize: 0,
         cumulativeTokens: 100000,
       },
-    ];
+    ]);
     const stats = (manager as any).getStats();
     expect(stats.suggestions.some((s: string) => s.includes('network_get_requests'))).toBe(true);
   });
 
   it('generateSuggestions provides page_evaluate advice', () => {
     (manager as any).currentUsage = 150000;
-    (manager as any).toolCallHistory = [
+    setHistory(manager, [
       {
         toolName: 'page_evaluate_helper',
         estimatedTokens: 100000,
@@ -537,7 +549,7 @@ describe('TokenBudgetManager – v8 ignore branch coverage', () => {
         responseSize: 0,
         cumulativeTokens: 100000,
       },
-    ];
+    ]);
     const stats = (manager as any).getStats();
     expect(stats.suggestions.some((s: string) => s.includes('page_evaluate'))).toBe(true);
   });

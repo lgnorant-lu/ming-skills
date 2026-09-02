@@ -44,12 +44,16 @@ function writeU32(buffer: Buffer, offset: number, value: number, endian: PacketE
 // Options builder
 // ---------------------------------------------------------------------------
 
-function buildOptions(entries: { code: number; value: Buffer }[]): Buffer {
+function buildOptions(
+  entries: { code: number; value: Buffer }[],
+  endian: PacketEndianness,
+): Buffer {
   const parts: Buffer[] = [];
   for (const entry of entries) {
+    // Per pcap-ng spec §3.4.1, option code/length follow the section byte order.
     const header = Buffer.alloc(4);
-    header.writeUInt16LE(entry.code, 0);
-    header.writeUInt16LE(entry.value.length, 2);
+    writeU16(header, 0, entry.code, endian);
+    writeU16(header, 2, entry.value.length, endian);
     const paddedLength = padTo4(entry.value.length);
     const padded = Buffer.alloc(paddedLength);
     entry.value.copy(padded);
@@ -93,7 +97,7 @@ function buildInterfaceDescription(entry: PcapngWriteInterface, endian: PacketEn
       value: Buffer.from([entry.tsresolBase2 ? 0x80 | resol : resol]),
     });
   }
-  const options = buildOptions(optionEntries);
+  const options = buildOptions(optionEntries, endian);
   const body = Buffer.alloc(8 + options.length);
   writeU16(body, 0, entry.linkType, endian);
   writeU16(body, 2, 0, endian); // reserved
@@ -103,7 +107,13 @@ function buildInterfaceDescription(entry: PcapngWriteInterface, endian: PacketEn
 }
 
 function buildEnhancedPacket(packet: PcapngWritePacket, endian: PacketEndianness): Buffer {
-  const data = Buffer.from(packet.dataHex.replace(/\s+/g, ''), 'hex');
+  const stripped = packet.dataHex.replace(/\s+/g, '');
+  // Buffer.from(hex) silently truncates at the first invalid char; validate
+  // up front so a bad packet fails loudly instead of writing a corrupt file.
+  if (stripped.length % 2 !== 0 || !/^[0-9a-fA-F]*$/u.test(stripped)) {
+    throw new Error('dataHex must be an even-length hexadecimal string');
+  }
+  const data = Buffer.from(stripped, 'hex');
   const paddedDataLength = padTo4(data.length);
   // Fixed header: interfaceId(4) + tsHigh(4) + tsLow(4) + capturedLen(4) + originalLen(4) = 20 bytes.
   const body = Buffer.alloc(20 + paddedDataLength);

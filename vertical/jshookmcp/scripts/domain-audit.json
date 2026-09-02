@@ -2,14 +2,14 @@
   "adb-bridge": {
     "domain": "adb-bridge",
     "dims": {
-      "d1_toolCount": 23,
-      "d2_testFiles": 4,
+      "d1_toolCount": 26,
+      "d2_testFiles": 7,
       "d3_coverageExcluded": [
         "src/server/domains/adb-bridge/handlers.impl.ts",
         "src/server/domains/adb-bridge/handlers.ts"
       ],
-      "d4_bareCatch": 3,
-      "d5_handleSafeRefs": 24,
+      "d4_bareCatch": 4,
+      "d5_handleSafeRefs": 27,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -22,10 +22,10 @@
     "domain": "analysis",
     "dims": {
       "d1_toolCount": 25,
-      "d2_testFiles": 11,
+      "d2_testFiles": 19,
       "d3_coverageExcluded": ["src/server/domains/analysis/handlers.ts"],
-      "d4_bareCatch": 10,
-      "d5_handleSafeRefs": 9,
+      "d4_bareCatch": 12,
+      "d5_handleSafeRefs": 11,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -37,8 +37,8 @@
   "binary-instrument": {
     "domain": "binary-instrument",
     "dims": {
-      "d1_toolCount": 40,
-      "d2_testFiles": 16,
+      "d1_toolCount": 44,
+      "d2_testFiles": 18,
       "d3_coverageExcluded": [
         "src/server/domains/binary-instrument/handlers.impl.ts",
         "src/server/domains/binary-instrument/handlers/analysis-handlers.ts",
@@ -66,7 +66,7 @@
         "src/server/domains/boringssl-inspector/handlers.ts",
         "src/server/domains/boringssl-inspector/handlers.impl.core.ts"
       ],
-      "d4_bareCatch": 3,
+      "d4_bareCatch": 4,
       "d5_handleSafeRefs": 29,
       "d6_doc": {
         "hasClaude": true,
@@ -79,11 +79,11 @@
   "browser": {
     "domain": "browser",
     "dims": {
-      "d1_toolCount": 73,
-      "d2_testFiles": 75,
+      "d1_toolCount": 80,
+      "d2_testFiles": 83,
       "d3_coverageExcluded": ["src/server/domains/browser/handlers.ts"],
-      "d4_bareCatch": 15,
-      "d5_handleSafeRefs": 55,
+      "d4_bareCatch": 16,
+      "d5_handleSafeRefs": 63,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -95,8 +95,8 @@
   "canvas": {
     "domain": "canvas",
     "dims": {
-      "d1_toolCount": 8,
-      "d2_testFiles": 14,
+      "d1_toolCount": 9,
+      "d2_testFiles": 16,
       "d3_coverageExcluded": [
         "src/server/domains/canvas/dependencies.ts",
         "src/server/domains/canvas/handlers.ts",
@@ -105,8 +105,8 @@
         "src/server/domains/canvas/adapters/phaser-adapter.ts",
         "src/server/domains/canvas/adapters"
       ],
-      "d4_bareCatch": 15,
-      "d5_handleSafeRefs": 10,
+      "d4_bareCatch": 12,
+      "d5_handleSafeRefs": 11,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -118,11 +118,11 @@
   "coordination": {
     "domain": "coordination",
     "dims": {
-      "d1_toolCount": 11,
-      "d2_testFiles": 11,
+      "d1_toolCount": 12,
+      "d2_testFiles": 14,
       "d3_coverageExcluded": [],
-      "d4_bareCatch": 5,
-      "d5_handleSafeRefs": 13,
+      "d4_bareCatch": 12,
+      "d5_handleSafeRefs": 14,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -134,14 +134,14 @@
   "cross-domain": {
     "domain": "cross-domain",
     "dims": {
-      "d1_toolCount": 7,
-      "d2_testFiles": 11,
+      "d1_toolCount": 8,
+      "d2_testFiles": 14,
       "d3_coverageExcluded": [
         "src/server/domains/cross-domain/handlers.ts",
         "src/server/domains/cross-domain/handlers.impl.ts"
       ],
       "d4_bareCatch": 0,
-      "d5_handleSafeRefs": 8,
+      "d5_handleSafeRefs": 9,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -153,11 +153,11 @@
   "dart-inspector": {
     "domain": "dart-inspector",
     "dims": {
-      "d1_toolCount": 12,
-      "d2_testFiles": 18,
+      "d1_toolCount": 16,
+      "d2_testFiles": 23,
       "d3_coverageExcluded": [],
       "d4_bareCatch": 0,
-      "d5_handleSafeRefs": 14,
+      "d5_handleSafeRefs": 18,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -170,7 +170,7 @@
     "domain": "debugger",
     "dims": {
       "d1_toolCount": 21,
-      "d2_testFiles": 51,
+      "d2_testFiles": 53,
       "d3_coverageExcluded": ["src/server/domains/debugger/handlers.ts"],
       "d4_bareCatch": 1,
       "d5_handleSafeRefs": 8,
@@ -201,11 +201,11 @@
   "exploit-dev": {
     "domain": "exploit-dev",
     "dims": {
-      "d1_toolCount": 20,
-      "d2_testFiles": 19,
+      "d1_toolCount": 21,
+      "d2_testFiles": 30,
       "d3_coverageExcluded": [],
-      "d4_bareCatch": 7,
-      "d5_handleSafeRefs": 24,
+      "d4_bareCatch": 8,
+      "d5_handleSafeRefs": 25,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -218,7 +218,7 @@
     "domain": "extension-registry",
     "dims": {
       "d1_toolCount": 7,
-      "d2_testFiles": 6,
+      "d2_testFiles": 7,
       "d3_coverageExcluded": ["src/server/domains/extension-registry/handlers.ts"],
       "d4_bareCatch": 0,
       "d5_handleSafeRefs": 8,
@@ -233,8 +233,8 @@
   "graphql": {
     "domain": "graphql",
     "dims": {
-      "d1_toolCount": 6,
-      "d2_testFiles": 15,
+      "d1_toolCount": 7,
+      "d2_testFiles": 19,
       "d3_coverageExcluded": [
         "src/server/domains/graphql/handlers.ts",
         "src/server/domains/graphql/handlers.base.ts",
@@ -247,8 +247,8 @@
         "src/server/domains/graphql/handlers.impl.core.runtime.script-replace.ts",
         "src/server/domains/graphql/handlers.impl.core.runtime.replay.ts"
       ],
-      "d4_bareCatch": 19,
-      "d5_handleSafeRefs": 7,
+      "d4_bareCatch": 24,
+      "d5_handleSafeRefs": 8,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -260,11 +260,11 @@
   "instrumentation": {
     "domain": "instrumentation",
     "dims": {
-      "d1_toolCount": 16,
-      "d2_testFiles": 14,
+      "d1_toolCount": 13,
+      "d2_testFiles": 16,
       "d3_coverageExcluded": [],
       "d4_bareCatch": 0,
-      "d5_handleSafeRefs": 14,
+      "d5_handleSafeRefs": 16,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -276,13 +276,13 @@
   "maintenance": {
     "domain": "maintenance",
     "dims": {
-      "d1_toolCount": 13,
-      "d2_testFiles": 6,
+      "d1_toolCount": 14,
+      "d2_testFiles": 8,
       "d3_coverageExcluded": [
         "src/server/domains/maintenance/handlers/extension-registry-utils.ts"
       ],
-      "d4_bareCatch": 2,
-      "d5_handleSafeRefs": 9,
+      "d4_bareCatch": 5,
+      "d5_handleSafeRefs": 10,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -294,11 +294,11 @@
   "memory": {
     "domain": "memory",
     "dims": {
-      "d1_toolCount": 34,
-      "d2_testFiles": 18,
+      "d1_toolCount": 74,
+      "d2_testFiles": 33,
       "d3_coverageExcluded": ["src/server/domains/memory/handlers.impl.ts"],
-      "d4_bareCatch": 3,
-      "d5_handleSafeRefs": 57,
+      "d4_bareCatch": 38,
+      "d5_handleSafeRefs": 116,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -310,14 +310,14 @@
   "mojo-ipc": {
     "domain": "mojo-ipc",
     "dims": {
-      "d1_toolCount": 6,
-      "d2_testFiles": 4,
+      "d1_toolCount": 8,
+      "d2_testFiles": 7,
       "d3_coverageExcluded": [
         "src/server/domains/mojo-ipc/handlers.impl.ts",
         "src/server/domains/mojo-ipc/handlers.ts"
       ],
       "d4_bareCatch": 0,
-      "d5_handleSafeRefs": 7,
+      "d5_handleSafeRefs": 10,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -345,11 +345,11 @@
   "native-emulator": {
     "domain": "native-emulator",
     "dims": {
-      "d1_toolCount": 22,
-      "d2_testFiles": 65,
+      "d1_toolCount": 56,
+      "d2_testFiles": 82,
       "d3_coverageExcluded": [],
-      "d4_bareCatch": 0,
-      "d5_handleSafeRefs": 21,
+      "d4_bareCatch": 10,
+      "d5_handleSafeRefs": 55,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -361,8 +361,8 @@
   "network": {
     "domain": "network",
     "dims": {
-      "d1_toolCount": 41,
-      "d2_testFiles": 41,
+      "d1_toolCount": 38,
+      "d2_testFiles": 48,
       "d3_coverageExcluded": [
         "src/server/domains/network/handlers.ts",
         "src/server/domains/network/handlers.impl.core.ts",
@@ -373,8 +373,8 @@
         "src/server/domains/network/handlers.impl.core.runtime.intercept.ts",
         "src/server/domains/network/handlers.impl.core.runtime.performance.ts"
       ],
-      "d4_bareCatch": 16,
-      "d5_handleSafeRefs": 55,
+      "d4_bareCatch": 15,
+      "d5_handleSafeRefs": 48,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -386,11 +386,11 @@
   "platform": {
     "domain": "platform",
     "dims": {
-      "d1_toolCount": 16,
-      "d2_testFiles": 18,
+      "d1_toolCount": 18,
+      "d2_testFiles": 21,
       "d3_coverageExcluded": [],
-      "d4_bareCatch": 22,
-      "d5_handleSafeRefs": 31,
+      "d4_bareCatch": 23,
+      "d5_handleSafeRefs": 37,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -402,8 +402,8 @@
   "process": {
     "domain": "process",
     "dims": {
-      "d1_toolCount": 27,
-      "d2_testFiles": 62,
+      "d1_toolCount": 28,
+      "d2_testFiles": 67,
       "d3_coverageExcluded": [
         "src/server/domains/process/handlers.ts",
         "src/server/domains/process/handlers.impl.core.ts",
@@ -414,8 +414,8 @@
         "src/server/domains/process/handlers.base.ts",
         "src/server/domains/process/handlers.base.process.ts"
       ],
-      "d4_bareCatch": 10,
-      "d5_handleSafeRefs": 27,
+      "d4_bareCatch": 12,
+      "d5_handleSafeRefs": 28,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -428,13 +428,13 @@
     "domain": "protocol-analysis",
     "dims": {
       "d1_toolCount": 20,
-      "d2_testFiles": 13,
+      "d2_testFiles": 15,
       "d3_coverageExcluded": [
         "src/server/domains/protocol-analysis/handlers/handler-class.ts",
         "src/server/domains/protocol-analysis/handlers.ts",
         "src/server/domains/protocol-analysis/handlers.impl.core.ts"
       ],
-      "d4_bareCatch": 0,
+      "d4_bareCatch": 1,
       "d5_handleSafeRefs": 21,
       "d6_doc": {
         "hasClaude": true,
@@ -447,11 +447,11 @@
   "proxy": {
     "domain": "proxy",
     "dims": {
-      "d1_toolCount": 10,
+      "d1_toolCount": 11,
       "d2_testFiles": 3,
       "d3_coverageExcluded": [],
       "d4_bareCatch": 2,
-      "d5_handleSafeRefs": 11,
+      "d5_handleSafeRefs": 13,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -479,15 +479,15 @@
   "streaming": {
     "domain": "streaming",
     "dims": {
-      "d1_toolCount": 13,
-      "d2_testFiles": 14,
+      "d1_toolCount": 17,
+      "d2_testFiles": 17,
       "d3_coverageExcluded": [
         "src/server/domains/streaming/handlers.ts",
         "src/server/domains/streaming/handlers/sse-handlers.ts",
         "src/server/domains/streaming/handlers/ws-handlers.ts"
       ],
-      "d4_bareCatch": 13,
-      "d5_handleSafeRefs": 14,
+      "d4_bareCatch": 22,
+      "d5_handleSafeRefs": 18,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -500,12 +500,12 @@
     "domain": "syscall-hook",
     "dims": {
       "d1_toolCount": 15,
-      "d2_testFiles": 13,
+      "d2_testFiles": 16,
       "d3_coverageExcluded": [
         "src/server/domains/syscall-hook/handlers.impl.ts",
         "src/server/domains/syscall-hook/handlers.ts"
       ],
-      "d4_bareCatch": 6,
+      "d4_bareCatch": 4,
       "d5_handleSafeRefs": 16,
       "d6_doc": {
         "hasClaude": true,
@@ -519,9 +519,9 @@
     "domain": "trace",
     "dims": {
       "d1_toolCount": 10,
-      "d2_testFiles": 7,
+      "d2_testFiles": 10,
       "d3_coverageExcluded": [],
-      "d4_bareCatch": 2,
+      "d4_bareCatch": 3,
       "d5_handleSafeRefs": 11,
       "d6_doc": {
         "hasClaude": true,
@@ -537,7 +537,7 @@
       "d1_toolCount": 7,
       "d2_testFiles": 15,
       "d3_coverageExcluded": ["src/server/domains/transform/handlers.ts"],
-      "d4_bareCatch": 20,
+      "d4_bareCatch": 21,
       "d5_handleSafeRefs": 8,
       "d6_doc": {
         "hasClaude": true,
@@ -550,10 +550,10 @@
   "v8-inspector": {
     "domain": "v8-inspector",
     "dims": {
-      "d1_toolCount": 22,
-      "d2_testFiles": 24,
+      "d1_toolCount": 21,
+      "d2_testFiles": 32,
       "d3_coverageExcluded": ["src/server/domains/v8-inspector/handlers.ts"],
-      "d4_bareCatch": 16,
+      "d4_bareCatch": 19,
       "d5_handleSafeRefs": 20,
       "d6_doc": {
         "hasClaude": true,
@@ -566,14 +566,14 @@
   "wasm": {
     "domain": "wasm",
     "dims": {
-      "d1_toolCount": 13,
-      "d2_testFiles": 9,
+      "d1_toolCount": 17,
+      "d2_testFiles": 22,
       "d3_coverageExcluded": [
         "src/server/domains/wasm/handlers.ts",
         "src/server/domains/wasm/handlers.impl.ts"
       ],
-      "d4_bareCatch": 4,
-      "d5_handleSafeRefs": 14,
+      "d4_bareCatch": 8,
+      "d5_handleSafeRefs": 18,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -585,11 +585,11 @@
   "webgpu": {
     "domain": "webgpu",
     "dims": {
-      "d1_toolCount": 7,
-      "d2_testFiles": 14,
+      "d1_toolCount": 10,
+      "d2_testFiles": 25,
       "d3_coverageExcluded": [],
-      "d4_bareCatch": 6,
-      "d5_handleSafeRefs": 14,
+      "d4_bareCatch": 9,
+      "d5_handleSafeRefs": 20,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,
@@ -601,11 +601,11 @@
   "workflow": {
     "domain": "workflow",
     "dims": {
-      "d1_toolCount": 9,
-      "d2_testFiles": 8,
+      "d1_toolCount": 12,
+      "d2_testFiles": 10,
       "d3_coverageExcluded": ["src/server/domains/workflow/handlers.ts"],
       "d4_bareCatch": 7,
-      "d5_handleSafeRefs": 11,
+      "d5_handleSafeRefs": 14,
       "d6_doc": {
         "hasClaude": true,
         "hasScore": true,

@@ -15,8 +15,8 @@ import {
 import {
   openProcessForMemory,
   CloseHandle,
-  ReadProcessMemory,
-  WriteProcessMemory,
+  ReadProcessMemoryAsync,
+  WriteProcessMemoryAsync,
   VirtualQueryEx,
   VirtualProtectEx,
   VirtualAllocEx,
@@ -25,9 +25,10 @@ import {
   GetModuleBaseName,
   GetModuleInformation,
   isWindows,
-  isKoffiAvailable,
+  isKoffiBindingUsable,
   PAGE,
   MEM,
+  MEM_TYPE,
 } from '../../Win32API.js';
 
 // ── Internal handle storage ──
@@ -43,17 +44,21 @@ function getWin32Handle(handle: ProcessHandle): bigint {
 // ── Protection mapping ──
 
 function win32ProtToMemoryProtection(prot: number): MemoryProtection {
-  // Map Win32 PAGE_* constants to MemoryProtection flags
+  // Map Win32 PAGE_* constants to MemoryProtection flags. Explicit full-mask
+  // comparisons — a bare `prot & X` truthiness test silently breaks the moment
+  // a constant grows to multiple bits.
   let flags = MemoryProtection.NoAccess;
-  if (prot & PAGE.READONLY) flags |= MemoryProtection.Read;
-  if (prot & PAGE.READWRITE) flags |= MemoryProtection.ReadWrite;
-  if (prot & PAGE.WRITECOPY) flags |= MemoryProtection.Read | MemoryProtection.WriteCopy;
-  if (prot & PAGE.EXECUTE) flags |= MemoryProtection.Execute;
-  if (prot & PAGE.EXECUTE_READ) flags |= MemoryProtection.ReadExecute;
-  if (prot & PAGE.EXECUTE_READWRITE) flags |= MemoryProtection.ReadWriteExecute;
-  if (prot & PAGE.EXECUTE_WRITECOPY)
+  if ((prot & PAGE.READONLY) === PAGE.READONLY) flags |= MemoryProtection.Read;
+  if ((prot & PAGE.READWRITE) === PAGE.READWRITE) flags |= MemoryProtection.ReadWrite;
+  if ((prot & PAGE.WRITECOPY) === PAGE.WRITECOPY)
+    flags |= MemoryProtection.Read | MemoryProtection.WriteCopy;
+  if ((prot & PAGE.EXECUTE) === PAGE.EXECUTE) flags |= MemoryProtection.Execute;
+  if ((prot & PAGE.EXECUTE_READ) === PAGE.EXECUTE_READ) flags |= MemoryProtection.ReadExecute;
+  if ((prot & PAGE.EXECUTE_READWRITE) === PAGE.EXECUTE_READWRITE)
+    flags |= MemoryProtection.ReadWriteExecute;
+  if ((prot & PAGE.EXECUTE_WRITECOPY) === PAGE.EXECUTE_WRITECOPY)
     flags |= MemoryProtection.Execute | MemoryProtection.Read | MemoryProtection.WriteCopy;
-  if (prot & PAGE.GUARD) flags |= MemoryProtection.Guard;
+  if ((prot & PAGE.GUARD) === PAGE.GUARD) flags |= MemoryProtection.Guard;
   return flags;
 }
 
@@ -80,9 +85,11 @@ function win32StateToState(state: number): MemoryRegionState {
 }
 
 function win32TypeToType(type: number): MemoryRegionType {
-  if (type === 0x1000000) return 'image'; // MEM_IMAGE
-  if (type === 0x40000) return 'mapped'; // MEM_MAPPED
-  if (type === 0x20000) return 'private'; // MEM_PRIVATE
+  // Reuse the MEM_TYPE constants from Win32API so the numeric values
+  // (MEM_IMAGE/MEM_MAPPED/MEM_PRIVATE) live in exactly one place.
+  if (type === MEM_TYPE.IMAGE) return 'image';
+  if (type === MEM_TYPE.MAPPED) return 'mapped';
+  if (type === MEM_TYPE.PRIVATE) return 'private';
   return 'unknown';
 }
 
@@ -95,7 +102,7 @@ export class Win32MemoryProvider implements PlatformMemoryAPI {
     if (!isWindows()) {
       return { available: false, reason: 'Not running on Windows', platform: 'win32' };
     }
-    if (!isKoffiAvailable()) {
+    if (!isKoffiBindingUsable()) {
       return { available: false, reason: 'koffi FFI library not available', platform: 'win32' };
     }
     return { available: true, platform: 'win32' };
@@ -114,15 +121,23 @@ export class Win32MemoryProvider implements PlatformMemoryAPI {
     // WeakMap will auto-clean once ProcessHandle is GC'd
   }
 
-  readMemory(handle: ProcessHandle, address: bigint, size: number): MemoryReadResult {
+  async readMemory(
+    handle: ProcessHandle,
+    address: bigint,
+    size: number,
+  ): Promise<MemoryReadResult> {
     const h = getWin32Handle(handle);
-    const buffer = ReadProcessMemory(h, address, size);
+    const buffer = await ReadProcessMemoryAsync(h, address, size);
     return { data: buffer, bytesRead: buffer.length };
   }
 
-  writeMemory(handle: ProcessHandle, address: bigint, data: Buffer): MemoryWriteResult {
+  async writeMemory(
+    handle: ProcessHandle,
+    address: bigint,
+    data: Buffer,
+  ): Promise<MemoryWriteResult> {
     const h = getWin32Handle(handle);
-    const bytesWritten = WriteProcessMemory(h, address, data);
+    const bytesWritten = await WriteProcessMemoryAsync(h, address, data);
     return { bytesWritten };
   }
 

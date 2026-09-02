@@ -23,7 +23,10 @@ import { emitEvent, parseNumberArg } from './shared';
 import { isLikelyTextHttpBody } from '@server/domains/network/http-raw';
 
 export class RawHttp2Handlers {
-  constructor(private readonly eventBus?: EventBus<ServerEventMap>) {}
+  private readonly eventBus?: EventBus<ServerEventMap>;
+  constructor(eventBus?: EventBus<ServerEventMap>) {
+    this.eventBus = eventBus;
+  }
 
   async handleHttp2Probe(args: Record<string, unknown>) {
     const rawUrl = parseOptionalString(args.url, 'url');

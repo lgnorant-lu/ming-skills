@@ -209,11 +209,13 @@ export class NativeEmulator {
     javaArgs: number[] = [],
     thiz = 0,
     initRegisters?: Record<number, bigint>,
+    maxSteps?: number,
   ): number {
     return this.engine.callSymbol(
       symbol,
       [this.jni.envPointer(), thiz, ...javaArgs],
       initRegisters,
+      maxSteps,
     );
   }
 

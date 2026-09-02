@@ -5,6 +5,7 @@ import {
   PAGE_NETWORK_IDLE_TIMEOUT_MS,
   PAGE_OPERATION_TIMEOUT_MS,
   PAGE_EVALUATE_TIMEOUT_MS,
+  PAGE_CDP_HEALTH_CHECK_TIMEOUT_MS,
 } from '@src/constants';
 import { setTimeout as asyncSetTimeout } from 'node:timers/promises';
 import { writeFile } from 'node:fs/promises';
@@ -87,13 +88,31 @@ interface UploadContextLike {
   $(selector: string): Promise<UploadableElementHandle | null>;
 }
 
+/** Auto-dismiss any dialog (dialog may already be closed). */
+async function dismissDialog(dialog: { dismiss: () => Promise<void> }): Promise<void> {
+  try {
+    await dialog.dismiss();
+  } catch {
+    // Dialog may already be closed
+  }
+}
+
 export class PageController {
+  private collector: CodeCollector;
   private pagePersistentScripts = new WeakMap<
     Page,
     Map<string, { source: string; identifier: string }>
   >();
+  /** Installed auto-dismiss dialog handlers per page — re-registering the
+   *  same page must not stack listeners (page.on is never auto-removed). */
+  private dialogDismissHandlers = new WeakMap<
+    Page,
+    (dialog: { dismiss: () => Promise<void> }) => Promise<void>
+  >();
 
-  constructor(private collector: CodeCollector) {}
+  constructor(collector: CodeCollector) {
+    this.collector = collector;
+  }
 
   private getChromeNavigationWaitUntil(
     waitUntil: PageNavigationWaitUntil = 'networkidle',
@@ -638,13 +657,12 @@ export class PageController {
     };
 
     if (dismissAll) {
-      page.on('dialog', async (dialog) => {
-        try {
-          await dialog.dismiss();
-        } catch {
-          // Dialog may already be closed
-        }
-      });
+      const existing = this.dialogDismissHandlers.get(page);
+      if (existing) {
+        page.off('dialog', existing);
+      }
+      this.dialogDismissHandlers.set(page, dismissDialog);
+      page.on('dialog', dismissDialog);
       return {
         handled: true,
         message: 'Persistent dialog handler installed — all future dialogs will be auto-dismissed.',
@@ -942,9 +960,6 @@ export class PageController {
  * 'disconnected'. Without this check, page.evaluate() blocks for the full 30 s
  * timeout — with this check we fail fast (~3 s) with a clear message.
  */
-/** Fail-fast window for the pre-evaluate CDP health probe (see checkPageCDPHealth). */
-const PAGE_CDP_HEALTH_CHECK_TIMEOUT_MS = 500;
-
 async function checkPageCDPHealth(
   page: Page,
   timeoutMs = PAGE_CDP_HEALTH_CHECK_TIMEOUT_MS,

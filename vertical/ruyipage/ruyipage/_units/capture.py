@@ -367,7 +367,6 @@ class CaptureManager(object):
             try:
                 try:
                     collector = self._owner.network.add_data_collector(
-                        ["beforeRequestSent", "responseCompleted"],
                         data_types=["request", "response"],
                         max_encoded_data_size=max_body_size,
                     )
@@ -380,7 +379,6 @@ class CaptureManager(object):
                         exc,
                     )
                     collector = self._owner.network._add_data_collector(
-                        ["beforeRequestSent", "responseCompleted"],
                         data_types=["request", "response"],
                         max_encoded_data_size=max_body_size,
                         contexts=None,

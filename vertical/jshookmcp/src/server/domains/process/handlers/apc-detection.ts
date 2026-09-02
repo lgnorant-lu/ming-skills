@@ -13,9 +13,13 @@ import { detectApcInjection } from '@native/APCDetector';
 import type { ProcessHandlerDeps } from './shared-types';
 
 export class ApcDetectionHandlers {
-  constructor(private deps?: ProcessHandlerDeps) {}
+  private deps?: ProcessHandlerDeps;
+  constructor(deps?: ProcessHandlerDeps) {
+    this.deps = deps;
+  }
 
   async handleProcessDetectApc(args: Record<string, unknown>): Promise<unknown> {
+    const startedAt = Date.now();
     try {
       const pid = argNumber(args, 'pid');
       if (!pid || pid <= 0 || !Number.isInteger(pid)) {
@@ -42,11 +46,16 @@ export class ApcDetectionHandlers {
           this.deps.auditTrail.record({
             operation: 'process_detect_apc',
             pid,
-            address: BigInt(0),
+            // APC detection targets threads, not a memory address — AuditEntry
+            // types address as string | null. Never write BigInt here: the
+            // audit trail is JSON-serialized on export, and JSON.stringify
+            // throws on BigInt, breaking memory_audit_export for all entries.
+            address: null,
             size: 0,
             result: result.success ? 'success' : 'failure',
             error: result.error,
-          } as never);
+            durationMs: Date.now() - startedAt,
+          });
         } catch {
           // fail-soft
         }

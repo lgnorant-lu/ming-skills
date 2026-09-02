@@ -43,6 +43,72 @@ describe('ObfuscationDetector', () => {
     expect(result.types).toContain('webpack');
   });
 
+  it('detects esbuild obfuscation pattern when helpers co-occur', () => {
+    const detector = new ObfuscationDetector();
+    const code = `
+      var __commonJS = (cb, mod) => function() { return mod || (0, cb[Object.keys(cb)[0]])((mod = {exports: {}}).exports, mod), mod.exports; };
+      var __toESM = (mod) => mod;
+    `;
+    const result = detector.detect(code);
+    expect(result.types).toContain('esbuild');
+    expect(result.confidence.esbuild).toBe(0.8);
+    expect(result.features.some((f) => f.includes('esbuild runtime helpers'))).toBe(true);
+  });
+
+  it('does not misfire esbuild detection on a single matching identifier', () => {
+    const detector = new ObfuscationDetector();
+    const result = detector.detect('function __commonJS(x) { return x; }');
+    expect(result.types).not.toContain('esbuild');
+  });
+
+  it('recommends unminify-only (no unpack) for esbuild output', () => {
+    const detector = new ObfuscationDetector();
+    const code = `
+      var __commonJS = (cb) => cb;
+      var __toCommonJS = (mod) => mod;
+    `;
+    const result = detector.detect(code);
+    const rec = result.toolRecommendations.find((item) => item.reason.includes('esbuild'));
+    expect(rec).toBeDefined();
+    expect(rec?.suggestedArgs).toEqual(expect.objectContaining({ unpack: false, unminify: true }));
+  });
+
+  it('classifies as bun-build (not esbuild) when the @bun pragma is present alongside esbuild-family helpers', () => {
+    const detector = new ObfuscationDetector();
+    const code = `
+      // @bun
+      var __commonJS = (cb) => cb;
+      var __toESM = (mod) => mod;
+    `;
+    const result = detector.detect(code);
+    expect(result.types).toContain('bun-build');
+    expect(result.types).not.toContain('esbuild');
+    expect(result.confidence['bun-build']).toBe(0.85);
+  });
+
+  it('classifies as bun-build when import.meta.require is present alongside esbuild-family helpers', () => {
+    const detector = new ObfuscationDetector();
+    const code = `
+      var __require = import.meta.require;
+      var __commonJS = (cb) => cb;
+      var __toESM = (mod) => mod;
+    `;
+    const result = detector.detect(code);
+    expect(result.types).toContain('bun-build');
+    expect(result.types).not.toContain('esbuild');
+  });
+
+  it('falls back to esbuild classification when no Bun-specific signal is present (documented ambiguity)', () => {
+    const detector = new ObfuscationDetector();
+    const code = `
+      var __commonJS = (cb) => cb;
+      var __toESM = (mod) => mod;
+    `;
+    const result = detector.detect(code);
+    expect(result.types).toContain('esbuild');
+    expect(result.types).not.toContain('bun-build');
+  });
+
   it('detects JSFuck payload', () => {
     const detector = new ObfuscationDetector();
     const jsfuck = '[](!+[]+!![])[+!![]]';

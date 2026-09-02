@@ -30,7 +30,7 @@ class BidiEvent(object):
         - ``request``: ``network.beforeRequestSent`` 里的请求对象
         - ``response``: ``network.responseStarted/responseCompleted`` 里的响应对象
         - ``error_text``: ``network.fetchError`` 的错误文本
-        - ``auth_challenge``: ``network.authRequired`` 的认证挑战信息
+        - ``auth_challenges``: ``network.authRequired`` 的认证挑战列表
     """
 
     def __init__(self, method, params):
@@ -44,7 +44,18 @@ class BidiEvent(object):
         self.response = self.params.get("response")
         self.is_blocked = self.params.get("isBlocked")
         self.error_text = self.params.get("errorText")
-        self.auth_challenge = self.params.get("authChallenge")
+        self.auth_challenges = (self.response or {}).get("authChallenges")
+        if self.auth_challenges is None:
+            legacy_challenge = self.params.get("authChallenge")
+            if legacy_challenge is not None:
+                self.auth_challenges = (
+                    legacy_challenge
+                    if isinstance(legacy_challenge, list)
+                    else [legacy_challenge]
+                )
+        self.auth_challenge = (
+            self.auth_challenges[0] if self.auth_challenges else None
+        )
         self.realm = self.params.get("realm")
         self.source = self.params.get("source")
         self.channel = self.params.get("channel")

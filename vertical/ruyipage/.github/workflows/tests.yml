@@ -43,13 +43,13 @@ jobs:
           }
 
           $runtime = $installJson | ConvertFrom-Json
-          if ($runtime.version -ne "155.0a1") {
-            throw "Expected Firefox 155.0a1, got $($runtime.version)"
+          if ($runtime.version -ne "155.0") {
+            throw "Expected Firefox 155.0, got $($runtime.version)"
           }
-          if ($runtime.release -ne "v1.2.58") {
-            throw "Expected runtime release v1.2.58, got $($runtime.release)"
+          if ($runtime.release -ne "v1.2.66") {
+            throw "Expected runtime release v1.2.66, got $($runtime.release)"
           }
-          if ($runtime.asset -ne "firefox-155.0a1.en-US.win64-20260803.zip") {
+          if ($runtime.asset -ne "firefox-155.0.en-US.win64-20260829.zip") {
             throw "Unexpected Firefox asset: $($runtime.asset)"
           }
           if (-not (Test-Path -LiteralPath $runtime.executable_path -PathType Leaf)) {

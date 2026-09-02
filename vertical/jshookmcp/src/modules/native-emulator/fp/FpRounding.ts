@@ -12,16 +12,19 @@
  * ARM64 Rounding Modes (FPCR.RMode bits 23:22)
  * Maps to IEEE754-2008 rounding attributes
  */
-export enum RoundingMode {
+export const RoundingMode = {
   /** RN (00): Round to Nearest, ties to even (IEEE754 roundTiesToEven) */
-  RN = 0,
+  RN: 0,
   /** RP (01): Round toward Plus infinity (IEEE754 roundTowardPositive) */
-  RP = 1,
+  RP: 1,
   /** RM (10): Round toward Minus infinity (IEEE754 roundTowardNegative) */
-  RM = 2,
+  RM: 2,
   /** RZ (11): Round toward Zero (IEEE754 roundTowardZero) */
-  RZ = 3,
-}
+  RZ: 3,
+} as const;
+
+/** ARM64 rounding mode value */
+export type RoundingMode = (typeof RoundingMode)[keyof typeof RoundingMode];
 
 /**
  * Round a float to an integer value using the specified rounding mode.

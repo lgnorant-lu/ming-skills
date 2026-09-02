@@ -51,7 +51,10 @@ interface PageInteractionHandlersDeps {
 }
 
 export class PageInteractionHandlers {
-  constructor(private deps: PageInteractionHandlersDeps) {}
+  private deps: PageInteractionHandlersDeps;
+  constructor(deps: PageInteractionHandlersDeps) {
+    this.deps = deps;
+  }
 
   private toErrorMessage(error: unknown): string {
     if (error instanceof Error) {

@@ -1,4 +1,4 @@
-import { AdvancedToolHandlersRaw as AdvancedToolHandlersReplay } from '@server/domains/network/handlers.impl.core.runtime.raw';
+import { AdvancedHandlersBase } from './handlers.base';
 import type { FetchInterceptAction } from '@modules/monitor/FetchInterceptor';
 import { handleSafe, R } from '@server/domains/shared/ResponseBuilder';
 
@@ -15,7 +15,7 @@ interface InterceptRuleInput {
 const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 
-export class AdvancedToolHandlersIntercept extends AdvancedToolHandlersReplay {
+export class AdvancedToolHandlersIntercept extends AdvancedHandlersBase {
   /**
    * network_intercept(action="add") — Add response interception rules using CDP Fetch domain.
    */

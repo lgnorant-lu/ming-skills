@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 
-import { buildHar } from '@server/domains/network/har';
+import { buildHar, capBodyBase64 } from '@server/domains/network/har';
 import type { BuildHarParams, Har, HarEntry } from '@server/domains/network/har';
+import { NETWORK_HAR_BODY_MAX_BYTES } from '@src/constants/network';
 import { buildTestUrl } from '@tests/shared/test-urls';
 
 // ---------------------------------------------------------------------------
@@ -542,6 +543,108 @@ describe('buildHar', () => {
     expect(getEntry(har).response.content._bodyUnavailable).toBe(true);
   });
 
+  it('truncates oversized response bodies to the byte budget with a marker', async () => {
+    const big = 'a'.repeat(NETWORK_HAR_BODY_MAX_BYTES + 100);
+    getResponseMock.mockReturnValue(makeResponse());
+    getResponseBodyMock.mockResolvedValue({ body: big, base64Encoded: false });
+
+    const har = await buildHar({
+      requests: [makeRequest()],
+      getResponse: getResponseMock,
+      getResponseBody: getResponseBodyMock,
+      includeBodies: true,
+    });
+
+    const content = getEntry(har).response.content;
+    expect(content._bodyTruncated).toBe(true);
+    expect(content._originalBodySize).toBe(Buffer.byteLength(big, 'utf8'));
+    expect(Buffer.byteLength(content.text!, 'utf8')).toBeLessThanOrEqual(
+      NETWORK_HAR_BODY_MAX_BYTES,
+    );
+    expect(content.text!.length).toBeLessThan(big.length);
+  });
+
+  it('leaves small response bodies untruncated', async () => {
+    getResponseMock.mockReturnValue(makeResponse());
+    getResponseBodyMock.mockResolvedValue({ body: '{"small":true}', base64Encoded: false });
+
+    const har = await buildHar({
+      requests: [makeRequest()],
+      getResponse: getResponseMock,
+      getResponseBody: getResponseBodyMock,
+      includeBodies: true,
+    });
+
+    const content = getEntry(har).response.content;
+    expect(content.text).toBe('{"small":true}');
+    expect(content._bodyTruncated).toBeUndefined();
+    expect(content._originalBodySize).toBeUndefined();
+  });
+
+  it('truncates base64 bodies on a 4-char group boundary and estimates original size from base64 length', async () => {
+    // Exceed the tight char budget (floor(MAX/3) * 4) by 500 chars to force truncation.
+    const base64 = 'a'.repeat(Math.floor(NETWORK_HAR_BODY_MAX_BYTES / 3) * 4 + 500);
+    getResponseMock.mockReturnValue(makeResponse());
+    getResponseBodyMock.mockResolvedValue({ body: base64, base64Encoded: true });
+
+    const har = await buildHar({
+      requests: [makeRequest()],
+      getResponse: getResponseMock,
+      getResponseBody: getResponseBodyMock,
+      includeBodies: true,
+    });
+
+    const content = getEntry(har).response.content;
+    expect(content.encoding).toBe('base64');
+    expect(content._bodyTruncated).toBe(true);
+    // Original byte size is estimated from base64 length (3 decoded bytes per
+    // 4 chars), not the raw character count.
+    expect(content._originalBodySize).toBe(Math.floor((base64.length * 3) / 4));
+    // Truncation lands on a whole base64 group boundary.
+    expect(content.text!.length % 4).toBe(0);
+    expect(content.text!.length).toBe(Math.floor(NETWORK_HAR_BODY_MAX_BYTES / 3) * 4);
+  });
+
+  it('leaves small base64 bodies untruncated', async () => {
+    getResponseMock.mockReturnValue(makeResponse());
+    getResponseBodyMock.mockResolvedValue({ body: 'aGVsbG8=', base64Encoded: true });
+
+    const har = await buildHar({
+      requests: [makeRequest()],
+      getResponse: getResponseMock,
+      getResponseBody: getResponseBodyMock,
+      includeBodies: true,
+    });
+
+    const content = getEntry(har).response.content;
+    expect(content.encoding).toBe('base64');
+    expect(content.text).toBe('aGVsbG8=');
+    expect(content._bodyTruncated).toBeUndefined();
+    expect(content._originalBodySize).toBeUndefined();
+  });
+
+  it('reports decoded byte size (not char count) for base64 content.size and bodySize', async () => {
+    // "hello world!" is 12 bytes → 16 base64 chars with no padding.
+    const base64 = 'aGVsbG8gd29ybGQh';
+    expect(base64.length).toBe(16);
+    getResponseMock.mockReturnValue(makeResponse());
+    getResponseBodyMock.mockResolvedValue({ body: base64, base64Encoded: true });
+
+    const har = await buildHar({
+      requests: [makeRequest()],
+      getResponse: getResponseMock,
+      getResponseBody: getResponseBodyMock,
+      includeBodies: true,
+    });
+
+    const entry = getEntry(har);
+    // 3 decoded bytes per 4 base64 chars — same convention as _originalBodySize.
+    const expectedBytes = Math.floor((base64.length * 3) / 4);
+    expect(expectedBytes).toBe(12);
+    expect(entry.response.content.size).toBe(expectedBytes);
+    expect(entry.response.bodySize).toBe(expectedBytes);
+  });
+
   // -----------------------------------------------------------------------
   // Multiple requests
   // -----------------------------------------------------------------------
@@ -631,5 +734,26 @@ describe('buildHar', () => {
     });
 
     expect(getEntry(har).response.content.mimeType).toBe('application/octet-stream');
+  });
+});
+
+describe('capBodyBase64', () => {
+  it('rounds the byte budget down to a whole 4-char base64 group', () => {
+    const { text, truncated } = capBodyBase64('a'.repeat(16), 10);
+    expect(truncated).toBe(true);
+    expect(text.length).toBe(12); // Math.floor(10 / 3) * 4
+    expect(text.length % 4).toBe(0);
+  });
+
+  it('does not truncate when within budget', () => {
+    const { text, truncated } = capBodyBase64('abcd', 10);
+    expect(truncated).toBe(false);
+    expect(text).toBe('abcd');
+  });
+
+  it('keeps the whole string when exactly on a group boundary', () => {
+    const { text, truncated } = capBodyBase64('a'.repeat(8), 10);
+    expect(truncated).toBe(false);
+    expect(text.length).toBe(8);
   });
 });

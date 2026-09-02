@@ -19,13 +19,12 @@ const DEFAULT_MAX_SHADERS = 10;
  * shaders are captured or the timeout elapses (whichever first).
  */
 export class ShaderSourceCaptureHandler {
+  private deps: WebGPUDomainDependencies;
   private ddm: DetailedDataManager;
   private pageLockManager = getPageLockManager();
 
-  constructor(
-    _ctx: MCPServerContext,
-    private deps: WebGPUDomainDependencies,
-  ) {
+  constructor(_ctx: MCPServerContext, deps: WebGPUDomainDependencies) {
+    this.deps = deps;
     this.ddm = DetailedDataManager.getInstance();
   }
 

@@ -40,6 +40,9 @@ export interface BinarySymbolInput {
 
 export class CrossDomainEvidenceBridge {
   private readonly graph: ReverseEvidenceGraph;
+  // getOrCreate memos keyed by object identity (address/nodeId): re-correlation
+  // must not accumulate duplicate nodes in the evidence graph.
+  private readonly nodeMemos = new Map<string, EvidenceNode>();
 
   constructor(graph: ReverseEvidenceGraph) {
     this.graph = graph;
@@ -54,6 +57,9 @@ export class CrossDomainEvidenceBridge {
   }
 
   addV8Object(input: V8ObjectInput, scriptNodeId?: string): EvidenceNode {
+    const memoKey = `v8:${input.address}`;
+    const memoized = this.nodeMemos.get(memoKey);
+    if (memoized) return memoized;
     const node = this.graph.addNode('v8-heap-object', input.name, {
       domain: 'v8-inspector',
       address: input.address,
@@ -65,6 +71,7 @@ export class CrossDomainEvidenceBridge {
         relation: 'script-allocates-heap-object',
       });
     }
+    this.nodeMemos.set(memoKey, node);
     return node;
   }
 
@@ -91,6 +98,9 @@ export class CrossDomainEvidenceBridge {
   }
 
   addCanvasNode(input: CanvasNodeInput, creatorHeapNodeId?: string): EvidenceNode {
+    const memoKey = `canvas:${input.nodeId}`;
+    const memoized = this.nodeMemos.get(memoKey);
+    if (memoized) return memoized;
     const node = this.graph.addNode('canvas-scene-node', input.label, {
       domain: 'canvas',
       nodeId: input.nodeId,
@@ -102,6 +112,7 @@ export class CrossDomainEvidenceBridge {
         relation: 'heap-creates-canvas-node',
       });
     }
+    this.nodeMemos.set(memoKey, node);
     return node;
   }
 

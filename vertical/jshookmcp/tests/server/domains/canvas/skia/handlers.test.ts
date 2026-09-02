@@ -2,8 +2,58 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { PageController } from '@server/domains/shared/modules/collector';
 import { ResponseBuilder } from '@server/domains/shared/ResponseBuilder';
 
-vi.mock('@modules/skia-capture/SkiaSceneExtractor', () => {
-  const detectSkiaRenderer = vi.fn().mockResolvedValue({
+const mockDetectSkiaRenderer = vi.fn().mockResolvedValue({
+  isSkiaBacked: true,
+  version: '1.0',
+  gpuBackend: 'gl',
+  shaderPipeline: 'OpenGL',
+  rendererStrings: ['ANGLE'],
+  features: [],
+  confidence: 0.9,
+  evidence: ['test'],
+});
+
+const mockExtractSceneTree = vi.fn().mockResolvedValue({
+  rootLayer: {
+    id: 'root',
+    name: 'root',
+    bounds: { x: 0, y: 0, width: 800, height: 600 },
+    transform: [],
+    opacity: 1,
+    visible: true,
+    children: [],
+  },
+  layers: [
+    {
+      id: 'root',
+      name: 'root',
+      bounds: { x: 0, y: 0, width: 800, height: 600 },
+      transform: [],
+      opacity: 1,
+      visible: true,
+      children: [],
+    },
+  ],
+  drawCommands: [
+    { type: 'drawRect', bounds: { x: 0, y: 0, width: 800, height: 600 }, paintInfo: {} },
+  ],
+  totalLayers: 1,
+  totalDrawCommands: 1,
+  canvas: { width: 800, height: 600, dpr: 1, contextType: '2d' },
+});
+
+vi.mock('@modules/skia-capture/SkiaSceneExtractor', () => ({
+  detectSkiaRenderer: (...args: unknown[]) => mockDetectSkiaRenderer(...args),
+  extractSceneTree: (...args: unknown[]) => mockExtractSceneTree(...args),
+}));
+
+let SkiaCaptureHandlers: typeof import('@server/domains/canvas/skia').SkiaCaptureHandlers;
+
+beforeEach(async () => {
+  vi.resetModules();
+  // Re-apply the mock return values — the global mockReset:true config clears
+  // mockResolvedValue before each test, so a factory-only value is lost.
+  mockDetectSkiaRenderer.mockResolvedValue({
     isSkiaBacked: true,
     version: '1.0',
     gpuBackend: 'gl',
@@ -13,7 +63,7 @@ vi.mock('@modules/skia-capture/SkiaSceneExtractor', () => {
     confidence: 0.9,
     evidence: ['test'],
   });
-  const extractSceneTree = vi.fn().mockResolvedValue({
+  mockExtractSceneTree.mockResolvedValue({
     rootLayer: {
       id: 'root',
       name: 'root',
@@ -41,16 +91,6 @@ vi.mock('@modules/skia-capture/SkiaSceneExtractor', () => {
     totalDrawCommands: 1,
     canvas: { width: 800, height: 600, dpr: 1, contextType: '2d' },
   });
-  return {
-    detectSkiaRenderer,
-    extractSceneTree,
-  };
-});
-
-let SkiaCaptureHandlers: typeof import('@server/domains/canvas/skia').SkiaCaptureHandlers;
-
-beforeEach(async () => {
-  vi.resetModules();
   const mod = await import('@server/domains/canvas/skia');
   SkiaCaptureHandlers = mod.SkiaCaptureHandlers;
 });

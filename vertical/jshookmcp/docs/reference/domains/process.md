@@ -38,7 +38,7 @@
 | `memory_scan_filtered` | 在已筛选地址范围内执行二次内存扫描。 |
 | `memory_batch_write` | 一次性写入多处内存补丁。 |
 | `memory_dump_region` | 将指定内存区域转储到文件以供分析。 |
-| `memory_list_regions` | 列出进程中的全部内存区域及其保护标志。 |
+| `memory_list_regions` | 列出进程中所有内存区域及其保护标志。若省略 pid，则从当前浏览器会话自动发现活跃的浏览器渲染进程 PID。 |
 | `memory_audit_export` | 导出内存操作审计轨迹为 JSON，并可通过 clear=true 在导出后清空缓冲区。 |
 | `inject_dll` | 通过 CreateRemoteThread 与 LoadLibraryA (Windows) 或 gdb/lldb (Linux/macOS) 向目标进程注入 DLL 或 shared object。需要高权限，并会先执行目标进程与载荷校验。 |
 | `inject_shellcode` | 向目标进程注入并执行 Shellcode，支持 hex 或 base64。需要高权限，并会先执行目标进程与载荷校验。 |

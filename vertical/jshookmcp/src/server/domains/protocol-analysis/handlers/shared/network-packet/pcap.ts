@@ -1,5 +1,6 @@
 import { isRecord } from '../protocol-schema';
-import { parseHexPayload, parseNonNegativeInteger, parsePositiveInteger } from './addressing';
+import { parseHexPayload } from './addressing';
+import { parseNonNegativeInteger, parsePositiveInteger } from '../payload/core';
 import type {
   PacketEndianness,
   PacketTimestampPrecision,

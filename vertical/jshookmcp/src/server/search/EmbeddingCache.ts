@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { SEARCH_VECTOR_CACHE_ENABLED, SEARCH_VECTOR_MODEL_ID } from '@src/constants';
+import { readEnvNullableString } from '@src/config/environment';
 import { logger } from '@utils/logger';
 
 const CACHE_VERSION = 1;
@@ -33,7 +34,7 @@ export function buildEmbeddingFingerprint(
 }
 
 export function getEmbeddingCachePath(modelId: string = SEARCH_VECTOR_MODEL_ID): string {
-  const overridden = process.env.JSHOOK_EMBEDDING_CACHE_DIR?.trim();
+  const overridden = readEnvNullableString('JSHOOK_EMBEDDING_CACHE_DIR', { trim: true });
   const base = overridden
     ? resolve(overridden)
     : resolve(homedir(), '.jshookmcp', 'cache', 'embeddings');

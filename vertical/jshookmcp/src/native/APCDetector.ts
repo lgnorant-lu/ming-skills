@@ -17,7 +17,8 @@
  * @module APCDetector
  */
 
-import koffi, { type LibraryHandle } from 'koffi';
+import type { LibraryHandle } from 'koffi';
+import { requireKoffi } from './koffi-loader';
 import { getKernel32, getNtdll } from './Win32API';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -134,7 +135,7 @@ function enumThreadsByPid(pid: number): ThreadEntry32[] {
 
   const threads: ThreadEntry32[] = [];
 
-  let r = getThread32First()(snap, koffi.address(entryBuf)) as number;
+  let r = getThread32First()(snap, requireKoffi().address(entryBuf)) as number;
   while (r) {
     const ownerPid = entryBuf.readUInt32LE(12);
     if (ownerPid === pid) {
@@ -144,7 +145,7 @@ function enumThreadsByPid(pid: number): ThreadEntry32[] {
         tpBasePri: entryBuf.readUInt32LE(16),
       });
     }
-    r = getThread32Next()(snap, koffi.address(entryBuf)) as number;
+    r = getThread32Next()(snap, requireKoffi().address(entryBuf)) as number;
   }
 
   getCloseHandle()(snap);
@@ -180,9 +181,9 @@ function probeThreadApc(threadId: number): ApcQueueInfo | null {
     const qitStatus1 = getNtQIT()(
       hThread,
       ThreadApcStateClass,
-      koffi.address(apcBuf),
+      requireKoffi().address(apcBuf),
       apcBuf.length,
-      koffi.address(retLen),
+      requireKoffi().address(retLen),
     ) as number;
 
     if (qitStatus1 === 0 || qitStatus1 === STATUS_INFO_LENGTH_MISMATCH) {
@@ -199,9 +200,9 @@ function probeThreadApc(threadId: number): ApcQueueInfo | null {
     const qitStatus2 = getNtQIT()(
       hThread,
       ThreadQuerySetWin32StartAddress,
-      koffi.address(addrBuf),
+      requireKoffi().address(addrBuf),
       addrBuf.length,
-      koffi.address(addrRet),
+      requireKoffi().address(addrRet),
     ) as number;
 
     if (qitStatus2 === 0) {

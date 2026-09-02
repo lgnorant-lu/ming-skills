@@ -132,42 +132,42 @@ describe('DarwinMemoryProvider', () => {
   });
 
   describe('readMemory', () => {
-    it('reads memory and returns MemoryReadResult', () => {
+    it('reads memory and returns MemoryReadResult', async () => {
       const handle = provider.openProcess(1, false);
       const buf = Buffer.from([0xaa, 0xbb, 0xcc]);
       state.machVmReadOverwrite.mockReturnValue({ kr: 0, data: buf, outsize: 3n });
 
-      const result = provider.readMemory(handle, 0x1000n, 3);
+      const result = await provider.readMemory(handle, 0x1000n, 3);
       expect(result.data).toEqual(buf);
       expect(result.bytesRead).toBe(3);
     });
 
-    it('throws on non-SUCCESS kern_return', () => {
+    it('throws on non-SUCCESS kern_return', async () => {
       const handle = provider.openProcess(1, false);
       state.machVmReadOverwrite.mockReturnValue({ kr: 1, data: Buffer.alloc(0), outsize: 0n });
 
-      expect(() => provider.readMemory(handle, 0x1000n, 4)).toThrow(
+      await expect(provider.readMemory(handle, 0x1000n, 4)).rejects.toThrow(
         'mach_vm_read_overwrite failed',
       );
     });
   });
 
   describe('writeMemory', () => {
-    it('writes memory and returns bytesWritten', () => {
+    it('writes memory and returns bytesWritten', async () => {
       const handle = provider.openProcess(1, true);
       state.machVmWrite.mockReturnValue(0);
 
       const data = Buffer.from([1, 2, 3, 4]);
-      const result = provider.writeMemory(handle, 0x2000n, data);
+      const result = await provider.writeMemory(handle, 0x2000n, data);
       expect(result.bytesWritten).toBe(4);
       expect(state.machVmWrite).toHaveBeenCalledWith(200, 0x2000n, data);
     });
 
-    it('throws on non-SUCCESS kern_return', () => {
+    it('throws on non-SUCCESS kern_return', async () => {
       const handle = provider.openProcess(1, true);
       state.machVmWrite.mockReturnValue(1);
 
-      expect(() => provider.writeMemory(handle, 0x2000n, Buffer.alloc(4))).toThrow(
+      await expect(provider.writeMemory(handle, 0x2000n, Buffer.alloc(4))).rejects.toThrow(
         'mach_vm_write failed',
       );
     });
@@ -390,10 +390,10 @@ describe('DarwinMemoryProvider', () => {
   });
 
   describe('handle validation', () => {
-    it('throws for invalid handle on readMemory', () => {
+    it('throws for invalid handle on readMemory', async () => {
       const fakeHandle = { pid: 99, writeAccess: false };
       state.machVmReadOverwrite.mockReturnValue({ kr: 0, data: Buffer.alloc(0), outsize: 0n });
-      expect(() => provider.readMemory(fakeHandle, 0n, 1)).toThrow('Invalid ProcessHandle');
+      await expect(provider.readMemory(fakeHandle, 0n, 1)).rejects.toThrow('Invalid ProcessHandle');
     });
   });
 });

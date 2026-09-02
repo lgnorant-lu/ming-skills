@@ -17,6 +17,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import { DartSnapshotSessionManager } from '@modules/native-emulator/dart/DartSnapshotSessionManager';
 import type { DartAotLoader, LoadedSnapshot } from '@modules/native-emulator/dart/DartAotLoader';
+import { DART_EXEC_MAX_STEPS, DART_TRACE_MAX_STEPS } from '@src/constants/dart';
 
 /** Minimal valid-enough LoadedSnapshot shape for cache accounting (not parsed here). */
 function makeFakeSnapshot(): LoadedSnapshot {
@@ -153,7 +154,12 @@ describe('DartSnapshotSessionManager (D1 cache)', () => {
 // ---------------------------------------------------------------------------
 
 const loaderCalls = vi.hoisted(() => ({ loadSnapshot: 0 }));
-const executorCalls = vi.hoisted(() => ({ load: 0, loadFromSnapshot: 0, call: 0 }));
+const executorCalls = vi.hoisted(() => ({
+  load: 0,
+  loadFromSnapshot: 0,
+  call: 0,
+  callOpts: undefined as { maxSteps?: number } | undefined,
+}));
 const fakeSnapshot = vi.hoisted(() => ({ current: makeFakeSnapshot() }));
 
 vi.mock('@modules/native-emulator/dart/DartAotLoader', () => ({
@@ -173,8 +179,9 @@ vi.mock('@modules/native-emulator/dart/DartAotExecutor', () => ({
     loadFromSnapshot(_snapshot: unknown) {
       executorCalls.loadFromSnapshot++;
     }
-    async call(_opts: unknown) {
+    async call(opts: { maxSteps?: number }) {
       executorCalls.call++;
+      executorCalls.callOpts = opts;
       return { returnValue: 0n, steps: 1, trace: [] };
     }
   },
@@ -273,6 +280,30 @@ describe('dart-inspector session cache handlers', () => {
     expect(executorCalls.loadFromSnapshot).toBe(1);
     expect(executorCalls.load).toBe(0); // session reuse skips executor.load
     expect(executorCalls.call).toBe(1);
+  });
+
+  it('dart_call_function defaults maxSteps to DART_EXEC_MAX_STEPS when omitted', async () => {
+    const create = await handler.handleDartCreateSession({ libappPath: '/fake/libapp.so' });
+    const { sessionId } = R.parse<{ sessionId: string }>(create);
+    executorCalls.callOpts = undefined;
+
+    await handler.handleDartCallFunction({ sessionId, functionName: 'main' });
+
+    expect((executorCalls.callOpts as { maxSteps?: number } | undefined)?.maxSteps).toBe(
+      DART_EXEC_MAX_STEPS,
+    );
+  });
+
+  it('dart_trace_execution defaults maxSteps to DART_TRACE_MAX_STEPS when omitted', async () => {
+    const create = await handler.handleDartCreateSession({ libappPath: '/fake/libapp.so' });
+    const { sessionId } = R.parse<{ sessionId: string }>(create);
+    executorCalls.callOpts = undefined;
+
+    await handler.handleDartTraceExecution({ sessionId, functionName: 'main' });
+
+    expect((executorCalls.callOpts as { maxSteps?: number } | undefined)?.maxSteps).toBe(
+      DART_TRACE_MAX_STEPS,
+    );
   });
 
   it('dart_destroy_session returns destroyed=true for a live session and false for unknown', async () => {

@@ -62,7 +62,6 @@ def main() -> None:
             add_result(results, "network.setCacheBehavior", "不支持", str(e)[:120])
 
         collector = page.network.add_data_collector(
-            ["responseCompleted"],
             data_types=["response"],
         )
         if collector.id:

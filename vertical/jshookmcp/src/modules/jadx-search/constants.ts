@@ -6,15 +6,7 @@
  *
  * @see openspec/changes/add-jadx-search-code/design.md §4
  */
-
-const int = (key: string, fallback: number): number => {
-  const v = process.env[key];
-  if (v === undefined || v === '') return fallback;
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : fallback;
-};
-
-const str = (key: string, fallback: string): string => process.env[key] || fallback;
+import { readEnvInteger as int, readEnvString as str } from '@src/config/environment';
 
 /**
  * Hard ceiling on the total number of matches returned across all files.
@@ -48,7 +40,7 @@ export const JADX_SEARCH_MAX_MATCHES_PER_FILE = int('JADX_SEARCH_MAX_MATCHES_PER
  * Total wall-clock budget for a single jadx_search_code call (engine-side,
  * excludes MCP transport overhead). Default: 60 s.
  */
-export const JADX_SEARCH_TIMEOUT_MS = int('JADX_SEARCH_TIMEOUT_MS', 60_000);
+export const JADX_SEARCH_TIMEOUT_MS = int('JADX_CODE_SEARCH_TIMEOUT_MS', 60_000);
 
 /**
  * Post-hoc per-match regex test budget for the Node fallback engine. When a

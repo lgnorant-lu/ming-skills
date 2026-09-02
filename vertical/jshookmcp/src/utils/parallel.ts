@@ -47,16 +47,22 @@ export async function parallelExecute<T, R>(
         try {
           const result = await new Promise<R>((resolve, reject) => {
             const timer = setTimeout(() => reject(new Error('Task timeout')), timeout);
-            executor(item, i).then(
-              (v) => {
-                clearTimeout(timer);
-                resolve(v);
-              },
-              (e) => {
-                clearTimeout(timer);
-                reject(e);
-              },
-            );
+            // Route the executor through Promise.resolve() so a synchronous throw
+            // becomes a rejected promise instead of escaping mid-callback; both
+            // settle paths clear the timer, otherwise a sync throw would leak it
+            // and keep the event loop (and the process) alive for the full timeout.
+            Promise.resolve()
+              .then(() => executor(item, i))
+              .then(
+                (v) => {
+                  clearTimeout(timer);
+                  resolve(v);
+                },
+                (e) => {
+                  clearTimeout(timer);
+                  reject(e);
+                },
+              );
           });
 
           results[i] = {

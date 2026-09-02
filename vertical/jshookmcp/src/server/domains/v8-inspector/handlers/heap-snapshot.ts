@@ -57,9 +57,40 @@ export function getSnapshot(snapshotId: string): StoredHeapSnapshot | undefined 
 }
 
 /**
- * Read optional retention caps from the constants layer. Both default to 0
- * (no eviction) so persistence never surprises the user with deletions; set
- * MCP_V8_HEAP_SNAPSHOT_MAX_COUNT / MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB to bound it.
+ * Bound the in-memory snapshot cache: evict oldest-by-capturedAt entries until
+ * the cache holds at most `maxCount` snapshots. Returns the evicted ids.
+ * Non-positive caps are ignored (no eviction). This is the memory-side half of
+ * retention — `enforceSnapshotRetention` handles the on-disk files; without this
+ * the cache would retain every captured snapshot's chunks (GB-scale) forever.
+ */
+export function enforceSnapshotCacheRetention(maxCount: number): string[] {
+  if (!Number.isInteger(maxCount) || maxCount <= 0) {
+    return [];
+  }
+  if (snapshotCache.size <= maxCount) {
+    return [];
+  }
+
+  const entries = Array.from(snapshotCache.entries());
+  entries.sort((a, b) => {
+    const ca = a[1].capturedAt;
+    const cb = b[1].capturedAt;
+    if (ca < cb) return -1;
+    if (ca > cb) return 1;
+    return 0;
+  });
+
+  const toEvict = entries.slice(0, entries.length - maxCount);
+  for (const [id] of toEvict) {
+    snapshotCache.delete(id);
+  }
+  return toEvict.map(([id]) => id);
+}
+
+/**
+ * Read retention caps from the constants layer. `maxCount` defaults to 3
+ * (bounding both the in-memory and on-disk snapshot store); `maxTotalBytes`
+ * defaults to 0 (disabled). Both are env-overridable and clamp to >= 0.
  */
 function getRetentionConfig(): { maxCount: number; maxTotalBytes: number } {
   const maxCount = Math.max(0, MCP_V8_HEAP_SNAPSHOT_MAX_COUNT);
@@ -221,8 +252,14 @@ export async function handleHeapSnapshotCapture(
       target,
     };
 
+    const retention = getRetentionConfig();
+
+    // Bound the in-memory cache regardless of persistence — the snapshot cache
+    // must never grow unbounded even when persistence is disabled.
+    const memoryEvicted = enforceSnapshotCacheRetention(retention.maxCount);
+
     if (!persist) {
-      return base;
+      return memoryEvicted.length > 0 ? { ...base, evicted: memoryEvicted } : base;
     }
 
     try {
@@ -241,13 +278,15 @@ export async function handleHeapSnapshotCapture(
         persisted: { absolutePath: persisted.absolutePath, displayPath: persisted.displayPath },
       });
 
-      const retention = getRetentionConfig();
-      const evicted = await enforceSnapshotRetention(retention);
+      // Disk retention keeps the in-memory cache in lockstep: an evicted disk
+      // snapshot's chunks must not linger in memory either.
+      const disk = await enforceSnapshotRetention({ ...retention, memoryCache: snapshotCache });
+      const evictedIds = [...new Set([...memoryEvicted, ...disk.evictedIds])];
 
       return {
         ...base,
         persisted: { displayPath: persisted.displayPath, bytesWritten: persisted.bytesWritten },
-        ...(evicted.evictedIds.length > 0 ? { evicted: evicted.evictedIds } : {}),
+        ...(evictedIds.length > 0 ? { evicted: evictedIds } : {}),
       };
     } catch (e) {
       warnings.push(
@@ -386,33 +425,4 @@ export async function handleHeapSnapshotCapture(
     simulated: true,
   });
   return await finalize(stored, true, pageTarget);
-}
-
-export async function handleHeapSearch(
-  args: Record<string, unknown>,
-  options: HeapSnapshotHandlerOptions,
-): Promise<{ success: boolean; snapshotId: string; query: string; matches: string[] }> {
-  const query = typeof args.query === 'string' && args.query.length > 0 ? args.query : '.*';
-  const snapshotId =
-    typeof args.snapshotId === 'string' && args.snapshotId.length > 0
-      ? args.snapshotId
-      : options.getSnapshot();
-
-  await options.getPage();
-
-  if (!snapshotId) {
-    throw new Error('snapshotId is required');
-  }
-
-  const snapshot = getSnapshot(snapshotId);
-  if (!snapshot) {
-    throw new Error(`Snapshot ${snapshotId} not found`);
-  }
-
-  return {
-    success: true,
-    snapshotId,
-    query,
-    matches: snapshot.chunks.filter((chunk) => chunk.includes(query)),
-  };
 }

@@ -1,4 +1,4 @@
-import { readdir, rm, stat } from 'node:fs/promises';
+import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type {
   DeobfuscateBundleModuleSummary,
@@ -8,6 +8,13 @@ import type {
   DeobfuscateSavedArtifact,
 } from '@internal-types/deobfuscator';
 import { logger } from '@utils/logger';
+import {
+  WEBCRACK_JOB_TIMEOUT_MS,
+  resolveWebcrackUrl,
+  type WebcrackPool,
+  type WebcrackWorkerBundle,
+} from './webcrack-worker';
+import { DEOBF_WEBCRACK_MAX_BUNDLE_MODULES } from '@src/constants/transform';
 
 type WebcrackModuleLike = {
   id: string;
@@ -73,7 +80,7 @@ const DEFAULT_OPTIONS: Required<
   unpack: true,
 };
 
-const MAX_BUNDLE_MODULES = 100;
+const MAX_BUNDLE_MODULES = DEOBF_WEBCRACK_MAX_BUNDLE_MODULES;
 
 type MappingMetadata = {
   fromPath: string;
@@ -216,9 +223,91 @@ async function collectSavedArtifacts(
   return artifacts.toSorted((left, right) => left.path.localeCompare(right.path));
 }
 
+/**
+ * Resolve and validate `outputDir` against the project root. Rejects absolute
+ * paths outside cwd and any path traversal (see the inline security note this
+ * was extracted from).
+ */
+function resolveSafeOutputDir(outputDir: string): string {
+  const savedTo = path.resolve(outputDir);
+
+  // SECURITY: Ensure outputDir stays within cwd or a safe parent.
+  // Reject absolute paths outside the project and any path traversal.
+  const cwd = process.cwd();
+  const relFromCwd = path.relative(cwd, savedTo);
+  if (
+    path.isAbsolute(relFromCwd) ||
+    relFromCwd.startsWith('..') ||
+    savedTo === '/' ||
+    savedTo === path.parse(savedTo).root
+  ) {
+    throw new Error(`outputDir must resolve to a path within the project root. Got: ${savedTo}`);
+  }
+
+  return savedTo;
+}
+
+/** Rebuild the Map-based bundle shape the mapping/summarize/save helpers expect. */
+function deserializeBundle(bundle: WebcrackWorkerBundle): WebcrackBundleLike {
+  return {
+    type: bundle.type,
+    entryId: bundle.entryId,
+    modules: new Map(bundle.modules.map((module) => [module.id, { ...module }])),
+  };
+}
+
+/**
+ * Replicate webcrack's `result.save(path)` on the main thread for the worker
+ * path, where the `save` method (a function) cannot cross the structured-clone
+ * boundary. Writes `<path>/deobfuscated.js`, `<path>/bundle.json` and one file
+ * per bundle module — mirroring the `save` layout of webcrack 2.16.0 (the
+ * version pinned in package.json). The worker/fallback equivalence test only
+ * asserts the `code` output matches; this on-disk layout is not itself diffed
+ * against webcrack's own `save` output.
+ */
+export async function saveWebcrackArtifacts(
+  savedTo: string,
+  code: string,
+  bundle?: WebcrackBundleLike,
+): Promise<void> {
+  const normalized = path.normalize(savedTo);
+  await mkdir(normalized, { recursive: true });
+  await writeFile(path.join(normalized, 'deobfuscated.js'), code, 'utf8');
+
+  if (!bundle) return;
+
+  const bundleJson = {
+    type: bundle.type,
+    entryId: bundle.entryId,
+    modules: Array.from(bundle.modules.values(), (module) => ({
+      id: module.id,
+      path: module.path,
+    })),
+  };
+  await mkdir(normalized, { recursive: true });
+  await writeFile(
+    path.join(normalized, 'bundle.json'),
+    JSON.stringify(bundleJson, null, 2),
+    'utf8',
+  );
+
+  await Promise.all(
+    Array.from(bundle.modules.values(), async (module) => {
+      const modulePath = path.normalize(path.join(normalized, module.path));
+      const rel = path.relative(normalized, modulePath);
+      if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) {
+        throw new Error(`detected path traversal: ${module.path}`);
+      }
+      await mkdir(path.dirname(modulePath), { recursive: true });
+      await writeFile(modulePath, module.code, 'utf8');
+    }),
+  );
+}
+
 export async function runWebcrack(
   code: string,
   options: WebcrackInvocationOptions,
+  pool?: WebcrackPool,
 ): Promise<WebcrackExecutionResult> {
   const optionsUsed = normalizeOptions(options);
 
@@ -234,6 +323,60 @@ export async function runWebcrack(
   }
 
   try {
+    // Worker path: run webcrack off the event loop. The main thread only posts
+    // `{ code, options }` and receives `{ code, bundle }` (serialized to plain
+    // objects) back; mappings, summarization and outputDir saving stay here.
+    if (pool) {
+      const workerResult = await pool.submit(
+        {
+          code,
+          webcrackUrl: resolveWebcrackUrl(),
+          options: {
+            jsx: optionsUsed.jsx,
+            unpack: optionsUsed.unpack,
+            unminify: optionsUsed.unminify,
+            mangle: optionsUsed.mangle,
+          },
+        },
+        WEBCRACK_JOB_TIMEOUT_MS,
+      );
+
+      const bundleLike = workerResult.bundle ? deserializeBundle(workerResult.bundle) : undefined;
+      const remapped = bundleLike ? applyBundleMappings(bundleLike, options.mappings) : new Map();
+
+      let savedTo: string | undefined;
+      let savedArtifacts: DeobfuscateSavedArtifact[] | undefined;
+      if (typeof options.outputDir === 'string' && options.outputDir.trim().length > 0) {
+        savedTo = resolveSafeOutputDir(options.outputDir);
+        if (options.forceOutput) {
+          await rm(savedTo, { recursive: true, force: true });
+        }
+        await saveWebcrackArtifacts(savedTo, workerResult.code, bundleLike);
+        savedArtifacts = await collectSavedArtifacts(savedTo);
+      }
+
+      return {
+        applied: true,
+        code: workerResult.code,
+        bundle: bundleLike
+          ? summarizeBundle(
+              bundleLike,
+              {
+                includeModuleCode: options.includeModuleCode,
+                maxBundleModules: options.maxBundleModules,
+              },
+              remapped,
+            )
+          : undefined,
+        savedTo,
+        savedArtifacts,
+        optionsUsed,
+      };
+    }
+
+    // Fallback path (no pool wired): run webcrack synchronously on the main
+    // thread. Kept for direct calls / tests; production callers pass the shared
+    // pool from `getWebcrackPool()`.
     const { webcrack } = (await import('webcrack')) as WebcrackModuleImport;
     const result = await webcrack(code, {
       jsx: optionsUsed.jsx,
@@ -250,22 +393,7 @@ export async function runWebcrack(
     let savedTo: string | undefined;
     let savedArtifacts: DeobfuscateSavedArtifact[] | undefined;
     if (typeof options.outputDir === 'string' && options.outputDir.trim().length > 0) {
-      savedTo = path.resolve(options.outputDir);
-
-      // SECURITY: Ensure outputDir stays within cwd or a safe parent.
-      // Reject absolute paths outside the project and any path traversal.
-      const cwd = process.cwd();
-      const relFromCwd = path.relative(cwd, savedTo);
-      if (
-        path.isAbsolute(relFromCwd) ||
-        relFromCwd.startsWith('..') ||
-        savedTo === '/' ||
-        savedTo === path.parse(savedTo).root
-      ) {
-        throw new Error(
-          `outputDir must resolve to a path within the project root. Got: ${savedTo}`,
-        );
-      }
+      savedTo = resolveSafeOutputDir(options.outputDir);
 
       if (options.forceOutput) {
         await rm(savedTo, { recursive: true, force: true });

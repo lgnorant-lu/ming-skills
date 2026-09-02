@@ -1,9 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { cached, withCache } from '@utils/cache/CachedDecorator';
 import { PersistentCache } from '@utils/cache/PersistentCache';
-import { join } from 'path';
-import { tmpdir } from 'os';
-import { existsSync, rmSync } from 'fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { existsSync, rmSync } from 'node:fs';
 import { TEST_URLS, withPath } from '@tests/shared/test-urls';
 
 const applyMethodDecorator = (

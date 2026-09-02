@@ -182,8 +182,15 @@ export class DarwinMemoryProvider implements PlatformMemoryAPI {
     // WeakMap will auto-clean once ProcessHandle is GC'd
   }
 
-  readMemory(handle: ProcessHandle, address: bigint, size: number): MemoryReadResult {
+  async readMemory(
+    handle: ProcessHandle,
+    address: bigint,
+    size: number,
+  ): Promise<MemoryReadResult> {
     const h = getDarwinHandle(handle);
+    // NOTE: mach_vm_read_overwrite is still issued synchronously here; migrating
+    // to koffi `.async` is a follow-up (the async contract is in place, so the
+    // caller chain no longer assumes a synchronous return).
     const { kr, data, outsize } = machVmReadOverwrite(h.task, address, size);
 
     if (kr !== KERN.SUCCESS) {
@@ -195,8 +202,13 @@ export class DarwinMemoryProvider implements PlatformMemoryAPI {
     return { data, bytesRead: Number(outsize) };
   }
 
-  writeMemory(handle: ProcessHandle, address: bigint, data: Buffer): MemoryWriteResult {
+  async writeMemory(
+    handle: ProcessHandle,
+    address: bigint,
+    data: Buffer,
+  ): Promise<MemoryWriteResult> {
     const h = getDarwinHandle(handle);
+    // NOTE: see readMemory — mach_vm_write offload to `.async` is a follow-up.
     const kr = machVmWrite(h.task, address, data);
 
     if (kr !== KERN.SUCCESS) {

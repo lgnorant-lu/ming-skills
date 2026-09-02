@@ -35,6 +35,9 @@ const COOKIE_ACTIONS: ReadonlySet<CookieAction> = new Set(['get', 'set', 'clear'
 /** Maximum HTML input size to prevent unbounded memory allocation. */
 const MAX_HTML_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 
+/** Maximum user code size for browser_jsdom_execute (input validation gate). */
+const MAX_EXEC_CODE_LENGTH = 100 * 1024; // 100 KB
+
 /** Session lifetime in milliseconds. Configurable via env in future. */
 const SESSION_TTL_MS = 10 * 60 * 1000;
 
@@ -147,6 +150,15 @@ export class JsdomHandlers {
       }
 
       const { JSDOM } = await import('jsdom');
+
+      // Re-check after the async import: concurrent calls could both pass the
+      // pre-import check above before either inserts (check-then-act race).
+      if (this.sessions.size >= MAX_SESSIONS) {
+        return R.fail(
+          `JSDOM session limit reached (${MAX_SESSIONS}). Close existing sessions first with browser_jsdom_serialize + drop.`,
+        ).build();
+      }
+
       const dom = new JSDOM(html, options);
       const sessionId = this.createSessionId();
       const session: JsdomSession = {
@@ -245,6 +257,9 @@ export class JsdomHandlers {
     try {
       const sessionId = argStringRequired(args, 'sessionId');
       const code = argStringRequired(args, 'code');
+      if (Buffer.byteLength(code, 'utf8') > MAX_EXEC_CODE_LENGTH) {
+        return R.fail(`code exceeds ${MAX_EXEC_CODE_LENGTH / 1024}KB limit`).build();
+      }
       const timeoutHintMs = argNumber(args, 'timeoutMs', 5000);
 
       const session = this.getSession(sessionId);

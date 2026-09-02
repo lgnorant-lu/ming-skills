@@ -61,6 +61,24 @@ export class BoringsslInspectorTlsHandlers extends BoringsslInspectorBaseHandler
     };
   }
 
+  async handleTlsKeylogSeal(_args: Record<string, unknown>): Promise<unknown> {
+    const sealed = await this.keyLogExtractor.sealKeyLog();
+    if (!sealed) {
+      return {
+        ok: false,
+        error: `No keylog file found at ${this.keyLogExtractor.getKeyLogFilePath()} to seal`,
+      };
+    }
+    return {
+      ok: true,
+      cipherPath: sealed.cipherPath,
+      keyHex: sealed.keyHex,
+      entryCount: sealed.entryCount,
+      warning:
+        'keyHex is not persisted anywhere by this tool. Store it yourself if you need to decrypt the sealed envelope later.',
+    };
+  }
+
   async handleTlsKeylogParse(args: Record<string, unknown>): Promise<unknown> {
     const path = argString(args, 'path') ?? null;
     const entries = this.keyLogExtractor.parseKeyLog(path ?? undefined);

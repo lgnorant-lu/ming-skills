@@ -9,7 +9,10 @@ import {
 import { emitEvent, parseNumberArg } from './shared';
 
 export class RawGrpcHandlers {
-  constructor(private readonly eventBus?: EventBus<ServerEventMap>) {}
+  private readonly eventBus?: EventBus<ServerEventMap>;
+  constructor(eventBus?: EventBus<ServerEventMap>) {
+    this.eventBus = eventBus;
+  }
 
   async handleGrpcFrameParse(args: Record<string, unknown>) {
     const data = parseOptionalString(args.data, 'data');

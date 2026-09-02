@@ -95,6 +95,7 @@ const manifest = {
     tools: [
       'canvas_engine_fingerprint',
       'canvas_scene_dump',
+      'canvas_scene_search',
       'canvas_pick_object_at_point',
       'canvas_trace_click_handler',
       'canvas_inject_draw_hook',

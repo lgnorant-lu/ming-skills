@@ -6,7 +6,10 @@ interface DebuggerEvaluateHandlersDeps {
 }
 
 export class DebuggerEvaluateHandlers {
-  constructor(private deps: DebuggerEvaluateHandlersDeps) {}
+  private deps: DebuggerEvaluateHandlersDeps;
+  constructor(deps: DebuggerEvaluateHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handleDebuggerEvaluate(args: Record<string, unknown>) {
     const expression = argString(args, 'expression', '');

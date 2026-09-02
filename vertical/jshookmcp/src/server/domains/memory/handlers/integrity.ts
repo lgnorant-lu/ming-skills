@@ -49,17 +49,29 @@ function getPlatformApi(): PlatformMemoryAPI | null {
 }
 
 export class IntegrityHandlers {
+  private readonly speedhackEngine: Speedhack | null;
+  private readonly heapAnalyzer: HeapAnalyzer | null;
+  private readonly peAnalyzer: PEAnalyzer | null;
+  private readonly antiCheatDetector: AntiCheatDetector | null;
+  private readonly processManager?: UnifiedProcessManager;
+  private readonly ctx?: MCPServerContext;
   private readonly auditTrail: MemoryAuditTrail | null;
 
   constructor(
-    private readonly speedhackEngine: Speedhack | null,
-    private readonly heapAnalyzer: HeapAnalyzer | null,
-    private readonly peAnalyzer: PEAnalyzer | null,
-    private readonly antiCheatDetector: AntiCheatDetector | null,
-    private readonly processManager?: UnifiedProcessManager,
-    private readonly ctx?: MCPServerContext,
+    speedhackEngine: Speedhack | null,
+    heapAnalyzer: HeapAnalyzer | null,
+    peAnalyzer: PEAnalyzer | null,
+    antiCheatDetector: AntiCheatDetector | null,
+    processManager?: UnifiedProcessManager,
+    ctx?: MCPServerContext,
     auditTrail?: MemoryAuditTrail | null,
   ) {
+    this.speedhackEngine = speedhackEngine;
+    this.heapAnalyzer = heapAnalyzer;
+    this.peAnalyzer = peAnalyzer;
+    this.antiCheatDetector = antiCheatDetector;
+    this.processManager = processManager;
+    this.ctx = ctx;
     this.auditTrail = auditTrail ?? null;
   }
 
@@ -459,7 +471,7 @@ export class IntegrityHandlers {
       }
       const handle = api.openProcess(pid, false);
       try {
-        const memResult = api.readMemory(handle, startAddr, size);
+        const memResult = await api.readMemory(handle, startAddr, size);
         const matches = scanRangeForHooks(new Uint8Array(memResult.data), startAddr);
         const inlineHooks = matches.map((m) => ({
           address: m.address,

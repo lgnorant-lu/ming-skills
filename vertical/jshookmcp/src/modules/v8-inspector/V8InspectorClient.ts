@@ -160,9 +160,12 @@ function isCDPSessionLike(value: unknown): value is CDPSessionLike {
  * via the Chrome DevTools Protocol HeapProfiler domain.
  */
 export class V8InspectorClient {
+  private readonly getPage?: () => Promise<unknown>;
   private session: CDPSessionLike | null = null;
 
-  constructor(private readonly getPage?: () => Promise<unknown>) {}
+  constructor(getPage?: () => Promise<unknown>) {
+    this.getPage = getPage;
+  }
 
   /**
    * Enable the HeapProfiler domain via CDP.

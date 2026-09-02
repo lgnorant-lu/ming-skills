@@ -12,7 +12,8 @@
  * @module Win32API
  */
 
-import koffi, { type LibraryHandle } from 'koffi';
+import type { LibraryHandle } from 'koffi';
+import { getKoffi, requireKoffi } from './koffi-loader';
 import { logger } from '@utils/logger';
 import { MEMORY_SYSCALL_EVASION } from '@src/constants';
 import {
@@ -109,15 +110,28 @@ let psapi: LibraryHandle | null = null;
 let koffiAvailable: boolean | null = null;
 
 /**
- * Check if koffi is available
+ * Check whether koffi's native binding is actually usable on this platform.
+ *
+ * Stronger than `koffi-loader`'s `isKoffiAvailable()` (which only reports
+ * "the koffi module resolved"): this also loads `kernel32.dll` through the
+ * resolved binding, so a koffi install whose native addon is present but
+ * broken (load throws) is reported as unusable. Callers that gate real FFI
+ * work (memory read/write, process enumeration) should use this, not the
+ * loader's resolve-only check.
  */
-export function isKoffiAvailable(): boolean {
+export function isKoffiBindingUsable(): boolean {
   if (koffiAvailable !== null) {
     return koffiAvailable;
   }
 
   try {
-    // Try to load kernel32 to verify koffi works
+    // koffi may be absent (dynamic import rejected) — getKoffi() returns null.
+    const koffi = getKoffi();
+    if (!koffi) {
+      koffiAvailable = false;
+      return false;
+    }
+    // Try to load kernel32 to verify koffi's native binding works.
     const testLib = koffi.load('kernel32.dll');
     testLib.unload();
     koffiAvailable = true;
@@ -142,7 +156,7 @@ export function isWindows(): boolean {
  */
 export function getKernel32(): LibraryHandle {
   if (!kernel32) {
-    kernel32 = koffi.load('kernel32.dll');
+    kernel32 = requireKoffi().load('kernel32.dll');
     logger.debug('Loaded kernel32.dll via koffi');
   }
   return kernel32;
@@ -153,7 +167,7 @@ export function getKernel32(): LibraryHandle {
  */
 export function getNtdll(): LibraryHandle {
   if (!ntdll) {
-    ntdll = koffi.load('ntdll.dll');
+    ntdll = requireKoffi().load('ntdll.dll');
     logger.debug('Loaded ntdll.dll via koffi');
   }
   return ntdll;
@@ -164,7 +178,7 @@ export function getNtdll(): LibraryHandle {
  */
 function getPsapi(): LibraryHandle {
   if (!psapi) {
-    psapi = koffi.load('psapi.dll');
+    psapi = requireKoffi().load('psapi.dll');
     logger.debug('Loaded psapi.dll via koffi');
   }
   return psapi;
@@ -174,7 +188,39 @@ function toPointerBigInt(value: unknown): bigint {
   if (value === null || value === undefined) return 0n;
   if (typeof value === 'bigint') return value;
   if (typeof value === 'number') return BigInt(value);
-  return koffi.address(value);
+  return requireKoffi().address(value);
+}
+
+/**
+ * A koffi-callable function with the `.async` member (see koffi's
+ * `KoffiFunc` type). `fn.async(...args, cb)` runs the native call on a koffi
+ * worker thread instead of the libuv event loop, so long FFI calls do not
+ * block request processing (a4-01).
+ */
+type KoffiCallable = {
+  (...args: unknown[]): unknown;
+  async: (...args: unknown[]) => void;
+};
+
+/**
+ * Promisify a koffi `.async()` invocation. koffi's callback is `(err, res)`;
+ * `err` is null on success. The `buffer`/`bytesRead` arguments must stay alive
+ * until the callback fires — the closure over `args` guarantees that.
+ *
+ * NOTE: `GetLastError`-style diagnostics are NOT reliable across the worker
+ * thread boundary (the call runs on a worker, the callback on the main thread),
+ * so callers of this helper must not rely on `GetLastError` after an async call.
+ */
+function koffiAsync<TResult>(fn: KoffiCallable, ...args: unknown[]): Promise<TResult> {
+  return new Promise<TResult>((resolve, reject) => {
+    fn.async(...args, (err: unknown, result: TResult) => {
+      if (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+      } else {
+        resolve(result);
+      }
+    });
+  });
 }
 
 // ── kernel32.dll Functions ──
@@ -250,6 +296,90 @@ export function WriteProcessMemory(hProcess: bigint, lpBaseAddress: bigint, data
   if (result === 0) {
     const error = GetLastError();
     throw new Error(`WriteProcessMemory failed. Error: 0x${error.toString(16)}`);
+  }
+
+  return Number(bytesWrittenBuf.readBigUInt64LE());
+}
+
+/**
+ * Read process memory asynchronously — runs on a koffi worker thread so the
+ * 16 MB chunk reads from the memory scanner do not block the event loop (a4-01).
+ * Same contract as {@link ReadProcessMemory}; resolves with the populated buffer.
+ */
+export async function ReadProcessMemoryAsync(
+  hProcess: bigint,
+  lpBaseAddress: bigint,
+  size: number,
+): Promise<Buffer> {
+  if (MEMORY_SYSCALL_EVASION) {
+    // DirectSyscallInvoker stubs are built via koffi.decode, which does not
+    // expose an `.async` member. Fall back to the synchronous syscall path for
+    // this opt-in evasion mode (registered as a follow-up).
+    try {
+      return ntReadVirtualMemory(hProcess, lpBaseAddress, size);
+    } catch {
+      // fall through to the async kernel32 path
+    }
+  }
+
+  const fn = getKernel32().func(
+    'int ReadProcessMemory(void *, void *, _Out_ uint8_t *, size_t, _Out_ size_t *)',
+  );
+  const buffer = Buffer.alloc(size);
+  const bytesReadBuf = Buffer.alloc(8);
+
+  const result = await koffiAsync<number>(
+    fn,
+    hProcess,
+    lpBaseAddress,
+    buffer,
+    BigInt(size),
+    bytesReadBuf,
+  );
+
+  if (result === 0) {
+    // GetLastError is thread-local and the async call ran on a worker thread,
+    // so it is intentionally omitted here — the error is surfaced as a thrown
+    // Error without a (potentially stale) Win32 code.
+    throw new Error('ReadProcessMemory failed');
+  }
+
+  return buffer;
+}
+
+/**
+ * Write process memory asynchronously — see {@link ReadProcessMemoryAsync}.
+ * Resolves with the number of bytes written.
+ */
+export async function WriteProcessMemoryAsync(
+  hProcess: bigint,
+  lpBaseAddress: bigint,
+  data: Buffer,
+): Promise<number> {
+  if (MEMORY_SYSCALL_EVASION) {
+    try {
+      return ntWriteVirtualMemory(hProcess, lpBaseAddress, data);
+    } catch {
+      // fall through to the async kernel32 path
+    }
+  }
+
+  const fn = getKernel32().func(
+    'int WriteProcessMemory(void *, void *, uint8_t *, size_t, _Out_ size_t *)',
+  );
+  const bytesWrittenBuf = Buffer.alloc(8);
+
+  const result = await koffiAsync<number>(
+    fn,
+    hProcess,
+    lpBaseAddress,
+    data,
+    BigInt(data.length),
+    bytesWrittenBuf,
+  );
+
+  if (result === 0) {
+    throw new Error('WriteProcessMemory failed');
   }
 
   return Number(bytesWrittenBuf.readBigUInt64LE());
@@ -393,6 +523,20 @@ export function CreateRemoteThread(
     handle,
     threadId: threadIdBuf.readUInt32LE(0),
   };
+}
+
+/** Wait for a kernel object to become signalled. */
+export function WaitForSingleObject(hHandle: bigint, timeoutMs: number): number {
+  const fn = getKernel32().func('uint32 WaitForSingleObject(void *, uint32)');
+  return fn(hHandle, timeoutMs);
+}
+
+/** Read a completed thread's 32-bit exit code. */
+export function GetExitCodeThread(hThread: bigint): { success: boolean; exitCode: number } {
+  const fn = getKernel32().func('int GetExitCodeThread(void *, _Out_ uint32 *)');
+  const exitCodeBuf = Buffer.alloc(4);
+  const success = fn(hThread, exitCodeBuf) !== 0;
+  return { success, exitCode: exitCodeBuf.readUInt32LE(0) };
 }
 
 /**

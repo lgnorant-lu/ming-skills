@@ -24,7 +24,7 @@ const state = vi.hoisted(() => ({
   readFile: vi.fn(),
   unlink: vi.fn(),
   nativeReadMemory: vi.fn(),
-  isKoffiAvailable: vi.fn(),
+  isKoffiBindingUsable: vi.fn(),
   createPlatformProvider: vi.fn(),
 }));
 
@@ -40,7 +40,7 @@ vi.mock('@src/native/NativeMemoryManager', () => ({
 }));
 
 vi.mock('@src/native/Win32API', () => ({
-  isKoffiAvailable: state.isKoffiAvailable,
+  isKoffiBindingUsable: state.isKoffiBindingUsable,
 }));
 
 vi.mock('@native/platform/factory.js', () => ({
@@ -68,7 +68,7 @@ import { readMemory } from '@modules/process/memory/reader';
 describe('memory/reader - coverage expansion', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    state.isKoffiAvailable.mockReturnValue(false);
+    state.isKoffiBindingUsable.mockReturnValue(false);
     // Default: no file read, no unlink (avoids issues with undefined)
     state.readFile.mockResolvedValue(Buffer.alloc(0));
     state.unlink.mockResolvedValue(undefined);

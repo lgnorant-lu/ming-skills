@@ -79,6 +79,36 @@ describe('ArtifactRetention – additional coverage', () => {
       process.env.MCP_ARTIFACT_RETENTION_DAYS = originalRetention;
       process.env.MCP_ARTIFACT_CLEANUP_INTERVAL_MINUTES = originalInterval;
     });
+
+    it('is idempotent — a second start returns the same stop handle and one timer', () => {
+      const originalRetention = process.env.MCP_ARTIFACT_RETENTION_DAYS;
+      const originalInterval = process.env.MCP_ARTIFACT_CLEANUP_INTERVAL_MINUTES;
+      process.env.MCP_ARTIFACT_RETENTION_DAYS = '7';
+      process.env.MCP_ARTIFACT_CLEANUP_INTERVAL_MINUTES = '60';
+
+      const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+      try {
+        // Server startup wires the scheduler in MCPServer.start() AND the CLI
+        // entry (index.ts) calls it — both must share one timer instead of
+        // stacking intervals (architecture hygiene, 2026-08-18).
+        const first = startArtifactRetentionScheduler();
+        const second = startArtifactRetentionScheduler();
+        expect(typeof first).toBe('function');
+        expect(second).toBe(first);
+        expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+        // Stopping re-arms the singleton so a restarted server can start again.
+        first?.();
+        const third = startArtifactRetentionScheduler();
+        expect(typeof third).toBe('function');
+        expect(third).not.toBe(first);
+        expect(setIntervalSpy).toHaveBeenCalledTimes(2);
+        third?.();
+      } finally {
+        setIntervalSpy.mockRestore();
+        process.env.MCP_ARTIFACT_RETENTION_DAYS = originalRetention;
+        process.env.MCP_ARTIFACT_CLEANUP_INTERVAL_MINUTES = originalInterval;
+      }
+    });
   });
 
   describe('getArtifactRetentionConfig', () => {
@@ -98,11 +128,72 @@ describe('ArtifactRetention – additional coverage', () => {
     });
 
     it('returns disabled config for empty/zero values', () => {
-      const config = getArtifactRetentionConfig({} as unknown as NodeJS.ProcessEnv);
+      const config = getArtifactRetentionConfig({
+        MCP_ARTIFACT_RETENTION_DAYS: '0',
+        MCP_ARTIFACT_MAX_TOTAL_MB: '0',
+        MCP_ARTIFACT_CLEANUP_INTERVAL_MINUTES: '0',
+      } as unknown as NodeJS.ProcessEnv);
 
       expect(config.enabled).toBe(false);
       expect(config.retentionDays).toBe(0);
       expect(config.maxTotalBytes).toBe(0);
+    });
+
+    it('falls back instead of partially parsing malformed numeric values', () => {
+      const config = getArtifactRetentionConfig({
+        MCP_ARTIFACT_RETENTION_DAYS: '14days',
+        MCP_ARTIFACT_MAX_TOTAL_MB: '1.5',
+        MCP_ARTIFACT_CLEANUP_INTERVAL_MINUTES: '30minutes',
+      } as unknown as NodeJS.ProcessEnv);
+
+      expect(config.retentionDays).toBe(7);
+      expect(config.maxTotalBytes).toBe(0);
+      expect(config.cleanupIntervalMinutes).toBe(360);
+    });
+
+    it('applies safe defaults when no env vars are set (a4-06)', () => {
+      // 2026-08-18: retention used to default to disabled (env ?? '0'), letting
+      // artifacts accumulate until the disk filled (a4-06). The new defaults
+      // keep a 7-day age window and a 6-hourly sweep; explicit env zeros above
+      // still disable it.
+      const config = getArtifactRetentionConfig({} as unknown as NodeJS.ProcessEnv);
+
+      expect(config.enabled).toBe(true);
+      expect(config.retentionDays).toBe(7);
+      expect(config.maxTotalBytes).toBe(0);
+      expect(config.cleanupIntervalMinutes).toBe(360);
+      expect(config.cleanupOnStart).toBe(false);
+    });
+
+    it('schedules by default and returns a cancel function (a4-06)', () => {
+      const originalRetention = process.env.MCP_ARTIFACT_RETENTION_DAYS;
+      const originalMax = process.env.MCP_ARTIFACT_MAX_TOTAL_MB;
+      const originalInterval = process.env.MCP_ARTIFACT_CLEANUP_INTERVAL_MINUTES;
+      delete process.env.MCP_ARTIFACT_RETENTION_DAYS;
+      delete process.env.MCP_ARTIFACT_MAX_TOTAL_MB;
+      delete process.env.MCP_ARTIFACT_CLEANUP_INTERVAL_MINUTES;
+
+      try {
+        const cancel = startArtifactRetentionScheduler();
+        expect(typeof cancel).toBe('function');
+        if (cancel) cancel();
+      } finally {
+        if (originalRetention === undefined) {
+          delete process.env.MCP_ARTIFACT_RETENTION_DAYS;
+        } else {
+          process.env.MCP_ARTIFACT_RETENTION_DAYS = originalRetention;
+        }
+        if (originalMax === undefined) {
+          delete process.env.MCP_ARTIFACT_MAX_TOTAL_MB;
+        } else {
+          process.env.MCP_ARTIFACT_MAX_TOTAL_MB = originalMax;
+        }
+        if (originalInterval === undefined) {
+          delete process.env.MCP_ARTIFACT_CLEANUP_INTERVAL_MINUTES;
+        } else {
+          process.env.MCP_ARTIFACT_CLEANUP_INTERVAL_MINUTES = originalInterval;
+        }
+      }
     });
 
     it('handles cleanupOnStart with value "1"', () => {

@@ -1,3 +1,4 @@
+import { gzipSync } from 'node:zlib';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EncodingToolHandlers } from '@server/domains/encoding/handlers';
 import { createCodeCollectorMock, parseJson } from '@tests/server/domains/shared/mock-factories';
@@ -269,6 +270,37 @@ describe('EncodingToolHandlers (handlers.impl.core.runtime)', () => {
       );
       expect(body.success).toBe(true);
       expect(body.encoding).toBe('protobuf');
+    });
+
+    it('rejects gzip decompression bombs exceeding the output cap', async () => {
+      // 64MB + 1KB of zeroes compresses to a few KB but decompresses past the
+      // 64MB output cap — the decode must fail instead of materialising it.
+      const bomb = gzipSync(Buffer.alloc(64 * 1024 * 1024 + 1024, 0));
+      const body = parseJson<any>(
+        await handlers.handleBinaryDecode({
+          data: bomb.toString('base64'),
+          encoding: 'gzip',
+          outputFormat: 'utf8',
+        }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.error).toBeTruthy();
+    });
+
+    it('truncates hex output for buffers over the sample cap', async () => {
+      const big = Buffer.alloc(1024 * 1024 + 1, 0x41);
+      const body = parseJson<any>(
+        await handlers.handleBinaryDecode({
+          data: big.toString('base64'),
+          encoding: 'base64',
+          outputFormat: 'hex',
+        }),
+      );
+      expect(body.success).toBe(true);
+      expect(body.truncated).toBe(true);
+      expect(body.byteLength).toBe(big.length);
+      // result is sampled to the cap (2 hex chars per byte), not full 2x.
+      expect(body.result.length).toBe(1024 * 1024 * 2);
     });
   });
 

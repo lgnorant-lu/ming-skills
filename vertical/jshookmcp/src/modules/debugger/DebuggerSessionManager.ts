@@ -1,6 +1,6 @@
-import * as fs from 'fs/promises';
-import * as os from 'os';
-import * as path from 'path';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { logger } from '@utils/logger';
 import { getDebuggerSessionsDir } from '@utils/outputPaths';
 import type { DebuggerSession } from '@internal-types/index';
@@ -17,10 +17,13 @@ type SavedDebuggerSessionSummary = {
  * Delegates all actual debugging operations back to DebuggerManager.
  */
 export class DebuggerSessionManager {
+  private debuggerManager: DebuggerManager;
   private readonly SESSION_IMPORT_BATCH_SIZE = 8;
   private readonly SESSION_FILE_READ_BATCH_SIZE = 8;
 
-  constructor(private debuggerManager: DebuggerManager) {}
+  constructor(debuggerManager: DebuggerManager) {
+    this.debuggerManager = debuggerManager;
+  }
 
   private async processInBatches<T>(
     items: readonly T[],
@@ -125,6 +128,10 @@ export class DebuggerSessionManager {
       filePath = await this.validateFilePath(filePath);
       const dir = path.dirname(filePath);
       await fs.mkdir(dir, { recursive: true });
+      // mkdir may have followed a symlink swapped in since the check above —
+      // re-verify the canonical parent right before writing (closes the
+      // realpath TOCTOU window).
+      filePath = await this.validateFilePath(filePath);
     }
 
     await fs.writeFile(filePath, JSON.stringify(session, null, 2), 'utf-8');

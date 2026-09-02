@@ -1,8 +1,8 @@
 /**
  * Full E2E sequence with detailed timing - find exact hanging test
  */
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { Client } from '@modelcontextprotocol/client';
 import { findBrowserExecutable } from '@utils/browserExecutable';
 import { E2E_DEFAULT_TARGET_URL } from '@tests/shared/test-urls';
 
@@ -132,14 +132,13 @@ const TOOLS = [
   ['sse_get_events', {}],
   ['ws_monitor', { action: 'disable' }],
   ['performance_get_metrics', {}],
-  ['performance_coverage', { action: 'start' }],
+  ['page_coverage_start', {}],
   ['performance_trace', { action: 'start' }],
   ['js_heap_search', { pattern: 'fetch' }],
-  ['performance_coverage', { action: 'stop' }],
-  ['performance_take_heap_snapshot', {}],
+  ['page_coverage_stop', {}],
+  ['v8_heap_snapshot_capture', {}],
   ['profiler_cpu', { action: 'start' }],
-  ['profiler_heap_sampling', { action: 'start' }],
-  ['profiler_heap_sampling', { action: 'stop' }],
+  ['v8_heap_sampling', { durationMs: 2000, topN: 5 }],
   ['profiler_cpu', { action: 'stop' }],
   ['performance_trace', { action: 'stop' }],
   ['network_export_har', {}],

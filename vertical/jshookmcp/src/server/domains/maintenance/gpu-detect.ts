@@ -85,7 +85,14 @@ export interface GpuClassifierInput {
 export function classifyGpu(model: string): GpuClassification {
   const lower = model.toLowerCase().trim();
 
-  const cloudMatch = [...CLOUD_GPU_MODELS].find((m) => lower.includes(m));
+  // Word-boundary match so 'a40' does not match 'RTX A4000' nor 'a100' match 'A1000'.
+  let cloudMatch: string | undefined;
+  for (const m of CLOUD_GPU_MODELS) {
+    if (new RegExp(`\\b${m}\\b`).test(lower)) {
+      cloudMatch = m;
+      break;
+    }
+  }
   const vmMatch = VM_GPU_PATTERNS.find(({ pattern }) => pattern.test(lower));
 
   return {
@@ -190,7 +197,8 @@ async function tryCommands(attempts: CommandAttempt[]): Promise<string> {
 
 // ── Output parsers ──
 
-function parseLinuxOutput(raw: string): GpuInfo[] {
+/** @internal Exported for testing — parse lspci/nvidia-smi output. */
+export function parseLinuxOutput(raw: string): GpuInfo[] {
   const gpus: GpuInfo[] = [];
   const lines = raw.split('\n');
 
@@ -198,8 +206,11 @@ function parseLinuxOutput(raw: string): GpuInfo[] {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    // nvidia-smi output: "name, driver_version, memory_mb"
-    if (trimmed.includes(',')) {
+    // nvidia-smi output: "name, driver_version, memory_mb".
+    // lspci lines start with a bus address (01:00.0 by default, 0000:01:00.0
+    // with -v) and may contain commas in device names — never treat those as
+    // nvidia-smi rows.
+    if (trimmed.includes(',') && !/^(?:[\da-f]{4}:)?[\da-f]{2}:[\da-f]{2}\.\d/.test(trimmed)) {
       const parts = trimmed.split(',').map((s) => s.trim());
       gpus.push({
         vendor: detectVendor(parts[0] ?? ''),
@@ -267,11 +278,12 @@ function parseWindowsOutput(raw: string): GpuInfo[] {
   return gpus;
 }
 
-function parseMacOutput(raw: string): GpuInfo[] {
+/** @internal Exported for testing — parse system_profiler SPDisplaysDataType output. */
+export function parseMacOutput(raw: string): GpuInfo[] {
   const gpus: GpuInfo[] = [];
   const lines = raw.split('\n');
   let currentModel = '';
-  let currentVendor = '';
+  let pendingVendor = '';
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -280,20 +292,30 @@ function parseMacOutput(raw: string): GpuInfo[] {
     const chipsetMatch = trimmed.match(/Chipset Model:\s*(.+)/i);
     if (chipsetMatch) {
       currentModel = chipsetMatch[1]!.trim();
-      currentVendor = detectVendor(currentModel);
-      gpus.push({ vendor: currentVendor, model: currentModel });
+      gpus.push({ vendor: pendingVendor || detectVendor(currentModel), model: currentModel });
+      pendingVendor = '';
       continue;
     }
 
     const vendorMatch = trimmed.match(/Vendor:\s*(.+)/i);
-    if (vendorMatch && gpus.length > 0) {
-      gpus[gpus.length - 1]!.vendor = vendorMatch[1]!.trim();
+    if (vendorMatch) {
+      if (gpus.length > 0) {
+        // Normal order: Vendor follows Chipset Model — apply to the most recent
+        // entry so dual-GPU Macs keep per-GPU vendors.
+        gpus[gpus.length - 1]!.vendor = vendorMatch[1]!.trim();
+      } else {
+        // Some macOS versions print Vendor before any Chipset Model — buffer it
+        // for the first entry.
+        pendingVendor = vendorMatch[1]!.trim();
+      }
       continue;
     }
 
-    const vramMatch = trimmed.match(/VRAM \(Total\):\s*(\d+)\s*MB/i);
+    // Apple Silicon reports VRAM in GB, Intel Macs in MB.
+    const vramMatch = trimmed.match(/VRAM \(Total\):\s*(\d+)\s*(MB|GB)/i);
     if (vramMatch && gpus.length > 0) {
-      gpus[gpus.length - 1]!.memoryMB = parseInt(vramMatch[1]!, 10);
+      const vram = parseInt(vramMatch[1]!, 10);
+      gpus[gpus.length - 1]!.memoryMB = vramMatch[2]!.toUpperCase() === 'GB' ? vram * 1024 : vram;
     }
   }
 

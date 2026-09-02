@@ -51,6 +51,8 @@ describe('Memory Domain - Win32-only Platform Guards', () => {
       mockPtrEngine as any,
       mockStructAnalyzer as any,
       null, // bpEngine - Win32-only
+      null, // vehEngine - Win32-only
+      null, // softBpEngine - Win32-only
       mockInjector as any,
       mockMemCtrl as any,
       null, // speedhackEngine - Win32-only

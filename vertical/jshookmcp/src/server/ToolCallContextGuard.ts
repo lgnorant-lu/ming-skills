@@ -177,6 +177,7 @@ const DOMAIN_ALTERNATIVES: ReadonlyMap<string, readonly string[]> = new Map([
 ]);
 
 export class ToolCallContextGuard {
+  private getProvider: () => TabContextProvider | null;
   /** Memoize prefix-match results — tool names repeat heavily across calls. */
   private readonly contextSensitiveCache = new Map<string, boolean>();
 
@@ -186,7 +187,9 @@ export class ToolCallContextGuard {
     { lastToolName: string | null; consecutiveCount: number }
   >();
 
-  constructor(private getProvider: () => TabContextProvider | null) {}
+  constructor(getProvider: () => TabContextProvider | null) {
+    this.getProvider = getProvider;
+  }
 
   private getRepeatState(): { lastToolName: string | null; consecutiveCount: number } {
     const scope = getToolRequestContext()?.sessionId ?? 'default';

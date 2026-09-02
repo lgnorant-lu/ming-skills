@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { glob } from 'tinyglobby';
 import { readFile } from 'node:fs/promises';
 import { relative } from 'node:path';
-import ts from 'typescript';
+// TS 7.0 ships no compiler API; parse with the project's own Babel toolchain.
+import * as parser from '@babel/parser';
+import _traverse from '@babel/traverse';
+
+const traverse = (_traverse as unknown as { default: typeof _traverse }).default ?? _traverse;
 
 const ALLOWED_LITERAL_PATTERNS = [
   'tests/shared/test-urls.ts',
@@ -88,32 +92,39 @@ describe('test URL guard', () => {
         if (isAllowed(relPath)) continue;
 
         const content = await readFile(file, 'utf8');
-        const sourceFile = ts.createSourceFile(file, content, ts.ScriptTarget.Latest, true);
+        const ast = parser.parse(content, {
+          sourceType: 'unambiguous',
+          // JSX parsing is enabled only for .tsx; in .ts it misreads generic
+          // arrows like <T>(...) as JSX opening elements.
+          plugins: file.endsWith('.tsx') ? ['jsx', 'typescript'] : ['typescript'],
+        });
         let foundOffender = false;
 
-        const visit = (node: ts.Node) => {
-          if (foundOffender) return;
-
-          if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
-            if (isDisallowedLiteralUrl(node.text)) {
-              foundOffender = true;
-              return;
-            }
-          }
-
-          if (ts.isTemplateExpression(node)) {
-            const headText =
-              node.head.text + node.templateSpans.map((span) => '${}' + span.literal.text).join('');
-            if (isDisallowedTemplateUrl(headText)) {
-              foundOffender = true;
-              return;
-            }
-          }
-
-          ts.forEachChild(node, visit);
+        const flag = () => {
+          foundOffender = true;
         };
 
-        visit(sourceFile);
+        traverse(ast, {
+          StringLiteral(path) {
+            if (foundOffender) return;
+            if (isDisallowedLiteralUrl(path.node.value)) flag();
+          },
+          TemplateLiteral(path) {
+            if (foundOffender) return;
+            const node = path.node;
+            if (node.expressions.length === 0) {
+              const text = node.quasis[0]?.value.cooked ?? '';
+              if (isDisallowedLiteralUrl(text)) flag();
+              return;
+            }
+            const headText =
+              (node.quasis[0]?.value.cooked ?? '') +
+              node.expressions
+                .map((_, i) => '${}' + (node.quasis[i + 1]?.value.cooked ?? ''))
+                .join('');
+            if (isDisallowedTemplateUrl(headText)) flag();
+          },
+        });
 
         if (foundOffender) {
           offenders.push(relPath);

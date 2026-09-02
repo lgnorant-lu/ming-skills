@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { CrossDomainOrchestrator } from '@server/orchestrator/CrossDomainOrchestrator';
+import { ORCHESTRATOR_MAX_EXECUTION_HISTORY } from '@src/constants';
 
 function createMockCtx(
   overrides?: Record<string, unknown>,
@@ -32,6 +33,44 @@ describe('CrossDomainOrchestrator', () => {
         maxRetries: 3,
       });
       expect(orch).toBeDefined();
+    });
+
+    it('falls back to the default history cap when maxExecutionHistory is NaN (NIT-9)', () => {
+      const ctx = createMockCtx();
+      const orch = new CrossDomainOrchestrator(ctx, {
+        maxExecutionHistory: Number.NaN,
+      });
+      // NaN previously propagated through Math.max(1, Math.trunc(NaN)) = NaN,
+      // leaving executionHistory unbounded (length >= NaN is always false).
+      const record = (orch as any).recordExecution.bind(orch);
+      for (let i = 0; i < ORCHESTRATOR_MAX_EXECUTION_HISTORY + 5; i += 1) {
+        record({
+          workflowId: 'w',
+          startedAt: '',
+          totalDuration: 0,
+          status: 'success',
+          evidenceNodes: [],
+        });
+      }
+      expect(orch.getExecutionHistory()).toHaveLength(ORCHESTRATOR_MAX_EXECUTION_HISTORY);
+    });
+
+    it('falls back to the default history cap when maxExecutionHistory is Infinity (NIT-9)', () => {
+      const ctx = createMockCtx();
+      const orch = new CrossDomainOrchestrator(ctx, {
+        maxExecutionHistory: Number.POSITIVE_INFINITY,
+      });
+      const record = (orch as any).recordExecution.bind(orch);
+      for (let i = 0; i < ORCHESTRATOR_MAX_EXECUTION_HISTORY + 5; i += 1) {
+        record({
+          workflowId: 'w',
+          startedAt: '',
+          totalDuration: 0,
+          status: 'success',
+          evidenceNodes: [],
+        });
+      }
+      expect(orch.getExecutionHistory()).toHaveLength(ORCHESTRATOR_MAX_EXECUTION_HISTORY);
     });
   });
 
@@ -149,6 +188,20 @@ describe('CrossDomainOrchestrator', () => {
       const orch = new CrossDomainOrchestrator(ctx);
       await orch.init();
       await orch.init(); // should not throw
+    });
+  });
+
+  describe('executionHistory bounded retention', () => {
+    it('caps retained execution records and evicts the oldest', async () => {
+      const ctx = createMockCtx({
+        executeToolWithTracking: vi.fn().mockResolvedValue({ ok: true }),
+      });
+      const orch = new CrossDomainOrchestrator(ctx, { maxExecutionHistory: 3 });
+      await orch.init();
+      for (let i = 0; i < 5; i += 1) {
+        await orch.executeWorkflow('unknown-wf', {});
+      }
+      expect(orch.getExecutionHistory()).toHaveLength(3);
     });
   });
 });

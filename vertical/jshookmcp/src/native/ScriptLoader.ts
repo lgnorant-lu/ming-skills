@@ -1,4 +1,4 @@
-import { promises as fs, existsSync } from 'fs';
+import { promises as fs, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { platform } from 'node:os';
 import { fileURLToPath } from 'node:url';

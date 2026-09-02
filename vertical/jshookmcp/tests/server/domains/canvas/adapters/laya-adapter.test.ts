@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { runInNewContext } from 'node:vm';
 import type { PageController } from '@server/domains/canvas/dependencies';
 import {
   LayaCanvasAdapter,
@@ -371,5 +372,137 @@ describe('buildLayaHitTestPayload', () => {
   it('handles missing canvasId (uses topmost canvas detection)', async () => {
     const payload = buildLayaHitTestPayload({ x: 50, y: 50 });
     expect(payload).toBeDefined();
+  });
+});
+
+// ── Executed payload robustness ─────────────────────────────────────────────
+// These run the generated IIFE in a fresh V8 realm (node:vm) with a mocked
+// window.Laya / document, so the cyclic-graph / throwing-getter defenses are
+// actually exercised — not just string-sniffed.
+
+function runHitTestPayload(code: string, laya: unknown): unknown {
+  const windowObj = { Laya: laya };
+  const documentObj = {
+    querySelectorAll: () => [] as unknown[],
+    getElementById: () => null,
+  };
+  return runInNewContext(
+    code,
+    { window: windowObj, document: documentObj },
+    {
+      timeout: 1000,
+    },
+  );
+}
+
+describe('buildLayaHitTestPayload robustness (executed payload)', () => {
+  it('does not abort the pick when a node overrides globalToLocal to throw', () => {
+    const goodNode = {
+      name: 'good',
+      width: 50,
+      height: 50,
+      visible: true,
+      mouseEnabled: true,
+      numChildren: 0,
+      children: [],
+      globalToLocal: (pt: { x: number; y: number }) => ({ x: pt.x, y: pt.y }),
+    };
+    const badNode = {
+      name: 'bad',
+      width: 50,
+      height: 50,
+      visible: true,
+      mouseEnabled: true,
+      numChildren: 0,
+      children: [],
+      globalToLocal: () => {
+        throw new Error('malicious override');
+      },
+    };
+    const stage = {
+      name: 'stage',
+      width: 100,
+      height: 100,
+      visible: true,
+      mouseEnabled: false,
+      numChildren: 2,
+      children: [badNode, goodNode],
+    };
+
+    const result = runHitTestPayload(buildLayaHitTestPayload({ x: 10, y: 10 }), {
+      stage,
+      version: '2.x',
+    }) as { success: boolean; picked: { name?: string } | null };
+
+    expect(result.success).toBe(true);
+    expect(result.picked?.name).toBe('good');
+  });
+
+  it('does not hang when nodePath walks a parent cycle', () => {
+    const loopNode: { name: string; parent?: unknown } = { name: 'loop' };
+    loopNode.parent = loopNode;
+    const hitNode = {
+      name: 'hit',
+      parent: loopNode,
+      width: 10,
+      height: 10,
+      visible: true,
+      mouseEnabled: true,
+    };
+    const stage = {
+      name: 'stage',
+      width: 100,
+      height: 100,
+      visible: true,
+      mouseEnabled: false,
+      numChildren: 0,
+      children: [],
+      hitTest: () => hitNode,
+    };
+
+    const result = runHitTestPayload(buildLayaHitTestPayload({ x: 10, y: 10 }), {
+      stage,
+      version: '3.x',
+      InputManager: {},
+    }) as { success: boolean; picked: { path?: string } | null };
+
+    expect(result.success).toBe(true);
+    expect(typeof result.picked?.path).toBe('string');
+  });
+
+  it('does not stack overflow when a node lists itself in _children', () => {
+    const selfNode: {
+      name: string;
+      width: number;
+      height: number;
+      visible: boolean;
+      mouseEnabled: boolean;
+      _children?: unknown[];
+    } = {
+      name: 'self',
+      width: 10,
+      height: 10,
+      visible: true,
+      mouseEnabled: false,
+    };
+    selfNode['_children'] = [selfNode];
+    const stage = {
+      name: 'stage',
+      width: 100,
+      height: 100,
+      visible: true,
+      mouseEnabled: false,
+      _children: [selfNode],
+    };
+
+    let result: { success: boolean } | undefined;
+    expect(() => {
+      result = runHitTestPayload(buildLayaHitTestPayload({ x: 10, y: 10 }), {
+        stage,
+        version: '2.x',
+      }) as { success: boolean };
+    }).not.toThrow();
+
+    expect(result!.success).toBe(false);
   });
 });

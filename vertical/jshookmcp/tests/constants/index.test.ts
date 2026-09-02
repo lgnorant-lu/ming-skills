@@ -392,6 +392,9 @@ describe('constants barrel export', () => {
         'WS_PAYLOAD_PREVIEW_LIMIT', // streaming.ts
         'PROXY_CAPTURE_BUFFER_MAX', // proxy.ts
         'MACRO_DEFAULT_TIMEOUT_MS', // coordination.ts
+        'QUALITY_WEIGHT_SECURITY', // analysis.ts (QualityAnalyzer scoring)
+        'PATTERN_TOKEN_CONFIDENCE_HEADER_JWT', // analysis.ts (PatternDetectorAuthPatterns)
+        'ANALYSIS_EXPLOIT_LLM_MAX_TOKENS', // analysis.ts (ai_suggest_exploits sampling)
       ];
 
       for (const name of criticalConstants) {

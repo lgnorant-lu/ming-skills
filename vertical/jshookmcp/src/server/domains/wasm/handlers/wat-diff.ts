@@ -10,6 +10,8 @@
  * removed+added rather than changed. Unnamed functions match by ordinal.
  */
 
+import { diffArrays } from 'diff';
+
 export interface WatFunction {
   /** Stable diff key: $name without sigil, `__idx_N` for (;N;) markers, `__exp_X` for inline export, `__unnamed_N` otherwise. */
   key: string;
@@ -162,52 +164,23 @@ export function parseWatStructure(wat: string): WatStructure {
 
 type EditStep = { type: 'eq' | 'del' | 'add'; line: string };
 
-/** Classic LCS dynamic-programming edit script between two line arrays. */
+/**
+ * LCS edit script between two line arrays, computed via the `diff` package
+ * (Myers O(ND) algorithm, `diffArrays`). The returned steps carry one entry
+ * per line; `unifiedDiff` applies the context-window elision on top.
+ *
+ * No budget guard needed: `diffArrays` is non-abortable and never returns
+ * undefined; Myers O(ND) is strictly cheaper than the previous O(n*m) DP
+ * table, which could OOM on large functions.
+ */
 function lcsEditScript(a: string[], b: string[]): EditStep[] {
-  const n = a.length;
-  const m = b.length;
-  // dp[i][j] = LCS length of a[i..] vs b[j..]
-  const dp: number[][] = Array.from({ length: n + 1 }, () =>
-    Array.from({ length: m + 1 }, () => 0),
-  );
-  for (let i = n - 1; i >= 0; i--) {
-    const rowI = dp[i]!;
-    const rowI1 = dp[i + 1]!;
-    const ai = a[i]!;
-    for (let j = m - 1; j >= 0; j--) {
-      const bj = b[j]!;
-      if (ai === bj) {
-        rowI[j] = rowI1[j + 1]! + 1;
-      } else {
-        rowI[j] = Math.max(rowI1[j]!, rowI[j + 1]!);
-      }
-    }
-  }
+  const changes = diffArrays(a, b);
   const steps: EditStep[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    const ai = a[i]!;
-    const bj = b[j]!;
-    if (ai === bj) {
-      steps.push({ type: 'eq', line: ai });
-      i++;
-      j++;
-    } else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) {
-      steps.push({ type: 'del', line: ai });
-      i++;
-    } else {
-      steps.push({ type: 'add', line: bj });
-      j++;
+  for (const change of changes) {
+    const type = change.added ? 'add' : change.removed ? 'del' : 'eq';
+    for (const line of change.value) {
+      steps.push({ type, line });
     }
-  }
-  while (i < n) {
-    steps.push({ type: 'del', line: a[i]! });
-    i++;
-  }
-  while (j < m) {
-    steps.push({ type: 'add', line: b[j]! });
-    j++;
   }
   return steps;
 }

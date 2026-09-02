@@ -15,6 +15,7 @@ export default {
   },
   setup() {
     const route = useRoute();
+    // eslint-disable-next-line unicorn/consistent-function-scoping
     const initZoom = () => {
       // Initialize zoom on all images inside the main VitePress document container
       mediumZoom('.vp-doc img', { background: 'var(--vp-c-bg)' });
@@ -24,7 +25,7 @@ export default {
     });
     watch(
       () => route.path,
-      () => nextTick(() => initZoom())
+      () => nextTick(() => initZoom()),
     );
   },
 };

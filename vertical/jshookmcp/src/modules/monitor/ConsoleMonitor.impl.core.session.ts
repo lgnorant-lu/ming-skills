@@ -51,9 +51,13 @@ export async function doEnableCdpCore(
 
   state.cdpSession.on('disconnected', () => {
     logger.warn('ConsoleMonitor CDP session disconnected');
-    state.cdpSession = null;
-    state.networkMonitor = null;
-    state.usingManagedTargetSession = false;
+    // Guard against a stale zombie session's late 'disconnected' event
+    // clobbering a newer session installed after reinitialization.
+    if (state.cdpSession === session) {
+      state.cdpSession = null;
+      state.networkMonitor = null;
+      state.usingManagedTargetSession = false;
+    }
   });
 
   await cdpSendWithTimeout(state.cdpSession, 'Runtime.enable', {}, 5000);

@@ -7,7 +7,12 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { COORDINATION_GOTO_TIMEOUT_MS } from '@src/constants';
+import {
+  COORDINATION_GOTO_TIMEOUT_MS,
+  COORDINATION_MAX_HANDOFFS,
+  COORDINATION_MAX_INSIGHTS,
+  COORDINATION_MAX_SNAPSHOTS,
+} from '@src/constants';
 import type { MCPServerContext } from '@server/domains/shared/registry';
 import { handleSafe, type ToolResponse } from '@server/domains/shared/ResponseBuilder';
 export * from './definitions';
@@ -117,7 +122,9 @@ export class CoordinationHandlers {
     for (const [id, handoff] of restoredHandoffs) {
       this.handoffs.set(id, handoff);
     }
+    this.trimTerminalHandoffs();
     this.insights.splice(0, this.insights.length, ...restoredInsights);
+    this.trimInsights();
     this.mutationSeq = this.handoffs.size + this.insights.length;
     this.lastPersistedSeq = this.mutationSeq;
   }
@@ -129,6 +136,43 @@ export class CoordinationHandlers {
   private markDirty(): void {
     this.mutationSeq++;
     this.persistNotifier?.();
+  }
+
+  /**
+   * Drop the oldest terminal handoffs (completed or failed) until the retained
+   * count fits within `COORDINATION_MAX_HANDOFFS`. Both completion and failure
+   * are terminal paths that accumulate, so trimming here — on create, on each
+   * terminal transition, and on restore — keeps the Map bounded without
+   * disturbing pending / in-progress tasks the coordinator still needs.
+   */
+  private trimTerminalHandoffs(): void {
+    const terminal = [...this.handoffs.values()]
+      .filter((h) => h.status === 'completed' || h.status === 'failed')
+      .toSorted((a, b) => (a.completedAt ?? a.createdAt) - (b.completedAt ?? b.createdAt));
+    if (terminal.length <= COORDINATION_MAX_HANDOFFS) return;
+    const excess = terminal.length - COORDINATION_MAX_HANDOFFS;
+    for (const handoff of terminal.slice(0, excess)) {
+      this.handoffs.delete(handoff.id);
+    }
+  }
+
+  /** Drop the oldest insights until the array fits within `COORDINATION_MAX_INSIGHTS`. */
+  private trimInsights(): void {
+    while (this.insights.length > COORDINATION_MAX_INSIGHTS) {
+      this.insights.shift();
+    }
+  }
+
+  /** Drop the oldest (by timestamp) snapshots until the Map fits within `COORDINATION_MAX_SNAPSHOTS`. */
+  private trimSnapshots(): void {
+    if (this.snapshots.size <= COORDINATION_MAX_SNAPSHOTS) return;
+    const entries = [...this.snapshots.entries()].toSorted(
+      (a, b) => a[1].timestamp - b[1].timestamp,
+    );
+    const excess = entries.length - COORDINATION_MAX_SNAPSHOTS;
+    for (const [id] of entries.slice(0, excess)) {
+      this.snapshots.delete(id);
+    }
   }
 
   // ── create_task_handoff ──
@@ -193,6 +237,7 @@ export class CoordinationHandlers {
     };
 
     this.handoffs.set(handoff.id, handoff);
+    this.trimTerminalHandoffs();
     this.markDirty();
 
     return {
@@ -241,6 +286,7 @@ export class CoordinationHandlers {
     handoff.summary = summary;
     handoff.keyFindings = keyFindings;
     handoff.artifacts = artifacts;
+    this.trimTerminalHandoffs();
     this.markDirty();
 
     return {
@@ -282,6 +328,7 @@ export class CoordinationHandlers {
       handoff.status = status;
       if (status === 'failed') {
         handoff.completedAt = Date.now();
+        this.trimTerminalHandoffs();
       } else {
         handoff.completedAt = undefined;
       }
@@ -405,6 +452,7 @@ export class CoordinationHandlers {
     };
 
     this.insights.push(insight);
+    this.trimInsights();
     this.markDirty();
 
     return {
@@ -582,6 +630,7 @@ export class CoordinationHandlers {
     };
 
     this.snapshots.set(snapshot.id, snapshot);
+    this.trimSnapshots();
 
     return {
       snapshotId: snapshot.id,

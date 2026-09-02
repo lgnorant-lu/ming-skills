@@ -12,6 +12,31 @@ import type {
 export async function getPerformanceMetrics(collector: CodeCollector): Promise<PerformanceMetrics> {
   const page = await collector.getActivePage();
 
+  // CDP engine-level metrics — cross-origin aggregate counters that in-page
+  // performance.getEntriesByType() cannot see (it is origin-scoped). Best-effort:
+  // when CDP is unavailable we fall back to in-page entries only.
+  const cdpMetrics: Record<string, number> = {};
+  try {
+    const cdp = await page.createCDPSession();
+    try {
+      await cdp.send('Performance.enable');
+      const raw = (await cdp.send('Performance.getMetrics')) as {
+        metrics?: Array<{ name?: unknown; value?: unknown }>;
+      };
+      const rawMetrics = Array.isArray(raw?.metrics) ? raw.metrics : [];
+      for (const metric of rawMetrics) {
+        if (metric && typeof metric.name === 'string' && typeof metric.value === 'number') {
+          cdpMetrics[metric.name] = metric.value;
+        }
+      }
+    } finally {
+      await cdp.send('Performance.disable').catch(() => {});
+      await cdp.detach().catch(() => {});
+    }
+  } catch (err) {
+    logger.warn('CDP Performance.getMetrics unavailable, using in-page entries only', err);
+  }
+
   const metrics = (await evaluateWithTimeout(page, () => {
     const result: Partial<PerformanceMetrics> = {};
 
@@ -19,7 +44,13 @@ export async function getPerformanceMetrics(collector: CodeCollector): Promise<P
     if (navTiming) {
       result.domContentLoaded = navTiming.domContentLoadedEventEnd - navTiming.fetchStart;
       result.loadComplete = navTiming.loadEventEnd - navTiming.fetchStart;
-      result.ttfb = navTiming.responseStart - navTiming.requestStart;
+      // requestStart of 0 means the timing is unavailable — null, not a
+      // meaningless (or negative) delta.
+      result.ttfb =
+        navTiming.requestStart > 0 ? navTiming.responseStart - navTiming.requestStart : null;
+      result.transferSize = navTiming.transferSize;
+      result.encodedBodySize = navTiming.encodedBodySize;
+      result.decodedBodySize = navTiming.decodedBodySize;
     }
 
     const paintEntries = performance.getEntriesByType('paint');
@@ -58,6 +89,17 @@ export async function getPerformanceMetrics(collector: CodeCollector): Promise<P
     return result as PerformanceMetrics;
   })) as PerformanceMetrics;
 
+  // Merge engine-level counters; CDP heap numbers take precedence over the
+  // Chrome-only performance.memory fallback when both are present.
+  metrics.scriptDuration = cdpMetrics.ScriptDuration;
+  metrics.layoutDuration = cdpMetrics.LayoutDuration;
+  metrics.recalcStyleDuration = cdpMetrics.RecalcStyleDuration;
+  if (cdpMetrics.JSHeapUsedSize !== undefined) metrics.usedJSHeapSize = cdpMetrics.JSHeapUsedSize;
+  if (cdpMetrics.JSHeapTotalSize !== undefined)
+    metrics.totalJSHeapSize = cdpMetrics.JSHeapTotalSize;
+  if (cdpMetrics.JSHeapSizeLimit !== undefined)
+    metrics.jsHeapSizeLimit = cdpMetrics.JSHeapSizeLimit;
+
   logger.info('Performance metrics collected', {
     fcp: metrics.fcp,
     lcp: metrics.lcp,
@@ -69,6 +111,7 @@ export async function getPerformanceMetrics(collector: CodeCollector): Promise<P
 
 export async function getPerformanceTimeline(
   collector: CodeCollector,
+  maxEntries = 500,
 ): Promise<PerformanceTimelineEntry[]> {
   const page = await collector.getActivePage();
 
@@ -80,6 +123,13 @@ export async function getPerformanceTimeline(
       duration: entry.duration,
     }));
   });
+
+  if (timeline.length > maxEntries) {
+    logger.warn(
+      `Performance timeline truncated from ${timeline.length} to ${maxEntries} entries (most recent)`,
+    );
+    return timeline.slice(-maxEntries);
+  }
 
   logger.info(`Performance timeline collected: ${timeline.length} entries`);
   return timeline;

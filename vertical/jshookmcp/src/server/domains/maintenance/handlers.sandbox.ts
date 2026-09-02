@@ -14,6 +14,7 @@ import {
   SANDBOX_MIN_MEMORY_LIMIT_BYTES,
 } from '@src/constants';
 import { redactSensitiveData, redactSensitiveString } from '@modules/security/RedactionService';
+import { cpuLimit } from '@utils/concurrency';
 
 const MAX_MEMORY_LIMIT_BYTES = SANDBOX_MAX_MEMORY_LIMIT_MB * 1024 * 1024;
 
@@ -106,13 +107,11 @@ export class SandboxToolHandlers {
       };
     }
 
-    let result: SandboxResult;
-
-    if (autoCorrect) {
-      result = await executeWithRetry(sandbox, code, options);
-    } else {
-      result = await sandbox.execute(code, options);
-    }
+    // QuickJS WASM runtime instantiation is CPU-heavy, so route it through the
+    // global CPU concurrency gate (same pattern as ExecutionSandbox.execute).
+    const run = () =>
+      autoCorrect ? executeWithRetry(sandbox, code, options) : sandbox.execute(code, options);
+    const result: SandboxResult = await cpuLimit(run);
 
     // Persist scratchpad updates if session is active
     if (sessionId && result.ok && result.output && typeof result.output === 'object') {

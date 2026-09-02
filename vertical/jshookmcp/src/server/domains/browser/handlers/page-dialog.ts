@@ -8,7 +8,10 @@ interface PageDialogHandlersDeps {
 }
 
 export class PageDialogHandlers {
-  constructor(private deps: PageDialogHandlersDeps) {}
+  private deps: PageDialogHandlersDeps;
+  constructor(deps: PageDialogHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handlePageHandleDialog(args: Record<string, unknown>): Promise<ToolResponse> {
     const accept = argBool(args, 'accept', true);

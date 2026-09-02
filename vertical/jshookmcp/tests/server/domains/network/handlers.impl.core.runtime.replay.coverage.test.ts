@@ -164,10 +164,35 @@ const consoleMonitor = {
 
 // ── Class under test ──────────────────────────────────────────────────────────
 
-import { AdvancedToolHandlersRuntime } from '@server/domains/network/handlers.impl.core.runtime.replay';
+import { AdvancedHandlersBase } from '@server/domains/network/handlers.base';
+import { ReplayHandlers } from '@server/domains/network/handlers/replay-handlers';
 import { TEST_URLS, withPath } from '@tests/shared/test-urls';
 
-class TestableAdvancedToolHandlersRuntime extends AdvancedToolHandlersRuntime {
+/**
+ * Testable facade over the composition chain: replay methods delegate to the
+ * active ReplayHandlers module, while parseNumberArg/parseBooleanArg come from
+ * the base chain (AdvancedHandlersBase → NetworkHandlersCore).
+ */
+class TestableAdvancedToolHandlersRuntime extends AdvancedHandlersBase {
+  private replay: ReplayHandlers;
+
+  constructor(collector: unknown, _consoleMonitor: unknown) {
+    super(collector as never, _consoleMonitor as never);
+    this.replay = new ReplayHandlers({ consoleMonitor: _consoleMonitor as never });
+  }
+
+  handleNetworkExtractAuth(args: Record<string, unknown>) {
+    return this.replay.handleNetworkExtractAuth(args);
+  }
+
+  handleNetworkExportHar(args: Record<string, unknown>) {
+    return this.replay.handleNetworkExportHar(args);
+  }
+
+  handleNetworkReplayRequest(args: Record<string, unknown>) {
+    return this.replay.handleNetworkReplayRequest(args);
+  }
+
   public testParseNumberArg(
     value: unknown,
     options: { defaultValue: number; min?: number; max?: number; integer?: boolean },
@@ -202,21 +227,6 @@ describe('AdvancedToolHandlersRuntime — replay.ts coverage', () => {
 
     collector = createCodeCollectorMock();
     handler = new TestableAdvancedToolHandlersRuntime(collector as any, consoleMonitor as any);
-
-    // Stub performance monitor so inherited methods don't throw
-    (handler as unknown as Record<string, unknown>).performanceMonitor = {
-      getPerformanceMetrics: vi.fn(),
-      getPerformanceTimeline: vi.fn(),
-      startCoverage: vi.fn(),
-      stopCoverage: vi.fn(),
-      takeHeapSnapshot: vi.fn(),
-      startTracing: vi.fn(),
-      stopTracing: vi.fn(),
-      startCPUProfiling: vi.fn(),
-      stopCPUProfiling: vi.fn(),
-      startHeapSampling: vi.fn(),
-      stopHeapSampling: vi.fn(),
-    };
   });
 
   // ══════════════════════════════════════════════════════════════════════════

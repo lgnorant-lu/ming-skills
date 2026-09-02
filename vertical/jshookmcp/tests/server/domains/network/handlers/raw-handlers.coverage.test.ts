@@ -96,12 +96,14 @@ function parseTextResponse(response: {
 }
 
 class MockSocket extends EventEmitter {
+  private readonly onWrite?: (socket: MockSocket) => void;
   public readonly destroy = vi.fn(() => this);
   public readonly setTimeout = vi.fn((_timeoutMs: number) => this);
   public written: Buffer = Buffer.from('');
 
-  constructor(private readonly onWrite?: (socket: MockSocket) => void) {
+  constructor(onWrite?: (socket: MockSocket) => void) {
     super();
+    this.onWrite = onWrite;
   }
 
   public readonly end = vi.fn((data?: string | Buffer) => {
@@ -114,10 +116,12 @@ class MockSocket extends EventEmitter {
 }
 
 class MockClientRequest extends EventEmitter {
+  private readonly onEnd?: () => void;
   public readonly destroy = vi.fn(() => this);
 
-  constructor(private readonly onEnd?: () => void) {
+  constructor(onEnd?: () => void) {
     super();
+    this.onEnd = onEnd;
   }
 
   public readonly end = vi.fn(() => {

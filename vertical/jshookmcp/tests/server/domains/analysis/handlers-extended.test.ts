@@ -929,6 +929,7 @@ describe('CoreAnalysisHandlers — extended coverage', () => {
           outputDir: 'custom-dir',
           forceOutput: true,
         }),
+        undefined,
       );
     });
   });

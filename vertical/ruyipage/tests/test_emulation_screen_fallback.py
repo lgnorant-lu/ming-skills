@@ -61,7 +61,7 @@ def test_set_screen_size_injects_js_fallback_when_bidi_is_unsupported():
 
     viewport_override = calls[2][1]
     assert viewport_override["userContexts"] == ["default"]
-    assert viewport_override["viewport"] == {"width": 960, "height": 640}
+    assert "viewport" not in viewport_override
     assert viewport_override["devicePixelRatio"] == 2
 
     preload = calls[3][1]

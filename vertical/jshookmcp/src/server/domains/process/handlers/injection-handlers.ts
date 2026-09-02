@@ -20,6 +20,7 @@ import {
   parseOptionalStringArg,
 } from '../handlers.base.types';
 import { validateExpression, sanitizeErrorMessage } from './expression-validator';
+import { readEnvInteger } from '@src/config/environment';
 
 function formatUnknownError(error: unknown): string {
   if (error instanceof Error) {
@@ -35,8 +36,11 @@ function formatUnknownError(error: unknown): string {
   return String(error);
 }
 
-const ELECTRON_ATTACH_CONNECT_TIMEOUT_MS =
-  Number(process.env.JSHOOK_ELECTRON_ATTACH_CONNECT_TIMEOUT_MS) || 5000;
+const ELECTRON_ATTACH_CONNECT_TIMEOUT_MS = readEnvInteger(
+  'JSHOOK_ELECTRON_ATTACH_CONNECT_TIMEOUT_MS',
+  5000,
+  { min: 1 },
+);
 
 async function connectElectronBrowserCompatible(browserWSEndpoint: string) {
   const { default: puppeteer } = await import('rebrowser-puppeteer-core');

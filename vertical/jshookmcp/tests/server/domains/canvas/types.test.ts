@@ -18,7 +18,6 @@ import type {
   NetworkEvent,
   DumpOpts,
   PickOpts,
-  TraceOpts,
 } from '@server/domains/canvas/types';
 import { TEST_URLS, withPath } from '@tests/shared/test-urls';
 
@@ -507,20 +506,6 @@ describe('canvas domain types', () => {
       expect(opts.x).toBe(100);
       expect(opts.y).toBe(200);
       expect(opts.canvasId).toBe('game');
-    });
-  });
-
-  describe('TraceOpts', () => {
-    it('has all optional fields', async () => {
-      const opts: TraceOpts = {
-        targetNodeId: 'node-5',
-        breakpointType: 'mousedown',
-        maxFrames: 100,
-      };
-
-      expect(opts.targetNodeId).toBe('node-5');
-      expect(opts.breakpointType).toBe('mousedown');
-      expect(opts.maxFrames).toBe(100);
     });
   });
 });

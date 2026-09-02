@@ -1,4 +1,4 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import type { MCPServerContext } from '@server/MCPServer.context';
 import type { DomainManifest, ToolRegistration } from '@server/registry/contracts';
 import type { ToolArgs } from '@server/types';
@@ -15,7 +15,6 @@ import {
   type TargetSessionResolver,
 } from './cdp-session';
 import { handleBytecodeExtract } from './bytecode-extract';
-import { handleJitInspect } from './jit-inspect';
 import { getSnapshot } from './heap-snapshot';
 import {
   deleteAllPersistedSnapshots,
@@ -25,6 +24,7 @@ import {
 } from './snapshot-persistence';
 import { resolveArtifactPath } from '@utils/artifacts';
 import { getToolRequestContext } from '@server/runtime/ToolRequestContext';
+import { cdpLimit } from '@utils/concurrency';
 
 export interface V8InspectorDomainDependencies {
   ctx: MCPServerContext;
@@ -85,9 +85,12 @@ function createTargetSessionResolver(ctx: MCPServerContext): TargetSessionResolv
 }
 
 export class V8InspectorHandlers {
+  private readonly deps: V8InspectorDomainDependencies;
   private readonly currentSnapshotIds = new Map<string, string>();
 
-  constructor(private readonly deps: V8InspectorDomainDependencies) {}
+  constructor(deps: V8InspectorDomainDependencies) {
+    this.deps = deps;
+  }
 
   private getCurrentSessionId(): string {
     const sessionId = getToolRequestContext()?.sessionId;
@@ -109,7 +112,6 @@ export class V8InspectorHandlers {
       v8_heap_stats: (toolArgs) => this.v8_heap_stats(toolArgs),
       v8_bytecode_extract: (toolArgs) => this.v8_bytecode_extract(toolArgs),
       v8_version_detect: (toolArgs) => this.v8_version_detect(toolArgs),
-      v8_jit_inspect: (toolArgs) => this.v8_jit_inspect(toolArgs),
       v8_heap_find_leaks: (toolArgs) => this.v8_heap_find_leaks(toolArgs),
       v8_heap_retainers: (toolArgs) => this.v8_heap_retainers(toolArgs),
       v8_object_compare: (toolArgs) => this.v8_object_compare(toolArgs),
@@ -136,7 +138,7 @@ export class V8InspectorHandlers {
   // ── Standard dispatch: heap snapshot capture ──
   async v8_deopt_trace(args: ToolArgs): Promise<unknown> {
     const { handleDeoptTrace } = await import('@server/domains/v8-inspector/handlers/deopt-trace');
-    return handleDeoptTrace(args, createTargetSessionResolver(this.deps.ctx));
+    return cdpLimit(() => handleDeoptTrace(args, createTargetSessionResolver(this.deps.ctx)));
   }
 
   async v8_turbofan_inspect(args: ToolArgs): Promise<unknown> {
@@ -148,7 +150,7 @@ export class V8InspectorHandlers {
   async v8_turbofan_graph(args: ToolArgs): Promise<unknown> {
     const { handleTurbofanGraph } =
       await import('@server/domains/v8-inspector/handlers/turbofan-graph');
-    return handleTurbofanGraph(args);
+    return cdpLimit(() => handleTurbofanGraph(args));
   }
 
   async v8_heap_sampling(args: ToolArgs): Promise<ToolResponse> {
@@ -156,7 +158,7 @@ export class V8InspectorHandlers {
       requirePageController(this.deps.ctx);
       const { handleHeapSampling } =
         await import('@server/domains/v8-inspector/handlers/heap-sampling');
-      return handleHeapSampling(args, createTargetSessionResolver(this.deps.ctx));
+      return cdpLimit(() => handleHeapSampling(args, createTargetSessionResolver(this.deps.ctx)));
     });
   }
 
@@ -165,7 +167,13 @@ export class V8InspectorHandlers {
       requirePageController(this.deps.ctx);
       const { handleAllocationTrack } =
         await import('@server/domains/v8-inspector/handlers/allocation-track');
-      return handleAllocationTrack(args, createTargetSessionResolver(this.deps.ctx));
+      const { getHeapParsePool } =
+        await import('@server/domains/v8-inspector/handlers/heap-parse-worker');
+      // The tracking heap snapshot can be GB-scale; its JSON.parse + allocation
+      // build/sort run in the worker pool, not on the event loop (b1-02).
+      return cdpLimit(() =>
+        handleAllocationTrack(args, createTargetSessionResolver(this.deps.ctx), getHeapParsePool()),
+      );
     });
   }
 
@@ -220,28 +228,30 @@ export class V8InspectorHandlers {
 
       const persist = typeof args.persist === 'boolean' ? args.persist : true;
 
-      const result = await handleHeapSnapshotCapture(args, {
-        getPage,
-        getSnapshot: () => this.currentSnapshotIds.get(this.getCurrentSessionId()) ?? null,
-        setSnapshot: (id: string | null) => {
-          const sessionId = this.getCurrentSessionId();
-          if (id) this.currentSnapshotIds.set(sessionId, id);
-          else this.currentSnapshotIds.delete(sessionId);
-        },
-        client: this.deps.client,
-        persist,
-        resolver: createTargetSessionResolver(this.deps.ctx),
-        getTargetUrl: persist
-          ? async () => {
-              try {
-                const page = await getPage();
-                return (page as { url?: () => string })?.url?.() ?? null;
-              } catch {
-                return null;
+      const result = await cdpLimit(() =>
+        handleHeapSnapshotCapture(args, {
+          getPage,
+          getSnapshot: () => this.currentSnapshotIds.get(this.getCurrentSessionId()) ?? null,
+          setSnapshot: (id: string | null) => {
+            const sessionId = this.getCurrentSessionId();
+            if (id) this.currentSnapshotIds.set(sessionId, id);
+            else this.currentSnapshotIds.delete(sessionId);
+          },
+          client: this.deps.client,
+          persist,
+          resolver: createTargetSessionResolver(this.deps.ctx),
+          getTargetUrl: persist
+            ? async () => {
+                try {
+                  const page = await getPage();
+                  return (page as { url?: () => string })?.url?.() ?? null;
+                } catch {
+                  return null;
+                }
               }
-            }
-          : undefined,
-      });
+            : undefined,
+        }),
+      );
 
       // handleHeapSnapshotCapture always returns {success:true,…} (graceful
       // degradation); reflect its success flag so handleSafe merge is honest.
@@ -642,13 +652,6 @@ export class V8InspectorHandlers {
       const version = await detector.detectV8Version();
       const supportsNativesSyntax = await detector.supportsNativesSyntax();
       return { version, features: { nativesSyntax: supportsNativesSyntax } };
-    });
-  }
-
-  async v8_jit_inspect(args: ToolArgs): Promise<unknown> {
-    const getPage = this.deps.ctx.pageController ? createPageGetter(this.deps.ctx) : undefined;
-    return handleJitInspect(args, {
-      getPage,
     });
   }
 

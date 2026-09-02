@@ -55,17 +55,16 @@ pnpm run audit:tools
 
 ```bash
 pnpm run doctor
-pnpm run format:docs
 ```
 
 ### PR 质量门禁
 
-- 仓库会对新 PR 运行自动质量门禁，明显的低质量、灌水或批量化 AI slop PR 会被直接关闭。
-- 当前质量门禁使用零容忍模式：只要命中一条失败规则，就可能被自动关闭。
+- 仓库会对新 PR 运行自动质量门禁（`.github/workflows/pr-quality-gate.yml`），明显的低质量、灌水或批量化 AI slop PR 会被直接关闭。
+- 门禁分两层：**硬信号层**（违规源分支 / 蜜罐 token / 超大改动 / commit 作者不匹配 / 篡改受保护路径 / 可疑账号）命中即自动关闭；**软信号层**（标题格式、模板勾选、描述长度、账号资料完整度等）只评论提醒并打标签，不会自动关闭。
+- 如果被误判，补全模板、说明本地验证，并在收窄改动范围后重新打开 PR；必要时先开 issue 说明背景。
 - PR 标题请尽量使用 conventional 风格，例如 `fix(server): ...`、`docs: ...`。
 - 不要删除 PR 模板章节；请按模板补全 `Summary`、`What changed`、`Validation` 和 `Related issues`。
 - 尽量保持 PR 小而聚焦。大范围无背景改动、空泛描述、缺失验证步骤的 PR 更容易被拦截。
-- 如果被误判，补全模板、说明本地验证，并在收窄改动范围后重新打开 PR；必要时先开 issue 说明背景。
 
 ### 扩展开发建议
 
@@ -150,17 +149,16 @@ If you are working on dependency or bridge issues, also consider:
 
 ```bash
 pnpm run doctor
-pnpm run format:docs
 ```
 
 ### PR quality gate
 
-- The repository runs an automated quality gate on new PRs and may immediately close low-quality, spammy, or obviously mass-generated AI slop submissions.
-- The current gate runs in zero-tolerance mode: a single failed rule may be enough to auto-close the PR.
+- The repository runs an automated quality gate on new PRs (`.github/workflows/pr-quality-gate.yml`) and may immediately close low-quality, spammy, or obviously mass-generated AI slop submissions.
+- The gate has two layers: the **hard-signals layer** (blocked source branch, honeypot token, oversized diff, commit-author mismatch, protected-path tampering, suspicious account) auto-closes on a hit; the **soft-signals layer** (title format, template checklist, description length, profile completeness, etc.) only comments and labels, never auto-closes.
+- If a legitimate PR is flagged, restore the template, explain the local checks you ran, narrow the scope if needed, and reopen it. Open an issue first if extra context is required.
 - Prefer conventional PR titles such as `fix(server): ...` or `docs: ...`.
 - Do not remove sections from the PR template; fill in `Summary`, `What changed`, `Validation`, and `Related issues`.
 - Keep PRs small and well-scoped. Broad drive-by changes, vague descriptions, and missing validation details are much more likely to be flagged.
-- If a legitimate PR is flagged, restore the template, explain the local checks you ran, narrow the scope if needed, and reopen it. Open an issue first if extra context is required.
 
 ### Extension development guidance
 

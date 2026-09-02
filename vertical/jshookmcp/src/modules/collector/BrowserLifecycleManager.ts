@@ -1,6 +1,6 @@
 import type { Browser } from 'rebrowser-puppeteer-core';
 import { logger } from '@utils/logger';
-import { existsSync } from 'fs';
+import { existsSync } from 'node:fs';
 import { findBrowserExecutableAsync } from '@utils/browserExecutable';
 import {
   resolveChromeLaunchOptions,
@@ -26,6 +26,9 @@ export interface BrowserLifecycleOptions {
  * Extracted from CodeCollector to reduce class complexity.
  */
 export class BrowserLifecycleManager {
+  private readonly config: PuppeteerConfig;
+  private readonly viewport: { width: number; height: number };
+  private readonly onDisconnected: () => void;
   private browser: Browser | null = null;
   private chromePid: number | null = null;
   private currentLaunchOptions: ResolvedChromeLaunchOptions | null = null;
@@ -38,11 +41,14 @@ export class BrowserLifecycleManager {
   private static readonly BROWSER_CLOSE_TIMEOUT_MS = 5000;
 
   constructor(
-    private readonly config: PuppeteerConfig,
-    private readonly viewport: { width: number; height: number },
-    private readonly onDisconnected: () => void,
+    config: PuppeteerConfig,
+    viewport: { width: number; height: number },
+    onDisconnected: () => void,
     options?: BrowserLifecycleOptions,
   ) {
+    this.config = config;
+    this.viewport = viewport;
+    this.onDisconnected = onDisconnected;
     const configuredTimeout = options?.idleTimeoutMs ?? BROWSER_IDLE_TIMEOUT_MS;
     this.idleTimeoutMs = Number.isFinite(configuredTimeout) ? Math.max(0, configuredTimeout) : 0;
   }

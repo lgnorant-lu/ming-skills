@@ -816,4 +816,40 @@ describe('MemoryScanner', () => {
       expect(regions).toEqual([]);
     });
   });
+
+  describe('event-loop yielding (a4-01 / b3-09)', () => {
+    it('yields to the event loop during a multi-chunk first scan', async () => {
+      const setImmediateSpy = vi.spyOn(globalThis, 'setImmediate');
+
+      // One region spanning 9 chunks forces at least one yield (interval is 8).
+      const chunkSize = 16 * 1024 * 1024;
+      const regionSize = chunkSize * 9;
+      mockProvider.queryRegion.mockImplementation((_h, addr) => {
+        if (addr === 0n) {
+          return {
+            baseAddress: 0x10000n,
+            size: regionSize,
+            protection: 0x04,
+            state: 'committed',
+            type: 'private',
+            isReadable: true,
+            isWritable: true,
+            isExecutable: false,
+          } as any;
+        }
+        return null;
+      });
+
+      // Return a tiny buffer regardless of requested size to avoid 16 MiB allocs.
+      mockProvider.readMemory.mockImplementation((_h, _addr, size) => ({
+        data: Buffer.alloc(Math.min(size, 64)),
+        bytesRead: Math.min(size, 64),
+      }));
+
+      await scanner.firstScan(1234, '42', { valueType: 'int32', alignment: 4 });
+
+      expect(setImmediateSpy).toHaveBeenCalled();
+      setImmediateSpy.mockRestore();
+    });
+  });
 });

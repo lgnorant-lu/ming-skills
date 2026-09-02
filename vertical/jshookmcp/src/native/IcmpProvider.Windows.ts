@@ -6,7 +6,8 @@
  * @module IcmpProvider.Windows
  */
 
-import koffi, { type LibraryHandle } from 'koffi';
+import type { LibraryHandle } from 'koffi';
+import { requireKoffi } from './koffi-loader';
 import { logger } from '@utils/logger';
 import {
   ICMP_PROBE_TIMEOUT_MS,
@@ -96,7 +97,7 @@ let winIcmpFns: WinIcmpFns | null = null;
 
 function getIphlpapi(): LibraryHandle {
   if (!iphlpapi) {
-    iphlpapi = koffi.load('iphlpapi.dll');
+    iphlpapi = requireKoffi().load('iphlpapi.dll');
     logger.debug('Loaded iphlpapi.dll via koffi');
   }
   return iphlpapi;
@@ -104,7 +105,7 @@ function getIphlpapi(): LibraryHandle {
 
 function getWs2_32(): LibraryHandle {
   if (!ws2_32) {
-    ws2_32 = koffi.load('ws2_32.dll');
+    ws2_32 = requireKoffi().load('ws2_32.dll');
     logger.debug('Loaded ws2_32.dll via koffi');
   }
   return ws2_32;
@@ -188,7 +189,9 @@ function parseReply(buf: Buffer): { address: number; status: number; rtt: number
   //   x64 (ICMP_ECHO_REPLY):   Address(PVOID @0, 8B) Status(@8) RoundTripTime(@12)
   // Reading the 32-bit offsets on x64 shifts every field: "status" would read
   // the upper half of the Address pointer and "rtt" would read Status.
-  const is64 = process.arch === 'x64';
+  // ICMP_ECHO_REPLY layout differs by pointer width. Both x64 and ARM64 use
+  // 8-byte pointers (PVOID), so only the 32-bit x86 target uses the small layout.
+  const is64 = process.arch !== 'ia32';
   return {
     address: is64 ? Number(buf.readBigUInt64LE(0)) & 0xffffffff : buf.readUInt32LE(0),
     status: buf.readUInt32LE(is64 ? 8 : 4),
@@ -215,7 +218,7 @@ export class WindowsIcmpProvider extends BaseIcmpProvider {
   isAvailable(): boolean {
     if (process.platform !== 'win32') return false;
     try {
-      const lib = koffi.load('iphlpapi.dll');
+      const lib = requireKoffi().load('iphlpapi.dll');
       lib.unload();
       return true;
     } catch {

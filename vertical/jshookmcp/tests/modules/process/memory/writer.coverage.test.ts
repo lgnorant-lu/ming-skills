@@ -7,7 +7,7 @@ const state = vi.hoisted(() => ({
   executePowerShellScript: vi.fn(),
   execAsync: vi.fn(),
   nativeWriteMemory: vi.fn(),
-  isKoffiAvailable: vi.fn(),
+  isKoffiBindingUsable: vi.fn(),
   createPlatformProvider: vi.fn(),
 }));
 
@@ -23,7 +23,7 @@ vi.mock('@src/native/NativeMemoryManager', () => ({
 }));
 
 vi.mock('@src/native/Win32API', () => ({
-  isKoffiAvailable: state.isKoffiAvailable,
+  isKoffiBindingUsable: state.isKoffiBindingUsable,
 }));
 
 vi.mock('@native/platform/factory.js', () => ({
@@ -48,7 +48,7 @@ const MAX_BATCH = 1000;
 describe('memory/writer — coverage expansion', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    state.isKoffiAvailable.mockReturnValue(false);
+    state.isKoffiBindingUsable.mockReturnValue(false);
   });
 
   // ── writeMemoryWindows ──────────────────────────────────────────────────────
@@ -440,7 +440,7 @@ describe('memory/writer — coverage expansion', () => {
     });
 
     it('falls back to PowerShell when native Windows succeeds', async () => {
-      state.isKoffiAvailable.mockReturnValue(true);
+      state.isKoffiBindingUsable.mockReturnValue(true);
       state.nativeWriteMemory.mockResolvedValue({ success: true, bytesWritten: 4 });
 
       const result = await writeMemory('win32', 1, '0x1000', 'DEADBEEF', 'hex', vi.fn());
@@ -451,7 +451,7 @@ describe('memory/writer — coverage expansion', () => {
     });
 
     it('logs warn when native Windows write fails but PS fallback succeeds', async () => {
-      state.isKoffiAvailable.mockReturnValue(true);
+      state.isKoffiBindingUsable.mockReturnValue(true);
       state.nativeWriteMemory.mockResolvedValue({ success: false, error: 'no perms' });
       state.executePowerShellScript.mockResolvedValue({
         stdout: '{"success":true,"bytesWritten":8}',
@@ -469,7 +469,7 @@ describe('memory/writer — coverage expansion', () => {
     });
 
     it('logs warn when native Windows throws and PS fallback succeeds', async () => {
-      state.isKoffiAvailable.mockReturnValue(true);
+      state.isKoffiBindingUsable.mockReturnValue(true);
       state.nativeWriteMemory.mockRejectedValue(new Error('koffi crash'));
       state.executePowerShellScript.mockResolvedValue({
         stdout: '{"success":true,"bytesWritten":2}',
@@ -487,7 +487,7 @@ describe('memory/writer — coverage expansion', () => {
     });
 
     it('logs debug when native memory write succeeds on Windows', async () => {
-      state.isKoffiAvailable.mockReturnValue(true);
+      state.isKoffiBindingUsable.mockReturnValue(true);
       state.nativeWriteMemory.mockResolvedValue({ success: true, bytesWritten: 4 });
 
       const { logger } = await import('@src/utils/logger');
@@ -528,7 +528,7 @@ describe('memory/writer — coverage expansion', () => {
     it('catches outer non-Error thrown value (outer catch)', async () => {
       // We need to force a path where the switch-case function throws
       // Force through writeMemoryWindows with a non-standard rejection type
-      state.isKoffiAvailable.mockReturnValue(false);
+      state.isKoffiBindingUsable.mockReturnValue(false);
       state.executePowerShellScript.mockRejectedValueOnce(42);
 
       const result = await writeMemory('win32', 1, '0x1000', 'DEAD', 'hex', vi.fn());

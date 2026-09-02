@@ -1,4 +1,4 @@
-import { existsSync } from 'fs';
+import { existsSync } from 'node:fs';
 import type { Browser, Page, LaunchOptions } from 'rebrowser-puppeteer-core';
 import { logger } from '@utils/logger';
 import { findBrowserExecutableAsync } from '@utils/browserExecutable';

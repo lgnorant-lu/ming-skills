@@ -1,3 +1,5 @@
+import type { Tool } from '@modelcontextprotocol/server';
+
 /**
  * Central tool registry — single source of truth with lazy domain loading.
  *
@@ -9,7 +11,6 @@ function isSubset(a: string[], b: string[]): boolean {
   return a.every((x) => bSet.has(x));
 }
 
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type {
   DomainManifest,
   ToolHandlerDeps,
@@ -17,6 +18,7 @@ import type {
   ToolProfileId,
 } from '@server/registry/contracts';
 import type { ToolHandler } from '@server/types';
+import { registerCompiledValidator } from '@server/registry/compiled-validators';
 import {
   discoverDomainManifests,
   loadSingleManifest,
@@ -25,7 +27,25 @@ import {
 } from '@server/registry/discovery';
 import { DOMAIN_PROFILE_MAP } from '@server/registry/generated-domains.js';
 import { logger } from '@utils/logger';
-import { clearToolGroupsCache } from '@server/ToolCatalog';
+
+// ── Cache invalidation listeners ──
+//
+// ToolCatalog.ts caches views derived from this registry (toolGroups,
+// toolDomainByName, ...) and needs to invalidate them whenever a new domain
+// is loaded on demand. Rather than importing ToolCatalog here (which would
+// create an import cycle, since ToolCatalog imports registry builders),
+// ToolCatalog subscribes its own invalidation callback via
+// onRegistryInvalidate() at module load time.
+const invalidationListeners: Array<() => void> = [];
+
+/** Subscribe a callback to be invoked whenever registry state changes in a way that invalidates derived caches. */
+export function onRegistryInvalidate(listener: () => void): void {
+  invalidationListeners.push(listener);
+}
+
+function notifyInvalidation(): void {
+  for (const listener of invalidationListeners) listener();
+}
 
 // ── Lazy-init singleton ──
 
@@ -62,6 +82,7 @@ async function init(profile?: ToolProfileId): Promise<void> {
         } else {
           registrationsByName.set(registration.tool.name, registration);
         }
+        registerCompiledValidator(registration.tool);
       }
     }
     registrationsCache = [...registrationsByName.values()];
@@ -106,12 +127,13 @@ export async function ensureDomainLoaded(domainName: string): Promise<DomainMani
     if (!registrationsByName!.has(registration.tool.name)) {
       registrationsByName!.set(registration.tool.name, registration);
     }
+    registerCompiledValidator(registration.tool);
   }
   registrationsCache = [...registrationsByName!.values()];
 
   // Invalidate the ToolCatalog toolGroups cache so the next getToolsByDomains
   // call picks up the newly registered tools for this domain.
-  clearToolGroupsCache();
+  notifyInvalidation();
 
   // Update tool names view
   for (const r of manifest.registrations) {

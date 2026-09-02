@@ -4,13 +4,15 @@ type Listener = (payload: any) => void;
 
 const sandboxState = vi.hoisted(() => {
   class WorkerMock {
+    public readonly script: string;
+    public readonly options: Record<string, unknown>;
     public listeners = new Map<string, Listener[]>();
     public terminate = vi.fn(async () => 0);
 
-    constructor(
-      public readonly script: string,
-      public readonly options: Record<string, unknown>,
-    ) {}
+    constructor(script: string, options: Record<string, unknown>) {
+      this.script = script;
+      this.options = options;
+    }
 
     on(event: string, callback: Listener) {
       const callbacks = this.listeners.get(event) ?? [];

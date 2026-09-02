@@ -36,7 +36,10 @@ const LIB_PATH_RE = /^lib\/[^/]+\/(lib[^/]+\.so)$/i;
 
 /** Match an APK or an extracted APK directory against caller-supplied packer signatures. */
 export class PackerDetector {
-  constructor(private readonly defaults: readonly PackerSignature[] = DEFAULT_SIGNATURES) {}
+  private readonly defaults: readonly PackerSignature[];
+  constructor(defaults: readonly PackerSignature[] = DEFAULT_SIGNATURES) {
+    this.defaults = defaults;
+  }
 
   /** Scan a packaged `.apk` (or `.aab`) ZIP archive. */
   async detectFromApk(apkPath: string, opts: DetectOptions = {}): Promise<DetectionResult> {

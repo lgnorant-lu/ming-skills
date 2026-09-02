@@ -77,9 +77,9 @@ def get_client_windows(driver):
 
 
 def set_client_window_state(
-    driver, client_window, state=None, width=None, height=None, x=None, y=None
+    driver, client_window, state="normal", width=None, height=None, x=None, y=None
 ):
-    """设置窗口状态（Firefox 私有扩展，非 W3C 标准）。
+    """设置窗口状态（W3C WebDriver BiDi 标准命令）。
 
     Args:
         client_window: 窗口 ID。
@@ -96,15 +96,20 @@ def set_client_window_state(
             单位：屏幕像素。常见值：``0``、``80``。
 
     Returns:
-        dict: BiDi 命令返回结果，通常为空字典。
+        dict: 更新后的 ``ClientWindowInfo``。
 
     适用场景：
         - 验证窗口状态切换
         - 设置窗口大小与位置
     """
-    params = {"clientWindow": client_window}
-    if state:
-        params["state"] = state
+    states = {"normal", "minimized", "maximized", "fullscreen"}
+    if state not in states:
+        raise ValueError("state must be normal, minimized, maximized, or fullscreen")
+    geometry = (width, height, x, y)
+    if state != "normal" and any(value is not None for value in geometry):
+        raise ValueError("window geometry is only valid when state is normal")
+
+    params = {"clientWindow": client_window, "state": state}
     if width is not None:
         params["width"] = width
     if height is not None:

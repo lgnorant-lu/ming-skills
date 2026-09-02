@@ -247,4 +247,75 @@ describe('CpuEngine.callSymbol — L2 calling convention + control flow', () => 
     engine.loadElf(buildSo(code, [{ name: 'real', codeOffset: 0 }]));
     expect(() => engine.callSymbol('ghost', [])).toThrow(/symbol.*ghost|ghost.*not/i);
   });
+
+  it('default step budget (1M, not 100M) aborts a long counting loop early', () => {
+    // count: add x0,x0,#1 ; subs x2,x2,#1 ; b.ne -2 ; ret  (3 steps per iteration)
+    // With x2 = 100M the loop needs 300M steps, far beyond any budget, so the
+    // guard must abort it long before x0 reaches 100M. The return value x0
+    // reveals how many iterations ran: 1M budget → ≈333K, 100M budget → ≈33M.
+    const code = [
+      0x00,
+      0x04,
+      0x00,
+      0x91, // add x0, x0, #1
+      0x42,
+      0x04,
+      0x00,
+      0xf1, // subs x2, x2, #1
+      0xc1,
+      0xff,
+      0xff,
+      0x54, // b.ne -2 (back to add)
+      0xc0,
+      0x03,
+      0x5f,
+      0xd6, // ret
+    ];
+    const engine = new CpuEngine();
+    engine.loadElf(buildSo(code, [{ name: 'count', codeOffset: 0 }]));
+    const result = engine.callSymbol('count', [0, 0, 100_000_000]);
+    expect(result).toBeLessThan(1_000_000);
+  });
+
+  it('honors an explicit maxSteps and aborts a runaway loop quickly', () => {
+    // spin: b .  (branch-to-self — an infinite loop only the runaway guard can break)
+    const code = [0x00, 0x00, 0x00, 0x14]; // b #0
+    const engine = new CpuEngine();
+    engine.loadElf(buildSo(code, [{ name: 'spin', codeOffset: 0 }]));
+    const result = engine.callSymbol('spin', [], undefined, 10);
+    expect(result).toBe(0);
+    expect(engine.readRegister('pc')).toBe(0x1000);
+  });
+
+  it.each([0, -1])(
+    'treats a non-positive maxSteps (%d) as the 1M runaway guard instead of unlimited',
+    (maxSteps) => {
+      // count: add x0,x0,#1 ; subs x2,x2,#1 ; b.ne -2 ; ret (3 steps per iteration).
+      // With x2 = 500_000 the loop needs 1.5M steps: an unlimited budget would run
+      // it to completion (x0 = 500_000), while the 1M guard aborts around 333K.
+      const code = [
+        0x00,
+        0x04,
+        0x00,
+        0x91, // add x0, x0, #1
+        0x42,
+        0x04,
+        0x00,
+        0xf1, // subs x2, x2, #1
+        0xc1,
+        0xff,
+        0xff,
+        0x54, // b.ne -2 (back to add)
+        0xc0,
+        0x03,
+        0x5f,
+        0xd6, // ret
+      ];
+      const engine = new CpuEngine();
+      engine.loadElf(buildSo(code, [{ name: 'count', codeOffset: 0 }]));
+      const result = engine.callSymbol('count', [0, 0, 500_000], undefined, maxSteps);
+      expect(result).toBeGreaterThan(0);
+      expect(result).toBeLessThan(500_000);
+    },
+  );
 });

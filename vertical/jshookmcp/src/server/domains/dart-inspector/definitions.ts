@@ -1,12 +1,14 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import { tool } from '@server/registry/tool-builder';
 import {
+  DART_EXEC_MAX_STEPS,
   DART_MAX_MAP_BYTES,
   DART_MAX_OFFSETS_PER_STRING,
   DART_MAX_SMI_VALUE,
   DART_MIN_LENGTH,
   DART_MIN_LENGTH_CEILING,
   DART_MIN_LENGTH_FLOOR,
+  DART_TRACE_MAX_STEPS,
 } from '@src/constants/dart';
 
 export const dartInspectorTools: Tool[] = [
@@ -293,7 +295,7 @@ export const dartInspectorTools: Tool[] = [
         'Function arguments (Dart tagged pointers)',
       )
       .number('maxSteps', 'Maximum instruction steps before timeout', {
-        default: 100000,
+        default: DART_EXEC_MAX_STEPS,
         minimum: 1,
       })
       .boolean('traceExecution', 'Emit instruction trace in response', { default: false })
@@ -323,7 +325,11 @@ export const dartInspectorTools: Tool[] = [
       .string('libappPath', 'Absolute path to libapp.so')
       .string('functionAddress', 'Hex address of function entry point')
       .string('functionName', 'Function name (alternative to address)')
-      .number('maxSteps', 'Maximum steps to trace', { default: 1000, minimum: 1, maximum: 100000 })
+      .number('maxSteps', 'Maximum steps to trace', {
+        default: DART_TRACE_MAX_STEPS,
+        minimum: 1,
+        maximum: DART_EXEC_MAX_STEPS,
+      })
       .array(
         'args',
         { type: 'string', description: 'Argument as hex string' },

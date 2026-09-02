@@ -3,7 +3,7 @@ import { R } from '@server/domains/shared/ResponseBuilder';
 import type { ToolResponse } from '@server/types';
 
 export async function ensureNetworkEnabled(
-  deps: NetworkHandlerDeps,
+  deps: Pick<NetworkHandlerDeps, 'consoleMonitor'>,
   options: {
     autoEnable: boolean;
     enableExceptions: boolean;
@@ -64,9 +64,7 @@ export function buildNotEnabledResponse(autoEnable: boolean, error?: string): To
     .json();
 }
 
-export function getMergedNetworkRequestsFromMonitor(
-  monitor: NetworkHandlerDeps['consoleMonitor'],
-): Promise<unknown[]> {
-  // Re-export from request-merge to avoid circular dependency
-  return Promise.resolve(monitor.getNetworkRequests());
-}
+// Real merge implementation lives in request-merge.ts (CDP + injected XHR/Fetch
+// dedup). Re-export it here so the single source of truth is shared without a
+// circular dependency; the previous inline body skipped the merge entirely.
+export { getMergedNetworkRequestsFromMonitor } from '../request-merge';

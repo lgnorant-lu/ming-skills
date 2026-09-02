@@ -81,18 +81,36 @@ export type ScanCompareMode =
   | 'greater_than'
   | 'less_than'
   | 'between'
-  | 'not_equal';
+  | 'not_equal'
+  | 'changed_by'
+  | 'increased_by'
+  | 'decreased_by'
+  | 'changed_by_variable';
+
+/** Region filter for scan operations — generalized CE-style filter. */
+export interface RegionFilter {
+  /** Only scan writable regions */
+  writable?: boolean;
+  /** Only scan readable regions (default: true, always applied) */
+  readable?: boolean;
+  /** Only scan executable regions */
+  executable?: boolean;
+  /** Only module-backed (image) regions */
+  moduleOnly?: boolean;
+  /** Skip system modules (ntdll, kernel32, kernelbase, etc.) */
+  skipSystemModules?: boolean;
+  /** Only scan regions whose module name matches this pattern (case-insensitive substring) */
+  modulePattern?: string;
+  /** Skip regions smaller than N bytes */
+  minSize?: number;
+}
 
 /** Options bag for first-scan and unknown-initial-scan. */
 export interface ScanOptions {
   valueType: ScanValueType;
   alignment?: number;
   maxResults?: number;
-  regionFilter?: {
-    writable?: boolean;
-    executable?: boolean;
-    moduleOnly?: boolean;
-  };
+  regionFilter?: RegionFilter;
   onProgress?: (progress: number, total?: number) => void;
 }
 

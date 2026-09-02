@@ -20,17 +20,20 @@ export interface ProcessHandle {
 // ── Memory Protection ──
 
 /** Memory protection flags (platform-independent) */
-export enum MemoryProtection {
-  NoAccess = 0,
-  Read = 1 << 0, // 0x01
-  Write = 1 << 1, // 0x02
-  Execute = 1 << 2, // 0x04
-  ReadWrite = Read | Write, // 0x03
-  ReadExecute = Read | Execute, // 0x05
-  ReadWriteExecute = Read | Write | Execute, // 0x07
-  Guard = 1 << 3, // 0x08 — trap on first access
-  WriteCopy = 1 << 4, // 0x10 — copy-on-write
-}
+export const MemoryProtection = {
+  NoAccess: 0,
+  Read: 1 << 0, // 0x01
+  Write: 1 << 1, // 0x02
+  Execute: 1 << 2, // 0x04
+  ReadWrite: (1 << 0) | (1 << 1), // 0x03
+  ReadExecute: (1 << 0) | (1 << 2), // 0x05
+  ReadWriteExecute: (1 << 0) | (1 << 1) | (1 << 2), // 0x07
+  Guard: 1 << 3, // 0x08 — trap on first access
+  WriteCopy: 1 << 4, // 0x10 — copy-on-write
+} as const;
+
+/** Memory protection flag value */
+export type MemoryProtection = (typeof MemoryProtection)[keyof typeof MemoryProtection];
 
 // ── Memory Region ──
 

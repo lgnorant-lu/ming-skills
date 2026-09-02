@@ -25,6 +25,8 @@ export {
 export type { JITInfo } from '@modules/v8-inspector/JITInspector';
 export type { V8Version } from '@modules/v8-inspector/VersionDetector';
 export type { DominatorNode, LeakCandidate } from '@modules/v8-inspector/DominatorTreeBuilder';
+export type { HeapAnalysisResult } from '@modules/v8-inspector/HeapSnapshotParser';
+export type { TurboFanTraceResult } from '@modules/v8-inspector/TurboFanTraceCollector';
 export type {
   TurboFanIRGraph,
   TurboFanNode,

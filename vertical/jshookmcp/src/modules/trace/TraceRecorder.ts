@@ -310,6 +310,12 @@ export class TraceRecorder {
       const snapshotBuffer = Buffer.from(snapshotStr, 'utf-8');
       const summary = this.extractHeapSummary(snapshotStr);
 
+      // stop() may have closed the DB while we were awaiting the snapshot —
+      // re-check before touching the DB.
+      if (this.state !== 'recording' || !this.db) {
+        throw new Error('Cannot capture heap snapshot: recording stopped');
+      }
+
       this.db.insertHeapSnapshot({
         timestamp: Date.now(),
         snapshotData: snapshotBuffer,
@@ -422,7 +428,15 @@ export class TraceRecorder {
 
   /** Get the current session details (null if not recording). */
   getSession(): RecordingSession | null {
-    return this.session ? { ...this.session } : null;
+    if (!this.session) return null;
+    // this.session is snapshotted at start(); report live counters so
+    // mid-recording reads are not stale.
+    return {
+      ...this.session,
+      eventCount: this.eventCount,
+      memoryDeltaCount: this.memoryDeltaCount,
+      heapSnapshotCount: this.heapSnapshotCount,
+    };
   }
 
   /** Get the active TraceDB instance (null if not recording). */
@@ -636,7 +650,7 @@ export class TraceRecorder {
       return value === undefined ? '' : String(value);
     }
 
-    if ('value' in value) {
+    if (Object.hasOwn(value, 'value')) {
       const rawValue = value['value'];
       if (rawValue === null) return 'null';
       if (rawValue !== undefined) {
@@ -842,7 +856,7 @@ export class TraceRecorder {
         const selfSizeIndex = nodeFields.indexOf('self_size');
         const strings = (snapshot['strings'] as string[]) ?? [];
 
-        for (let i = 0; i < nodes.length; i += fieldCount) {
+        for (let i = 0; i + fieldCount <= nodes.length; i += fieldCount) {
           const selfSize = selfSizeIndex >= 0 ? (nodes[i + selfSizeIndex] ?? 0) : 0;
           totalSize += selfSize;
 

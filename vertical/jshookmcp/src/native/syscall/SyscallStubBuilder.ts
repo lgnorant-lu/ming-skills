@@ -1,16 +1,16 @@
-import koffi from 'koffi';
+import { requireKoffi, type KoffiLibraryHandle, type KoffiCallable } from '../koffi-loader';
 
-let _k32: ReturnType<typeof koffi.load> | null = null;
-function k32(): ReturnType<typeof koffi.load> {
-  if (!_k32) _k32 = koffi.load('kernel32.dll');
+let _k32: KoffiLibraryHandle | null = null;
+function k32(): KoffiLibraryHandle {
+  if (!_k32) _k32 = requireKoffi().load('kernel32.dll');
   return _k32;
 }
 
-let _Va: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
-let _Vf: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
-let _Vp: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
-let _Gcp: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
-let _Wpm: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _Va: KoffiCallable | null = null;
+let _Vf: KoffiCallable | null = null;
+let _Vp: KoffiCallable | null = null;
+let _Gcp: KoffiCallable | null = null;
+let _Wpm: KoffiCallable | null = null;
 
 const MEM_COMMIT = 0x1000;
 const MEM_RESERVE = 0x2000;
@@ -63,12 +63,25 @@ export function buildSyscallStub(ssn: number, gadgetAddr: bigint): SyscallStub {
 
   const self = _Gcp!() as unknown as bigint;
   const wrote = Buffer.alloc(8);
-  _Wpm!(self, base, koffi.address(stub), STUB_SIZE, koffi.address(wrote));
+  const wret = _Wpm!(
+    self,
+    base,
+    requireKoffi().address(stub),
+    STUB_SIZE,
+    requireKoffi().address(wrote),
+  );
+  if (!wret) {
+    // Page stays tracked in `_pages` — freeAllStubs() releases it.
+    throw new Error('WriteProcessMemory failed for stub page');
+  }
 
   const old = Buffer.alloc(4);
-  _Vp!(base, STUB_PAGE, PAGE_EXECUTE_READ, koffi.address(old));
+  const pret = _Vp!(base, STUB_PAGE, PAGE_EXECUTE_READ, requireKoffi().address(old));
+  if (!pret) {
+    throw new Error('VirtualProtect failed for stub page');
+  }
 
-  return { fn: koffi.decode(base, 'int32 (*)()') as () => number, addr: base };
+  return { fn: requireKoffi().decode(base, 'int32 (*)()') as () => number, addr: base };
 }
 
 export function freeAllStubs(): void {

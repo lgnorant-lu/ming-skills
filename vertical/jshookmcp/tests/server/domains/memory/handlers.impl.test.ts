@@ -7,6 +7,7 @@ import { StructureHandlers } from '../../../../src/server/domains/memory/handler
 import { HookHandlers } from '../../../../src/server/domains/memory/handlers/hooks';
 import { ReadWriteHandlers } from '../../../../src/server/domains/memory/handlers/readwrite';
 import { IntegrityHandlers } from '../../../../src/server/domains/memory/handlers/integrity';
+import { MonoHandlers } from '../../../../src/server/domains/memory/handlers/mono';
 
 // Mock all sub-handler classes
 vi.mock('../../../../src/server/domains/memory/handlers/session');
@@ -16,6 +17,7 @@ vi.mock('../../../../src/server/domains/memory/handlers/structure');
 vi.mock('../../../../src/server/domains/memory/handlers/hooks');
 vi.mock('../../../../src/server/domains/memory/handlers/readwrite');
 vi.mock('../../../../src/server/domains/memory/handlers/integrity');
+vi.mock('../../../../src/server/domains/memory/handlers/mono');
 
 describe('MemoryScanHandlers (Facade)', () => {
   let handlers: MemoryScanHandlers;
@@ -24,6 +26,8 @@ describe('MemoryScanHandlers (Facade)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     handlers = new MemoryScanHandlers(
+      {} as any,
+      {} as any,
       {} as any,
       {} as any,
       {} as any,
@@ -477,5 +481,55 @@ describe('MemoryScanHandlers (Facade)', () => {
     await handlers.handleIntegrityCheck(dummyArgs);
 
     expect(IntegrityHandlers.prototype.handleIntegrityCheck).toHaveBeenCalledWith(dummyArgs);
+  });
+
+  // ── Mono delegation ──
+
+  it('delegates handleMonoDetect to MonoHandlers.handleMonoDetect', async () => {
+    vi.mocked(MonoHandlers.prototype.handleMonoDetect as any).mockResolvedValue({
+      success: true,
+    });
+    await handlers.handleMonoDetect(dummyArgs);
+    expect(MonoHandlers.prototype.handleMonoDetect).toHaveBeenCalledWith(dummyArgs);
+  });
+
+  it('delegates handleMonoAssemblies to MonoHandlers.handleMonoAssemblies', async () => {
+    vi.mocked(MonoHandlers.prototype.handleMonoAssemblies as any).mockResolvedValue({
+      success: true,
+    });
+    await handlers.handleMonoAssemblies(dummyArgs);
+    expect(MonoHandlers.prototype.handleMonoAssemblies).toHaveBeenCalledWith(dummyArgs);
+  });
+
+  it('delegates handleMonoClasses to MonoHandlers.handleMonoClasses', async () => {
+    vi.mocked(MonoHandlers.prototype.handleMonoClasses as any).mockResolvedValue({
+      success: true,
+    });
+    await handlers.handleMonoClasses(dummyArgs);
+    expect(MonoHandlers.prototype.handleMonoClasses).toHaveBeenCalledWith(dummyArgs);
+  });
+
+  it('delegates handleMonoObjects to MonoHandlers.handleMonoObjects', async () => {
+    vi.mocked(MonoHandlers.prototype.handleMonoObjects as any).mockResolvedValue({
+      success: true,
+    });
+    await handlers.handleMonoObjects(dummyArgs);
+    expect(MonoHandlers.prototype.handleMonoObjects).toHaveBeenCalledWith(dummyArgs);
+  });
+
+  it('delegates handleMonoFields to MonoHandlers.handleMonoFields', async () => {
+    vi.mocked(MonoHandlers.prototype.handleMonoFields as any).mockResolvedValue({
+      success: true,
+    });
+    await handlers.handleMonoFields(dummyArgs);
+    expect(MonoHandlers.prototype.handleMonoFields).toHaveBeenCalledWith(dummyArgs);
+  });
+
+  it('delegates handleMonoMethods to MonoHandlers.handleMonoMethods', async () => {
+    vi.mocked(MonoHandlers.prototype.handleMonoMethods as any).mockResolvedValue({
+      success: true,
+    });
+    await handlers.handleMonoMethods(dummyArgs);
+    expect(MonoHandlers.prototype.handleMonoMethods).toHaveBeenCalledWith(dummyArgs);
   });
 });

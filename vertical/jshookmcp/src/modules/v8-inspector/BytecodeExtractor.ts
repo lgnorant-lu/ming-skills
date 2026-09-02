@@ -195,9 +195,11 @@ function formatUnavailableReason(result: Record<string, unknown>): string {
 }
 
 export class BytecodeExtractor {
+  private readonly getPage?: () => Promise<unknown>;
   private readonly versionDetector: VersionDetector;
 
-  constructor(private readonly getPage?: () => Promise<unknown>) {
+  constructor(getPage?: () => Promise<unknown>) {
+    this.getPage = getPage;
     this.versionDetector = new VersionDetector(getPage);
   }
 

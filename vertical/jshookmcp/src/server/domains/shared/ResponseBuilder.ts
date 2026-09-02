@@ -1,11 +1,19 @@
 import type { ToolResponse } from '@server/types';
 import type {
-  ImageContent,
+  AudioContent,
+  BlobResourceContents,
   EmbeddedResource,
+  ImageContent,
   TextContent,
-} from '@modelcontextprotocol/sdk/types.js';
+} from '@modelcontextprotocol/server';
 
 export type { ToolResponse };
+
+export type AdditionalContentBlock =
+  | ImageContent
+  | AudioContent
+  | EmbeddedResource
+  | { type: 'resource'; resource: BlobResourceContents };
 
 /**
  * Fluent builder for MCP tool responses.
@@ -23,7 +31,7 @@ export type { ToolResponse };
 export class ResponseBuilder {
   private payload: Record<string, unknown> = {};
   private hasMcpError = false;
-  private additionalContent: (ImageContent | EmbeddedResource)[] = [];
+  private additionalContent: AdditionalContentBlock[] = [];
   private useStructuredContent = false;
 
   /** Mark as success (sets `success: true`). */
@@ -82,6 +90,29 @@ export class ResponseBuilder {
     return this;
   }
 
+  /** Push a binary blob resource block (MCP 2.0 / 2025-11-25 BlobResourceContents). */
+  blobResource(uri: string, base64Blob: string, mimeType = 'application/octet-stream'): this {
+    this.additionalContent.push({
+      type: 'resource',
+      resource: {
+        uri,
+        blob: base64Blob,
+        mimeType,
+      },
+    });
+    return this;
+  }
+
+  /** Push an audio content block (MCP 2.0 / 2025-11-25 AudioContent). */
+  audio(base64Data: string, mimeType = 'audio/wav'): this {
+    this.additionalContent.push({
+      type: 'audio',
+      data: base64Data,
+      mimeType,
+    });
+    return this;
+  }
+
   /** Send output payload natively as `structuredContent` in the MCP envelope instead of stringifying inside text block. */
   structured(): this {
     this.useStructuredContent = true;
@@ -98,11 +129,21 @@ export class ResponseBuilder {
     }
     const textContent: TextContent = { type: 'text', text: JSON.stringify(this.payload, null, 2) };
     const content = [textContent, ...this.additionalContent];
+    // Carry the payload's `success` boolean on the envelope so the execution
+    // pipeline can read it without re-parsing the text content (see
+    // MCPServer.execution.ts success extraction). Note: the MCP SDK's
+    // CallToolResultSchema extends ResultSchema = z.looseObject(...) (zod
+    // passthrough), so it does NOT strip this unknown field — `success` reaches
+    // the client as-is. Clients parse tool results leniently, so the extra
+    // boolean is harmless. Keep the field: removing it would reintroduce the
+    // JSON.parse of the text content that the pipeline is avoiding.
+    const success = typeof this.payload.success === 'boolean' ? this.payload.success : undefined;
 
     return {
       content,
       ...(this.hasMcpError ? { isError: true } : {}),
       ...(this.useStructuredContent ? { structuredContent: this.payload } : {}),
+      ...(success !== undefined ? { success } : {}),
     } as ToolResponse;
   }
 

@@ -55,6 +55,27 @@ export async function resolveSafeOutputPath(
     throw new Error(`outputPath must be within the ${options.allowedRootsDescription}.`);
   }
 
+  // Symlink-aware containment: the string-level check above can be bypassed
+  // by a symlink inside a root that points outside it. Resolve the real path
+  // of the deepest existing ancestor of the candidate and require it to stay
+  // inside one of the (existing) roots' real paths. Roots that do not exist
+  // yet cannot host a symlink, so the string check already suffices for them.
+  const realCandidate = await resolveExistingAncestorRealPath(candidatePath);
+  let checkedExistingRoot = false;
+  for (const rootPath of normalizedRoots) {
+    const realRoot = await realpathIfExists(rootPath);
+    if (!realRoot) {
+      continue;
+    }
+    checkedExistingRoot = true;
+    if (isPathInsideOrEqual(realRoot, realCandidate)) {
+      return candidatePath;
+    }
+  }
+  if (checkedExistingRoot) {
+    throw new Error(`outputPath must be within the ${options.allowedRootsDescription}.`);
+  }
+
   return candidatePath;
 }
 
@@ -126,8 +147,10 @@ async function writeFileAtomically(
   options?: { rejectSymbolicLink?: boolean; allowedRoots?: string[] },
 ): Promise<void> {
   const parentDir = dirname(absolutePath);
-  await mkdir(parentDir, { recursive: true });
 
+  // Containment check runs BEFORE mkdir: creating directories is a write
+  // side-effect, so a parent that escapes the allowed roots must be refused
+  // before anything is created outside them.
   if (options?.allowedRoots?.length) {
     const normalizedAllowedRoots = await Promise.all(
       options.allowedRoots.map(async (rootPath) => {
@@ -139,6 +162,16 @@ async function writeFileAtomically(
     if (!normalizedAllowedRoots.some((rootPath) => isPathInsideOrEqual(rootPath, parentRealPath))) {
       throw new Error('outputPath parent directory escapes the allowed roots.');
     }
+  }
+
+  await mkdir(parentDir, { recursive: true });
+
+  // The path's final component must be a real file name — "." or ".."
+  // basenames would resolve the temp path / rename target to a directory
+  // reference and could wipe or misplace data.
+  const fileBaseName = basename(absolutePath);
+  if (!fileBaseName || fileBaseName === '.' || fileBaseName === '..') {
+    throw new Error('outputPath must point to a file name, not a directory reference.');
   }
 
   if (options?.rejectSymbolicLink !== false) {
@@ -166,7 +199,7 @@ async function writeFileAtomically(
 
   const tempPath = resolve(
     parentDir,
-    `.${basename(absolutePath)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`,
+    `.${fileBaseName}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`,
   );
 
   let handle: FileHandle | null = null;
@@ -190,7 +223,31 @@ async function writeFileAtomically(
       }
     }
 
-    await rm(absolutePath, { force: true });
+    // Some platforms (Windows) refuse to rename over an existing target.
+    // Clear the target's read-only bit instead of removing it: deleting
+    // first opens a window in which another process can create a fresh file
+    // that the rename would then silently overwrite. The chmod goes through
+    // the target's own handle — a path-based chmod would follow a swapped
+    // symlink — and only when the handle reports the same inode the lstat
+    // saw, so a file replaced in between is never touched.
+    const existingTarget = await lstat(absolutePath).catch(() => null);
+    if (existingTarget && (existingTarget.isDirectory() || existingTarget.isSymbolicLink())) {
+      throw new Error('outputPath must be a file path, not a directory or symbolic link.');
+    }
+    if (existingTarget?.isFile()) {
+      const targetHandle = await open(absolutePath, 'r').catch(() => null);
+      if (targetHandle) {
+        try {
+          const handleStat = await targetHandle.stat();
+          if (handleStat.ino !== existingTarget.ino) {
+            throw new Error('outputPath target changed while writing.');
+          }
+          await targetHandle.chmod(0o666);
+        } finally {
+          await closeHandle(targetHandle);
+        }
+      }
+    }
     await rename(tempPath, absolutePath);
   } catch (error) {
     await closeHandle(handle);

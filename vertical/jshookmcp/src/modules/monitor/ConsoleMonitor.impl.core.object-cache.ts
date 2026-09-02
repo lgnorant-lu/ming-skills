@@ -41,6 +41,9 @@ interface ObjectCacheContext {
   ensureSession(): Promise<void>;
   cdpSession: RuntimeGetPropertiesSessionLike | null;
   objectCache: Map<string, InspectedObjectProperties>;
+  /** In-flight getProperties promises, keyed by objectId, so concurrent
+   *  inspections of the same object share one CDP request. */
+  inflight?: Map<string, Promise<InspectedObjectProperties>>;
   MAX_OBJECT_CACHE_SIZE: number;
   extractValue(obj: CdpRemoteObjectLike): unknown;
 }
@@ -62,8 +65,15 @@ export async function inspectObjectCore(
     }
   }
 
-  try {
-    const result = await context.cdpSession.send('Runtime.getProperties', {
+  const inflight = (context.inflight ??= new Map<string, Promise<InspectedObjectProperties>>());
+  const pending = inflight.get(objectId);
+  if (pending) {
+    return pending;
+  }
+
+  const request = (async () => {
+    // Non-null: the check above already threw when cdpSession was null.
+    const result = await context.cdpSession!.send('Runtime.getProperties', {
       objectId,
       ownProperties: true,
       accessorPropertiesOnly: false,
@@ -100,9 +110,16 @@ export async function inspectObjectCore(
     });
 
     return properties;
-  } catch (error) {
+  })().catch((error) => {
     logger.error('Failed to inspect object:', error);
     throw error;
+  });
+
+  inflight.set(objectId, request);
+  try {
+    return await request;
+  } finally {
+    inflight.delete(objectId);
   }
 }
 

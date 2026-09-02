@@ -24,19 +24,34 @@ import {
   type NetworkRequestPayload,
 } from './handlers.base.types';
 import { getMergedNetworkRequestsFromMonitor } from './request-merge';
+import {
+  ensureNetworkEnabled as ensureNetworkEnabledHelper,
+  buildNotEnabledResponse,
+} from './handlers/core-handlers.helpers';
 import { handleSafe, R } from '@server/domains/shared/ResponseBuilder';
+import { ToolError } from '@errors/ToolError';
+import { NETWORK_SMART_HANDLE_THRESHOLD_BYTES } from '@src/constants';
 import type { ToolResponse } from '@server/types';
 
 export class NetworkHandlersCore {
+  protected collector: CodeCollector;
+  protected consoleMonitor: ConsoleMonitor;
+  protected eventBus?: EventBus<ServerEventMap>;
+  protected traceRecorderGetter?: () => TraceRecorder | null;
   protected performanceMonitor: PerformanceMonitor | null = null;
   protected detailedDataManager = getDetailedDataManager();
 
   constructor(
-    protected collector: CodeCollector,
-    protected consoleMonitor: ConsoleMonitor,
-    protected eventBus?: EventBus<ServerEventMap>,
-    protected traceRecorderGetter?: () => TraceRecorder | null,
-  ) {}
+    collector: CodeCollector,
+    consoleMonitor: ConsoleMonitor,
+    eventBus?: EventBus<ServerEventMap>,
+    traceRecorderGetter?: () => TraceRecorder | null,
+  ) {
+    this.collector = collector;
+    this.consoleMonitor = consoleMonitor;
+    this.eventBus = eventBus;
+    this.traceRecorderGetter = traceRecorderGetter;
+  }
 
   protected emit(event: keyof ServerEventMap, payload: ServerEventMap[keyof ServerEventMap]): void {
     void this.eventBus?.emit(event as never, payload);
@@ -77,30 +92,7 @@ export class NetworkHandlersCore {
     autoEnable: boolean;
     enableExceptions: boolean;
   }): Promise<{ enabled: boolean; autoEnabled: boolean; error?: string }> {
-    if (this.consoleMonitor.isNetworkEnabled()) {
-      return { enabled: true, autoEnabled: false };
-    }
-
-    if (!options.autoEnable) {
-      return { enabled: false, autoEnabled: false };
-    }
-
-    try {
-      await this.consoleMonitor.enable({
-        enableNetwork: true,
-        enableExceptions: options.enableExceptions,
-      });
-      return {
-        enabled: this.consoleMonitor.isNetworkEnabled(),
-        autoEnabled: true,
-      };
-    } catch (error) {
-      return {
-        enabled: false,
-        autoEnabled: false,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
+    return ensureNetworkEnabledHelper({ consoleMonitor: this.consoleMonitor }, options);
   }
 
   protected async getMergedNetworkRequests(): Promise<NetworkRequestPayload[]> {
@@ -201,32 +193,7 @@ export class NetworkHandlersCore {
       });
 
       if (!networkState.enabled) {
-        if (autoEnable && networkState.error) {
-          return R.fail('Failed to auto-enable network monitoring')
-            .merge({
-              detail: networkState.error,
-              solution: {
-                step1: 'Ensure browser page is active and reachable',
-                step2: 'Call network_enable manually',
-                step3: 'Navigate to target page: page_navigate(url)',
-                step4: 'Get requests: network_get_requests',
-              },
-            })
-            .json();
-        }
-
-        return R.fail(' Network monitoring is not enabled')
-          .merge({
-            requests: [],
-            total: 0,
-            solution: {
-              step1: 'Enable network monitoring: network_enable',
-              step2: 'Navigate to target page: page_navigate(url)',
-              step3: 'Get requests: network_get_requests',
-            },
-            tip: 'Set autoEnable=true to auto-enable monitoring in this call',
-          })
-          .json();
+        return buildNotEnabledResponse(autoEnable, networkState.error);
       }
 
       const url = asOptionalString(args.url);
@@ -434,7 +401,10 @@ export class NetworkHandlersCore {
           }),
       };
 
-      const processedResult = this.detailedDataManager.smartHandle(finalPayload, 25600);
+      const processedResult = await this.detailedDataManager.smartHandle(
+        finalPayload,
+        NETWORK_SMART_HANDLE_THRESHOLD_BYTES,
+      );
       return R.ok()
         .merge(processedResult as Record<string, unknown>)
         .json();
@@ -443,6 +413,14 @@ export class NetworkHandlersCore {
     }
   }
 
+  /**
+   * @deprecated Legacy base-class implementation. Production registration routes
+   * `network_get_response_body` to `CoreHandlers.handleNetworkGetResponseBody`
+   * (see `handlers/core-handlers.response-body.ts`). Kept only for the legacy
+   * `AdvancedHandlersBase` inheritance chain exercised by `runtime-requests.test.ts`.
+   * Behavior is kept in sync with the production handler, including the
+   * `skipped` response shape for bodies dropped over the single-body cap.
+   */
   async handleNetworkGetResponseBody(args: Record<string, unknown>): Promise<ToolResponse> {
     try {
       const requestId = asOptionalString(args.requestId) || '';
@@ -491,16 +469,39 @@ export class NetworkHandlersCore {
       }
 
       let body: { body: string; base64Encoded: boolean } | null = null;
+      let skippedReason: string | null = null;
       let attemptsMade = 0;
       for (let attempt = 0; attempt <= retries; attempt += 1) {
         attemptsMade = attempt + 1;
-        body = await this.consoleMonitor.getResponseBody(requestId);
+        try {
+          body = await this.consoleMonitor.getResponseBody(requestId);
+        } catch (error) {
+          const skipped = getSkippedBodyReason(error);
+          if (skipped !== null) {
+            skippedReason = skipped;
+            break;
+          }
+          throw error;
+        }
         if (body) {
           break;
         }
         if (attempt < retries) {
           await this.sleep(retryIntervalMs);
         }
+      }
+
+      if (skippedReason !== null) {
+        return R.fail(`Response body skipped for requestId: ${requestId}`)
+          .merge({
+            skipped: true,
+            reason: skippedReason,
+            attempts: attemptsMade,
+            hint:
+              'The response body was not captured because its size exceeds the single-body cap. ' +
+              'The request metadata is still available via network_get_requests.',
+          })
+          .json();
       }
 
       if (!body) {
@@ -624,4 +625,20 @@ export class NetworkHandlersCore {
     }
     logger.info('AdvancedHandlersBase cleaned up');
   }
+}
+
+/**
+ * Extracts the skip reason when a body fetch threw a `ToolError` carrying a
+ * `details.skipped` marker (set by `NetworkMonitor.getResponseBody` when the
+ * content-length exceeded the single-body cap). Returns `null` for any other
+ * error so callers rethrow it unchanged.
+ *
+ * Mirrors the canonical helper in `handlers/core-handlers.response-body.ts`
+ * (kept inline here so this deprecated base class needs no reverse import).
+ */
+function getSkippedBodyReason(error: unknown): string | null {
+  if (!(error instanceof ToolError)) return null;
+  const details = error.details;
+  if (!details || details.skipped !== true) return null;
+  return typeof details.reason === 'string' ? details.reason : error.message;
 }

@@ -407,7 +407,7 @@ ${activeHooks
 
     let savedPath: string;
     if (outputPath) {
-      const safePath = validateOutputPath(outputPath);
+      const safePath = await validateOutputPath(outputPath);
       await writeFile(safePath, wrapper, 'utf-8');
       savedPath = safePath;
     } else {

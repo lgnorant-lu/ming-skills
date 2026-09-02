@@ -1,5 +1,6 @@
 import type { CDPSessionLike } from '@modules/browser/CDPSessionLike';
 import { logger } from '@utils/logger';
+import { ToolError } from '@errors/ToolError';
 import type {
   NetworkMonitorLike,
   NetworkRequest,
@@ -114,6 +115,17 @@ const isResponseBodyPayload = (value: unknown): value is CDPResponseBodyPayload 
 const asStringRecord = (value: unknown): Record<string, string> =>
   isObjectRecord(value) ? (value as Record<string, string>) : {};
 
+/** Case-insensitive header lookup over a CDP headers record. */
+const getHeaderValue = (headers: UnknownRecord | undefined, name: string): string | undefined => {
+  if (!headers) return undefined;
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === name && typeof value === 'string') {
+      return value;
+    }
+  }
+  return undefined;
+};
+
 const toRuntimeEvaluateValue = (value: unknown): unknown => {
   if (!isObjectRecord(value)) {
     return undefined;
@@ -158,6 +170,13 @@ function normalizeRemoteAddress(ip: unknown, port: unknown): Record<string, unkn
 // ── NetworkMonitor implementation ──
 
 export class NetworkMonitor implements NetworkMonitorLike {
+  private cdpSession: CDPSessionLike;
+  private readonly identity: {
+    sessionId?: string;
+    targetId?: string;
+    targetType?: string;
+    requestIdPrefix?: string;
+  };
   private networkEnabled = false;
   private requests: Map<string, NetworkRequest> = new Map();
   private responses: Map<string, NetworkResponse> = new Map();
@@ -173,6 +192,12 @@ export class NetworkMonitor implements NetworkMonitorLike {
   private MAX_BODY_CACHE_BYTES = NETWORK_BODY_CACHE_MAX_TOTAL_BYTES;
   private MAX_SINGLE_BODY_CACHE_BYTES = NETWORK_BODY_CACHE_MAX_BODY_BYTES;
 
+  /** RequestIds pre-marked oversized via content-length (skip auto-capture fetch). */
+  private readonly skipBodyCapture = new Set<string>();
+  /** In-flight auto-capture fetches, bounded to avoid a getResponseBody flood. */
+  private autoCaptureInFlight = 0;
+  private readonly AUTO_CAPTURE_MAX_CONCURRENCY = 4;
+
   private networkListeners: {
     requestWillBeSent?: (params: unknown) => void;
     responseReceived?: (params: unknown) => void;
@@ -180,14 +205,16 @@ export class NetworkMonitor implements NetworkMonitorLike {
   } = {};
 
   constructor(
-    private cdpSession: CDPSessionLike,
-    private readonly identity: {
+    cdpSession: CDPSessionLike,
+    identity: {
       sessionId?: string;
       targetId?: string;
       targetType?: string;
       requestIdPrefix?: string;
     } = {},
   ) {
+    this.cdpSession = cdpSession;
+    this.identity = identity;
     // Mark as disabled on session drop — ConsoleMonitor will recreate us on reconnect
     this.cdpSession.on('disconnected', () => {
       logger.warn('NetworkMonitor: CDP session disconnected');
@@ -287,12 +314,27 @@ export class NetworkMonitor implements NetworkMonitorLike {
           ) as NetworkResponse['remoteAddress'],
         };
 
+        // Pre-check content-length so we never fetch an oversized body into
+        // memory during auto-capture (b1-06). Without content-length we keep
+        // the post-fetch size check as a fallback.
+        const contentLengthRaw = getHeaderValue(params.response.headers, 'content-length');
+        if (contentLengthRaw !== undefined) {
+          const contentLength = Number(contentLengthRaw);
+          if (Number.isFinite(contentLength) && contentLength > this.MAX_SINGLE_BODY_CACHE_BYTES) {
+            this.skipBodyCapture.add(scopedRequestId);
+            logger.debug(
+              `[BodyCache] Pre-skipping oversized body for ${scopedRequestId} (content-length=${contentLength})`,
+            );
+          }
+        }
+
         this.responses.set(scopedRequestId, response);
 
         if (this.responses.size > this.MAX_NETWORK_RECORDS) {
           const firstKey = this.responses.keys().next().value;
           if (firstKey) {
             this.responses.delete(firstKey);
+            this.skipBodyCapture.delete(firstKey);
           }
         }
 
@@ -352,6 +394,24 @@ export class NetworkMonitor implements NetworkMonitorLike {
     // Skip non-content responses
     if (response.fromCache) return;
 
+    // Skip bodies pre-marked oversized via the content-length pre-check (b1-06).
+    if (this.skipBodyCapture.has(requestId)) {
+      logger.debug(
+        `[BodyCache] Skipping oversized body for ${requestId} (content-length pre-check)`,
+      );
+      return;
+    }
+
+    // Bound concurrent auto-capture fetches so a burst of loadingFinished
+    // events cannot flood the CDP connection (b1-06).
+    if (this.autoCaptureInFlight >= this.AUTO_CAPTURE_MAX_CONCURRENCY) {
+      logger.debug(
+        `[BodyCache] Skipping auto-capture for ${requestId} (concurrency limit reached)`,
+      );
+      return;
+    }
+    this.autoCaptureInFlight++;
+
     try {
       const rawResult = (await this.sendCdp('Network.getResponseBody', {
         requestId: this.toRawRequestId(requestId),
@@ -395,6 +455,8 @@ export class NetworkMonitor implements NetworkMonitorLike {
       logger.debug(
         `[BodyCache] Could not capture body for ${requestId}: ${err instanceof Error ? err.message : String(err)}`,
       );
+    } finally {
+      this.autoCaptureInFlight--;
     }
   }
 
@@ -529,6 +591,29 @@ export class NetworkMonitor implements NetworkMonitorLike {
       return null;
     }
 
+    // Pre-check content-length so an explicit getResponseBody doesn't pull an
+    // oversized body into memory (b1-06 guarded auto-capture; this guards the
+    // direct path). Reuses the skipBodyCapture set populated on responseReceived.
+    // Throw (rather than return null) so the caller can distinguish a skipped
+    // body from a genuinely-not-found one and stop retrying.
+    if (this.skipBodyCapture.has(requestId)) {
+      logger.warn(
+        `Response body skipped for ${requestId}: content-length exceeds the single-body cap`,
+      );
+      throw new ToolError(
+        'NOT_FOUND',
+        `Response body skipped for ${requestId}: content-length exceeds the single-body cap`,
+        {
+          toolName: 'network_get_response_body',
+          details: {
+            skipped: true,
+            reason: 'content-length over single-body cap',
+            requestId,
+          },
+        },
+      );
+    }
+
     try {
       const rawResult = (await this.sendCdp('Network.getResponseBody', {
         requestId: this.toRawRequestId(requestId),
@@ -591,7 +676,17 @@ export class NetworkMonitor implements NetworkMonitorLike {
       const batch = candidates.slice(i, i + this.JS_RESPONSE_CONCURRENCY);
       const batchResults = await Promise.all(
         batch.map(async ([requestId, response]) => {
-          const bodyResult = await this.getResponseBody(requestId);
+          let bodyResult: { body: string; base64Encoded: boolean } | null = null;
+          try {
+            bodyResult = await this.getResponseBody(requestId);
+          } catch (error) {
+            // A skipped body (content-length over cap) is not an error for
+            // collection — omit this response exactly like a missing body.
+            if (error instanceof ToolError && error.details?.skipped === true) {
+              return null;
+            }
+            throw error;
+          }
           if (!bodyResult) {
             return null;
           }
@@ -632,6 +727,7 @@ export class NetworkMonitor implements NetworkMonitorLike {
     this.responses.clear();
     this.responseBodyCache.clear();
     this.responseBodyCacheSizes.clear();
+    this.skipBodyCapture.clear();
     this.responseBodyCacheBytes = 0;
     logger.info('Network records cleared');
   }

@@ -21,7 +21,7 @@ vi.mock('child_process', async (importOriginal) => {
 
 vi.mock('util', () => ({
   promisify: vi.fn((fn: any) => {
-    if (fn === (require('child_process') as { execFile: unknown }).execFile) {
+    if (fn === (require('node:child_process') as { execFile: unknown }).execFile) {
       return state.execFileAsync;
     }
     return state.execAsync;

@@ -135,30 +135,46 @@ export function hashBrowserFleetKey(value: string): number {
 }
 
 export class BrowserFleetLeaseError extends Error {
+  public readonly code:
+    | 'BROWSER_FLEET_LEASE_CAPACITY'
+    | 'BROWSER_FLEET_WRONG_WORKER'
+    | 'BROWSER_FLEET_LEASE_LOST'
+    | 'BROWSER_FLEET_WORKER_DRAINING';
+  public readonly targetWorkerId: string | null;
+  public readonly targetEndpoint: string | null;
+  public readonly fencingToken: string | null;
+  public readonly retryAfterMs: number | null;
   constructor(
     message: string,
-    public readonly code:
+    code:
       | 'BROWSER_FLEET_LEASE_CAPACITY'
       | 'BROWSER_FLEET_WRONG_WORKER'
       | 'BROWSER_FLEET_LEASE_LOST'
       | 'BROWSER_FLEET_WORKER_DRAINING',
-    public readonly targetWorkerId: string | null = null,
-    public readonly targetEndpoint: string | null = null,
-    public readonly fencingToken: string | null = null,
-    public readonly retryAfterMs: number | null = null,
+    targetWorkerId: string | null = null,
+    targetEndpoint: string | null = null,
+    fencingToken: string | null = null,
+    retryAfterMs: number | null = null,
   ) {
     super(message);
+    this.code = code;
+    this.targetWorkerId = targetWorkerId;
+    this.targetEndpoint = targetEndpoint;
+    this.fencingToken = fencingToken;
+    this.retryAfterMs = retryAfterMs;
     this.name = 'BrowserFleetLeaseError';
   }
 }
 
 /** Bounded single-process lease store for local mode and tests. */
 export class InMemoryBrowserFleetLeaseStore implements BrowserFleetLeaseStore {
+  private readonly maxLeases: number;
   private readonly leases = new Map<string, BrowserFleetLease>();
   private nextFencingToken = 1n;
   private rejectedLeases = 0;
 
-  constructor(private readonly maxLeases = DEFAULT_MAX_LOCAL_LEASES) {
+  constructor(maxLeases = DEFAULT_MAX_LOCAL_LEASES) {
+    this.maxLeases = maxLeases;
     if (!Number.isInteger(maxLeases) || maxLeases < 1) {
       throw new TypeError('maxLeases must be a positive integer');
     }
@@ -251,6 +267,8 @@ export class InMemoryBrowserFleetLeaseStore implements BrowserFleetLeaseStore {
  * worker uses assertLocal() before admitting browser work.
  */
 export class BrowserFleetRouter {
+  private readonly leaseStore: BrowserFleetLeaseStore;
+  private readonly now: () => number;
   private readonly localWorkerId: string;
   private readonly virtualNodes: number;
   private readonly leaseTtlMs: number;
@@ -266,9 +284,11 @@ export class BrowserFleetRouter {
 
   constructor(
     options: BrowserFleetRouterOptions,
-    private readonly leaseStore: BrowserFleetLeaseStore = new InMemoryBrowserFleetLeaseStore(),
-    private readonly now: () => number = () => Date.now(),
+    leaseStore: BrowserFleetLeaseStore = new InMemoryBrowserFleetLeaseStore(),
+    now: () => number = () => Date.now(),
   ) {
+    this.leaseStore = leaseStore;
+    this.now = now;
     this.localWorkerId = normalizeId(options.localWorkerId, 'localWorkerId');
     this.virtualNodes = positiveInteger(options.virtualNodes, DEFAULT_VIRTUAL_NODES);
     this.leaseTtlMs = positiveInteger(options.leaseTtlMs, DEFAULT_LEASE_TTL_MS);

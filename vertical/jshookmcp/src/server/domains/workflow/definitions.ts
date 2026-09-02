@@ -1,4 +1,4 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import { tool } from '@server/registry/tool-builder';
 import { getReverseEngineeringConfig } from '@utils/reverseEngineeringConfig';
 
@@ -230,13 +230,13 @@ export const workflowToolDefinitions: Tool[] = [
     t
       .desc(
         'Inspect the global workflow run store: list recent run_extension_workflow / run_macro runs, ' +
-          'get a run entry by runId, or fetch the last successful full result (stepResults, spans, metrics) for a workflow or macro id.',
+          'get a run entry by runId, or fetch the last successful run summary (runId, status, durationMs, stepResultKeys) for a workflow or macro id.',
       )
       .enum(
         'action',
         ['list', 'get', 'lastSuccess'],
         'Inspection action. "list" returns recent runs (optionally filtered by workflowId); ' +
-          '"get" returns one run entry by runId; "lastSuccess" returns the last ok result for a workflowId.',
+          '"get" returns one run entry by runId; "lastSuccess" returns the last successful run summary for a workflowId.',
         { default: 'list' },
       )
       .string('runId', 'Run id to fetch (action=get).')
@@ -249,11 +249,11 @@ export const workflowToolDefinitions: Tool[] = [
   tool('workflow_conditional_step', (t) =>
     t
       .desc(
-        'Evaluate a condition against previous workflow step results and execute one of two tool branches. ' +
+        'Evaluate a condition against the stepResults argument and execute one of two tool branches. ' +
           'Supports built-in predicates: always_true, always_false, any_step_failed, ' +
           'success_rate_gte_N (N=0-100), variable_equals_KEY_VALUE, variable_contains_KEY_VALUE, ' +
-          'variable_matches_KEY_REGEX. When stepResults is omitted, reads from the last successful ' +
-          'workflow run for the given workflowId.',
+          'variable_matches_KEY_REGEX. When stepResults is omitted, an empty set is used, so ' +
+          'value-based predicates (variable_*, success_rate_gte_N, any_step_failed) will not match.',
       )
       .string(
         'predicateId',
@@ -292,13 +292,14 @@ export const workflowToolDefinitions: Tool[] = [
         type: 'object',
         additionalProperties: true,
         description:
-          'Optional map of stepId → result to evaluate the predicate against. When omitted, ' +
-          'fetched from the last successful workflow run for workflowId.',
+          'Optional map of stepId → result to evaluate the predicate against. When omitted, an ' +
+          'empty set is used, so value-based predicates (variable_*, success_rate_gte_N, ' +
+          'any_step_failed) will not match.',
       })
       .string(
         'workflowId',
-        'Workflow or macro id used to look up the last successful run stepResults when ' +
-          'stepResults is not provided.',
+        'Deprecated. Retained for backward compatibility only; no longer used to resolve ' +
+          'stepResults (stepResults is read from args only).',
       )
       .requiredOpenWorld('predicateId', 'whenTrue'),
   ),

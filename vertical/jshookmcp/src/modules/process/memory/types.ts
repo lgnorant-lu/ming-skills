@@ -2,8 +2,8 @@
  * Shared types and utility helpers for the memory sub-modules.
  */
 
-import { exec, execFile } from 'child_process';
-import { promisify } from 'util';
+import { exec, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 export const execAsync = promisify(exec);
 export const execFileAsync = promisify(execFile);

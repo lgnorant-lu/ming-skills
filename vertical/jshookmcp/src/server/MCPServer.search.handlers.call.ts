@@ -92,18 +92,53 @@ export async function handleCallTool(
   // 3. { arguments: "{...}" }           — MCP clients that stringify the wrapper
   // 4. { url: ..., method: ... }        — spread flat (params are top-level keys, no wrapper)
   let toolArgs: Record<string, unknown> = {};
-  const rawArgs =
-    args.args ?? args.parameters ?? (typeof args.arguments === 'string' ? args.arguments : null);
-  if (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs)) {
-    toolArgs = rawArgs as Record<string, unknown>;
-  } else if (typeof rawArgs === 'string' && rawArgs.trim().length > 0) {
-    try {
-      const parsed = JSON.parse(rawArgs);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        toolArgs = parsed as Record<string, unknown>;
+  let wrapperError: string | null = null;
+  const argsValue = args.args;
+  const parametersValue = args.parameters;
+  const argumentsValue = args.arguments;
+
+  if (argsValue && typeof argsValue === 'object' && !Array.isArray(argsValue)) {
+    toolArgs = argsValue as Record<string, unknown>;
+  } else if (parametersValue !== undefined) {
+    if (parametersValue && typeof parametersValue === 'object' && !Array.isArray(parametersValue)) {
+      toolArgs = parametersValue as Record<string, unknown>;
+    } else if (typeof parametersValue === 'string' && parametersValue.trim().length > 0) {
+      try {
+        const parsed = JSON.parse(parametersValue);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          toolArgs = parsed as Record<string, unknown>;
+        }
+      } catch {
+        /* malformed parameters JSON — treated as no arguments */
       }
-    } catch {
-      /* malformed JSON — fall through to Format 4 */
+    }
+  } else if (argumentsValue !== undefined) {
+    // The arguments wrapper must never be silently dropped: the client
+    // explicitly sent it, so an unusable value is reported instead of
+    // invoking the tool with empty arguments.
+    if (typeof argumentsValue === 'string') {
+      if (argumentsValue.trim().length === 0) {
+        wrapperError = 'arguments must be a non-empty JSON string';
+      } else {
+        try {
+          const parsed = JSON.parse(argumentsValue);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            toolArgs = parsed as Record<string, unknown>;
+          } else {
+            wrapperError = 'arguments must decode to a JSON object';
+          }
+        } catch {
+          wrapperError = 'arguments must be valid JSON';
+        }
+      }
+    } else if (
+      argumentsValue &&
+      typeof argumentsValue === 'object' &&
+      !Array.isArray(argumentsValue)
+    ) {
+      toolArgs = argumentsValue as Record<string, unknown>;
+    } else {
+      wrapperError = 'arguments must be a JSON object or a JSON string';
     }
   }
 
@@ -120,6 +155,16 @@ export async function handleCallTool(
         toolArgs[k] = v;
       }
     }
+  }
+
+  if (wrapperError && Object.keys(toolArgs).length === 0) {
+    return asTextResponse(
+      JSON.stringify({
+        success: false,
+        error: wrapperError,
+        ...defaultMetadata,
+      }),
+    );
   }
 
   const callMetadata = defaultMetadata;

@@ -17,7 +17,10 @@ interface CaptchaHandlersDeps {
 }
 
 export class CaptchaHandlers {
-  constructor(private deps: CaptchaHandlersDeps) {}
+  private deps: CaptchaHandlersDeps;
+  constructor(deps: CaptchaHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handleCaptchaDetect(_args: Record<string, unknown>): Promise<ToolResponse> {
     return handleSafe(async () => {

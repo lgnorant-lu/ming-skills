@@ -12,7 +12,8 @@
  * @module HandleEnumerator
  */
 
-import koffi, { type LibraryHandle } from 'koffi';
+import type { LibraryHandle } from 'koffi';
+import { requireKoffi, type KoffiCallable } from './koffi-loader';
 import { logger } from '@utils/logger';
 import { OpenProcess, CloseHandle, isWindows, PROCESS_ACCESS } from './Win32API';
 
@@ -96,21 +97,21 @@ let ntdll: LibraryHandle | null = null;
 
 function getKernel32(): LibraryHandle {
   if (!kernel32) {
-    kernel32 = koffi.load('kernel32.dll');
+    kernel32 = requireKoffi().load('kernel32.dll');
   }
   return kernel32;
 }
 
 function getNtdll(): LibraryHandle {
   if (!ntdll) {
-    ntdll = koffi.load('ntdll.dll');
+    ntdll = requireKoffi().load('ntdll.dll');
   }
   return ntdll;
 }
 
 // ── FFI Function Accessors (lazy) ──
 
-let _NtQuerySystemInformation: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtQuerySystemInformation: KoffiCallable | null = null;
 function getNtQuerySystemInformation() {
   if (!_NtQuerySystemInformation) {
     _NtQuerySystemInformation = getNtdll().func(
@@ -120,7 +121,7 @@ function getNtQuerySystemInformation() {
   return _NtQuerySystemInformation;
 }
 
-let _NtQueryObject: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtQueryObject: KoffiCallable | null = null;
 function getNtQueryObject() {
   if (!_NtQueryObject) {
     _NtQueryObject = getNtdll().func(
@@ -130,7 +131,7 @@ function getNtQueryObject() {
   return _NtQueryObject;
 }
 
-let _DuplicateHandle: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _DuplicateHandle: KoffiCallable | null = null;
 function getDuplicateHandle() {
   if (!_DuplicateHandle) {
     _DuplicateHandle = getKernel32().func(
@@ -159,9 +160,9 @@ function querySystemHandleBuffer(): { buffer: Buffer; totalHandles: number } {
 
     status = getNtQuerySystemInformation()(
       SystemExtendedHandleInformation,
-      koffi.address(buf),
+      requireKoffi().address(buf),
       bufSize,
-      koffi.address(returnLen),
+      requireKoffi().address(returnLen),
     ) as number;
 
     const unsignedStatus = status >>> 0;
@@ -233,9 +234,9 @@ function queryHandleTypeName(dupHandle: bigint): string {
   const status = getNtQueryObject()(
     dupHandle,
     ObjectTypeInformation,
-    koffi.address(buf),
+    requireKoffi().address(buf),
     bufSize,
-    koffi.address(returnLen),
+    requireKoffi().address(returnLen),
   ) as number;
 
   if (status < 0) return 'Unknown';
@@ -271,9 +272,9 @@ function queryHandleObjectName(dupHandle: bigint): string {
     status = getNtQueryObject()(
       dupHandle,
       ObjectNameInformation,
-      koffi.address(buf),
+      requireKoffi().address(buf),
       bufSize,
-      koffi.address(returnLen),
+      requireKoffi().address(returnLen),
     ) as number;
 
     const unsignedStatus = status >>> 0;
@@ -310,7 +311,7 @@ function duplicateHandle(sourceProcessHandle: bigint, sourceHandleValue: number)
     sourceProcessHandle,
     BigInt(sourceHandleValue),
     CURRENT_PROCESS,
-    koffi.address(targetBuf),
+    requireKoffi().address(targetBuf),
     0, // desiredAccess (ignored with DUPLICATE_SAME_ACCESS)
     0, // inheritHandle = FALSE
     DUPLICATE_SAME_ACCESS,
@@ -379,6 +380,23 @@ export class HandleElevationError extends Error {
  * @returns Enumeration result with resolved handles
  */
 export function enumerateProcessHandles(pid: number, opts: EnumerateOptions = {}): EnumerateResult {
+  // Check koffi availability BEFORE the platform check. On a non-Windows
+  // machine the koffi binding is what makes this module usable at all
+  // (loading kernel32/ntdll), so a missing binding should be reported
+  // as the more actionable "koffi native library is not available" error
+  // rather than the generic platform error.
+  try {
+    requireKoffi();
+  } catch (err) {
+    return {
+      success: false,
+      entries: [],
+      totalSystemHandles: 0,
+      typeIndexCache: new Map(),
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
   if (!isWindows()) {
     return {
       success: false,

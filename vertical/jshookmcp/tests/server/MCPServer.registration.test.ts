@@ -60,11 +60,17 @@ describe('MCPServer.registration', () => {
     expect(mocks.getToolsForProfile).not.toHaveBeenCalled();
   });
 
-  it('respects an explicit valid profile when domains are not set', () => {
+  it('respects an explicit valid profile when domains are not set', async () => {
     vi.stubEnv('MCP_TRANSPORT', 'HTTP');
     vi.stubEnv('MCP_TOOL_PROFILE', 'workflow');
+    // MCP_TRANSPORT is resolved into a constant at module load time, so the
+    // module must be re-imported after setting the env var for the constant to
+    // see 'HTTP' (vi.mock registrations survive vi.resetModules).
+    vi.resetModules();
+    const { resolveToolsForRegistration: reloaded } =
+      await import('@server/MCPServer.registration');
 
-    const result = resolveToolsForRegistration();
+    const result = reloaded();
 
     expect(result).toEqual({
       tools: [{ name: 'browser_launch' }],

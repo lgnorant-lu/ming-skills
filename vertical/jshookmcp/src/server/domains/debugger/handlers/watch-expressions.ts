@@ -16,7 +16,10 @@ function getErrorMessage(error: unknown): string {
 }
 
 export class WatchExpressionsHandlers {
-  constructor(private deps: WatchExpressionsHandlersDeps) {}
+  private deps: WatchExpressionsHandlersDeps;
+  constructor(deps: WatchExpressionsHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handleWatchAdd(args: Record<string, unknown>) {
     try {

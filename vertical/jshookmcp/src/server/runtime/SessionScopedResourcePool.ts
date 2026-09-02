@@ -32,14 +32,16 @@ interface ResourceEntry<T extends object> {
 }
 
 export class SessionScopedResourcePoolCapacityError extends Error {
+  public readonly size: number;
+  public readonly limit: number;
+  public readonly retryAfterMs: number;
   readonly code = 'SESSION_RESOURCE_POOL_CAPACITY';
 
-  constructor(
-    public readonly size: number,
-    public readonly limit: number,
-    public readonly retryAfterMs: number,
-  ) {
+  constructor(size: number, limit: number, retryAfterMs: number) {
     super(`Session resource pool is full (${size}/${limit})`);
+    this.size = size;
+    this.limit = limit;
+    this.retryAfterMs = retryAfterMs;
     this.name = 'SessionScopedResourcePoolCapacityError';
   }
 }
@@ -49,6 +51,8 @@ export class SessionScopedResourcePoolCapacityError extends Error {
  * stable proxy that existing domain handlers can keep as a dependency.
  */
 export class SessionScopedResourcePool<T extends object> {
+  private readonly createResource: (sessionId: string) => T;
+  private readonly disposeResource?: ResourceDisposer<T>;
   private readonly resources = new Map<string, ResourceEntry<T>>();
   private proxy: T | null = null;
   private readonly maxResources: number;
@@ -56,10 +60,12 @@ export class SessionScopedResourcePool<T extends object> {
   private readonly now: () => number;
 
   constructor(
-    private readonly createResource: (sessionId: string) => T,
-    private readonly disposeResource?: ResourceDisposer<T>,
+    createResource: (sessionId: string) => T,
+    disposeResource?: ResourceDisposer<T>,
     options: SessionScopedResourcePoolOptions = {},
   ) {
+    this.createResource = createResource;
+    this.disposeResource = disposeResource;
     this.maxResources = this.positiveInteger(options.maxResources, DEFAULT_MAX_RESOURCES);
     this.idleTtlMs = this.positiveInteger(options.idleTtlMs, DEFAULT_IDLE_TTL_MS);
     this.now = options.now ?? (() => Date.now());

@@ -109,7 +109,7 @@ describe('human-behavior runtime coverage', () => {
 
   it('clears the field and simulates typos while typing punctuation', async () => {
     const page = createPage({
-      querySelector: vi.fn(() => ({ value: 'old' })),
+      querySelector: vi.fn(() => ({ value: 'old', dispatchEvent: vi.fn() })),
     });
     const collector = createCollector(page);
     vi.spyOn(Math, 'random').mockReturnValue(0.1);
@@ -141,6 +141,7 @@ describe('human-behavior runtime coverage', () => {
     const frameDocument = {
       querySelector: vi.fn(() => ({
         value: 'old',
+        dispatchEvent: vi.fn(),
         getBoundingClientRect: () => ({ x: 10, y: 20, width: 30, height: 40 }),
       })),
     };

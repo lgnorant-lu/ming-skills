@@ -218,24 +218,6 @@ describe('AdvancedToolHandlers — dispatch methods (handlers.impl.ts coverage)'
     });
   });
 
-  // ── handleProfilerHeapSamplingDispatch ─────────────────────────────────────
-
-  describe('handleProfilerHeapSamplingDispatch', () => {
-    it('routes action=stop to handleProfilerHeapSamplingStop', async () => {
-      const res = parseJson<NetworkRequestsResponse>(
-        await handlers.handleProfilerHeapSamplingDispatch({ action: 'stop' }),
-      );
-      expect(res).toBeDefined();
-    });
-
-    it('routes action=start (non-stop) to handleProfilerHeapSamplingStart', async () => {
-      const res = parseJson<NetworkRequestsResponse>(
-        await handlers.handleProfilerHeapSamplingDispatch({ action: 'start' }),
-      );
-      expect(res).toBeDefined();
-    });
-  });
-
   // ── handleNetworkInterceptDispatch ─────────────────────────────────────────
 
   describe('handleNetworkInterceptDispatch', () => {

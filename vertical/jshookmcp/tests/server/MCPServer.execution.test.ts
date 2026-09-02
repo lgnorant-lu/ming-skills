@@ -49,6 +49,7 @@ vi.mock('@server/runtime/ServerRuntimeState', () => ({
 }));
 
 import { executeToolWithTracking } from '@server/MCPServer.execution';
+import { R } from '@server/domains/shared/ResponseBuilder';
 import type { MCPServerContext } from '@server/MCPServer.context';
 
 function createMockCtx(routerExecute: () => Promise<unknown>): MCPServerContext {
@@ -113,5 +114,35 @@ describe('executeToolWithTracking — error path', () => {
     expect(text.error).toBe('queue full');
     expect(mocks.logger.error).not.toHaveBeenCalled();
     expect(ctx.circuitBreaker.recordFailure).not.toHaveBeenCalled();
+  });
+});
+
+describe('executeToolWithTracking — success-flag extraction (a1-02)', () => {
+  it('does not JSON.parse the response text when the ResponseBuilder success flag is present', async () => {
+    const parseSpy = vi.spyOn(JSON, 'parse');
+    try {
+      const ctx = createMockCtx(async () => R.ok().json());
+      await executeToolWithTracking(ctx, 'page_navigate', {});
+      expect(ctx.circuitBreaker.recordSuccess).toHaveBeenCalledWith('page_navigate');
+      expect(ctx.circuitBreaker.recordFailure).not.toHaveBeenCalled();
+      expect(parseSpy).not.toHaveBeenCalled();
+    } finally {
+      parseSpy.mockRestore();
+    }
+  });
+
+  it('records failure for a ResponseBuilder soft failure via the success flag', async () => {
+    const ctx = createMockCtx(async () => R.fail('boom').json());
+    await executeToolWithTracking(ctx, 'page_navigate', {});
+    expect(ctx.circuitBreaker.recordFailure).toHaveBeenCalledWith('page_navigate');
+    expect(ctx.circuitBreaker.recordSuccess).not.toHaveBeenCalled();
+  });
+
+  it('still detects success:false in raw text responses without a success flag (parse fallback)', async () => {
+    const ctx = createMockCtx(async () => ({
+      content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'raw' }) }],
+    }));
+    await executeToolWithTracking(ctx, 'page_navigate', {});
+    expect(ctx.circuitBreaker.recordFailure).toHaveBeenCalledWith('page_navigate');
   });
 });

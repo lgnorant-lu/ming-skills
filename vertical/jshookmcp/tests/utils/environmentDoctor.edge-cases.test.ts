@@ -279,13 +279,13 @@ describe('environmentDoctor edge cases (require-mocked)', () => {
     expect(pkg!.detail).toBe('installed');
   });
 
-  // ── checkPackage missingHint ?? 'Not installed' branch (L166) ──
+  // ── checkPackage missingHint ?? 'Not installed' branch ──
 
   it('uses default "Not installed" when missing package has no missingHint', async () => {
-    // @modelcontextprotocol/sdk has no missingHint argument
-    blockedPackages.add('@modelcontextprotocol/sdk');
+    // @modelcontextprotocol/core has no missingHint argument
+    blockedPackages.add('@modelcontextprotocol/core');
     const report = await runEnvironmentDoctor({ includeBridgeHealth: false });
-    const sdk = report.packages.find((p) => p.name === '@modelcontextprotocol/sdk');
+    const sdk = report.packages.find((p) => p.name === '@modelcontextprotocol/core');
     expect(sdk).toBeDefined();
     expect(sdk!.status).toBe('missing');
     expect(sdk!.detail).toBe('Not installed');

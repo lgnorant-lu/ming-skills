@@ -1,5 +1,6 @@
 // Runtime domain discovery via static generated index
 import { logger } from '@utils/logger';
+import { readEnvBoolean } from '@src/config/environment';
 import type { DomainManifest } from '@server/registry/contracts';
 import { generatedManifestLoaders, DOMAIN_PROFILE_MAP } from './generated-domains.js';
 
@@ -111,7 +112,7 @@ export async function discoverDomainManifests(
       );
     } catch (err) {
       logger.error(`[discovery] Failed to load domain "${domainName}"`, err);
-      if (process.env.DISCOVERY_STRICT === 'true') {
+      if (readEnvBoolean('DISCOVERY_STRICT', false)) {
         throw err;
       }
     }

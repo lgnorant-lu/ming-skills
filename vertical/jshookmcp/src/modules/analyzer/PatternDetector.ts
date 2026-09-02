@@ -10,6 +10,17 @@ import {
   detectSignaturePatternsInternal,
   detectTokenPatternsInternal,
 } from '@modules/analyzer/PatternDetectorAuthPatterns';
+import {
+  PATTERN_CONFIDENCE_ENCRYPTION_LOG,
+  PATTERN_CONFIDENCE_ENCRYPTION_POST,
+  PATTERN_CONFIDENCE_ENCRYPTION_URL,
+  PATTERN_LOG_PRIORITY_ERROR,
+  PATTERN_LOG_PRIORITY_WARN,
+  PATTERN_PRIORITY_KEYWORD_WEIGHT,
+  PATTERN_PRIORITY_METHOD_WEIGHT,
+  PATTERN_PRIORITY_POSTDATA_WEIGHT,
+  PATTERN_PRIORITY_URL_LENGTH_DIVISOR,
+} from '@src/constants';
 
 export const BLACKLIST_DOMAINS = [
   'google-analytics.com',
@@ -65,16 +76,16 @@ export const FRAMEWORK_LOG_KEYWORDS = [
 export function calculateRequestPriority(req: NetworkRequest): number {
   let score = 0;
 
-  if (req.method === 'POST' || req.method === 'PUT') score += 10;
+  if (req.method === 'POST' || req.method === 'PUT') score += PATTERN_PRIORITY_METHOD_WEIGHT;
 
   const keywordCount = WHITELIST_KEYWORDS.filter((keyword) =>
     req.url.toLowerCase().includes(keyword),
   ).length;
-  score += keywordCount * 5;
+  score += keywordCount * PATTERN_PRIORITY_KEYWORD_WEIGHT;
 
-  if (req.postData) score += 5;
+  if (req.postData) score += PATTERN_PRIORITY_POSTDATA_WEIGHT;
 
-  score += Math.floor(req.url.length / 100);
+  score += Math.floor(req.url.length / PATTERN_PRIORITY_URL_LENGTH_DIVISOR);
 
   return score;
 }
@@ -130,14 +141,14 @@ export function filterCriticalResponses(responses: NetworkResponse[]): NetworkRe
 export function calculateLogPriority(log: ConsoleMessage): number {
   let score = 0;
 
-  if (log.type === 'error') score += 20;
+  if (log.type === 'error') score += PATTERN_LOG_PRIORITY_ERROR;
   /* v8 ignore next */
-  if (log.type === 'warn') score += 10;
+  if (log.type === 'warn') score += PATTERN_LOG_PRIORITY_WARN;
 
   const keywordCount = WHITELIST_KEYWORDS.filter((keyword) =>
     log.text.toLowerCase().includes(keyword),
   ).length;
-  score += keywordCount * 5;
+  score += keywordCount * PATTERN_PRIORITY_KEYWORD_WEIGHT;
 
   return score;
 }
@@ -207,7 +218,7 @@ export function detectEncryptionPatterns(
           patterns.push({
             type,
             location: req.url,
-            confidence: 0.7,
+            confidence: PATTERN_CONFIDENCE_ENCRYPTION_URL,
             evidence: [keyword, 'Found in URL'],
           });
         }
@@ -224,7 +235,7 @@ export function detectEncryptionPatterns(
             patterns.push({
               type,
               location: req.url,
-              confidence: 0.8,
+              confidence: PATTERN_CONFIDENCE_ENCRYPTION_POST,
               evidence: [keyword, 'Found in POST data'],
             });
           }
@@ -242,7 +253,7 @@ export function detectEncryptionPatterns(
           patterns.push({
             type,
             location: /* v8 ignore next */ log.url || 'console',
-            confidence: 0.9,
+            confidence: PATTERN_CONFIDENCE_ENCRYPTION_LOG,
             evidence: [keyword, 'Found in console log', log.text.substring(0, 100)],
           });
         }

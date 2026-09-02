@@ -7,17 +7,20 @@
 
 import type { DomainManifest } from '@server/registry/contracts';
 import type { MCPServerContext } from '@server/MCPServer.context';
+import type { HardwareBreakpointEngine } from '@native/HardwareBreakpoint';
 import { memoryScanToolDefinitions } from './definitions';
 import type { MemoryScanHandlers } from './handlers.impl';
 import { UnifiedProcessManager } from '@server/domains/shared/modules/native';
+import { readEnvString } from '@src/config/environment';
 
 const DOMAIN = 'memory' as const;
 const DEP_KEY = 'memoryScanHandlers' as const;
+const configuredPlatform = readEnvString('JSHOOK_REGISTRY_PLATFORM', '', { trim: true });
 const EFFECTIVE_PLATFORM =
-  process.env.JSHOOK_REGISTRY_PLATFORM === 'win32' ||
-  process.env.JSHOOK_REGISTRY_PLATFORM === 'linux' ||
-  process.env.JSHOOK_REGISTRY_PLATFORM === 'darwin'
-    ? process.env.JSHOOK_REGISTRY_PLATFORM
+  configuredPlatform === 'win32' ||
+  configuredPlatform === 'linux' ||
+  configuredPlatform === 'darwin'
+    ? configuredPlatform
     : process.platform;
 const IS_WIN32 = EFFECTIVE_PLATFORM === 'win32';
 type H = MemoryScanHandlers;
@@ -30,6 +33,11 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
   globalContext = ctx;
   const ctxAny = ctx as unknown as Record<string, unknown>;
   if (ctxAny[DEP_KEY]) return ctxAny[DEP_KEY] as H;
+
+  // Startup cleanup: reclaim stale jshook-scan-*.bin orphans and arm the
+  // idle-expiry sweep for disk-backed scan sessions. Idempotent.
+  const { initDiskScanPersistence } = await import('./handlers/scan-persistence');
+  initDiskScanPersistence();
 
   // Dynamic imports: load native koffi modules AND handler lazily — only when memory domain is accessed.
   // Cross-platform modules (always loaded)
@@ -56,8 +64,17 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
 
   if (IS_WIN32) {
     // Lazy-load Win32-only engines — only load on Windows
-    const [hardwareBreakpointEngine, speedhack, peAnalyzer, antiCheatDetector] = await Promise.all([
+    const [
+      hardwareBreakpointEngine,
+      vehDebuggerEngine,
+      softwareBreakpointEngine,
+      speedhack,
+      peAnalyzer,
+      antiCheatDetector,
+    ] = await Promise.all([
       import('@native/HardwareBreakpoint'),
+      import('@native/VehDebugger'),
+      import('@native/SoftwareBreakpoint'),
       import('@native/Speedhack'),
       import('@native/PEAnalyzer'),
       import('@native/AntiCheatDetector'),
@@ -69,6 +86,8 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
       pointerChainEngine.pointerChainEngine,
       structureAnalyzer.structureAnalyzer,
       hardwareBreakpointEngine.hardwareBreakpointEngine,
+      vehDebuggerEngine.vehDebuggerEngine,
+      softwareBreakpointEngine.softwareBreakpointEngine,
       codeInjector.codeInjector,
       memoryController.memoryController,
       speedhack.speedhack,
@@ -80,14 +99,18 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
       ctx,
     );
   } else {
-    // macOS/Linux: Win32-only engines not available — pass null.
-    // heapAnalyzer is always wired (cross-platform region-based fallback).
+    // macOS/Linux: cross-platform modules always wired.
+    // Hardware breakpoints now cross-platform via CrossPlatformBreakpointEngine
+    // (ptrace PTRACE_POKEUSER on Linux, Mach thread_set_state on macOS).
+    const crossPlatformBp = await import('@native/CrossPlatformBreakpointEngine');
     ctxAny[DEP_KEY] = new MemoryScanHandlers(
       memoryScanner.memoryScanner,
       scanSessionManager.scanSessionManager,
       pointerChainEngine.pointerChainEngine,
       structureAnalyzer.structureAnalyzer,
-      null, // hardwareBreakpointEngine — Win32 DR0-DR3 only; cross-platform ptrace/mach_vm_protect parity pending (research/memory.md #3)
+      crossPlatformBp.crossPlatformBreakpointEngine as unknown as HardwareBreakpointEngine,
+      null, // vehDebuggerEngine — Win32 VEH only; requires code injection
+      null, // softBpEngine — Win32 INT3 only; requires Win32 debug APIs
       codeInjector.codeInjector,
       memoryController.memoryController,
       null, // speedhack
@@ -129,13 +152,35 @@ function toolByName(name: string) {
 const WIN32_ONLY_TOOLS = new Set([
   // Heap analysis now cross-platform: HeapAnalyzer has a region-based fallback
   // (readProcMapsRegions / /proc/pid/maps) and is always wired (E5-D-heap).
-  // Hardware breakpoints (debug registers) — Win32 DR0-DR3 only. Cross-platform parity
-  // (Linux ptrace INT3 + SIGTRAP; macOS mach_vm_protect + EXC_BAD_ACCESS) pending —
-  // see research/memory.md #3. find_accesses also needs process_vm_readv/mach_vm_read.
-  'memory_breakpoint',
-  'memory_find_accesses',
+  // Hardware breakpoints are now cross-platform via CrossPlatformBreakpointEngine:
+  //   Win32  → DR0-DR3 via Win32 debug API
+  //   Linux  → DR0-DR3 via ptrace PTRACE_POKEUSER
+  //   macOS  → ARM64 DBGBVR/DBGWVR via Mach thread_set_state
+  // memory_breakpoint and memory_find_accesses are registered on all platforms.
   // Speedhack (Win32 timer hooking — LD_PRELOAD parity pending — E5-D)
   'memory_speedhack',
+  // Mono/.NET runtime introspection (Win32 ReadProcessMemory via Unity mono-2.0-bdwgc.dll)
+  'memory_mono_detect',
+  'memory_mono_assemblies',
+  'memory_mono_classes',
+  'memory_mono_objects',
+  'memory_mono_fields',
+  'memory_mono_methods',
+  // Code injection tools — Win32 VirtualAllocEx/VirtualFreeEx/CreateRemoteThread
+  'memory_allocate',
+  'memory_free',
+  'memory_inject_shellcode',
+  'memory_inject_dll',
+  'memory_handle_enum',
+  // Auto Assembler — Win32 VirtualAllocEx/VirtualFreeEx/CreateRemoteThread/AOB scan
+  'memory_auto_assemble',
+  'memory_auto_assemble_disable',
+  // Call stack walking — Win32 kernel32/dbghelp koffi
+  'memory_call_stack',
+  // Ultimap-style INT3 code tracing — Win32 debug API
+  'memory_trace_code',
+  // EPT Hypervisor — Intel VT-x + Win32 kernel driver
+  'memory_hypervisor',
 ]);
 
 // All tool registrations — then filtered by platform
@@ -171,6 +216,11 @@ const allRegistrations = [
     domain: DOMAIN,
     bind: bindByKey((h, a) => h.handleScanSessionDispatch(a)),
   },
+  {
+    tool: toolByName('memory_search_string'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleSearchString(a)),
+  },
   // ── Pointer Chain Tools ──
   {
     tool: toolByName('memory_pointer_chain'),
@@ -198,7 +248,7 @@ const allRegistrations = [
     domain: DOMAIN,
     bind: bindByKey((h, a) => h.handleStructureCompare(a)),
   },
-  // ── Breakpoint Tools (Win32-only) ──
+  // ── Breakpoint Tools (cross-platform via CrossPlatformBreakpointEngine) ──
   {
     tool: toolByName('memory_breakpoint'),
     domain: DOMAIN,
@@ -225,11 +275,42 @@ const allRegistrations = [
     domain: DOMAIN,
     bind: bindByKey((h, a) => h.handleCodeCaves(a)),
   },
+  // ── Code Injection Tools (Win32 only) ──
+  {
+    tool: toolByName('memory_allocate'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleMemoryAllocate(a)),
+  },
+  {
+    tool: toolByName('memory_free'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleMemoryFree(a)),
+  },
+  {
+    tool: toolByName('memory_inject_shellcode'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleInjectShellcode(a)),
+  },
+  {
+    tool: toolByName('memory_inject_dll'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleInjectDll(a)),
+  },
   // ── Control Tools ──
   {
     tool: toolByName('memory_write_value'),
     domain: DOMAIN,
     bind: bindByKey((h, a) => h.handleWriteValue(a)),
+  },
+  {
+    tool: toolByName('memory_batch_edit'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleBatchEdit(a)),
+  },
+  {
+    tool: toolByName('memory_watch'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleWatch(a)),
   },
   {
     tool: toolByName('memory_freeze'),
@@ -309,17 +390,207 @@ const allRegistrations = [
     domain: DOMAIN,
     bind: bindByKey((h, a) => h.handleAobScan(a)),
   },
-  // ── Find Accesses (Win32-only, uses hardware breakpoints) ──
+  // ── Find Accesses (cross-platform — uses hardware breakpoint engine) ──
   {
     tool: toolByName('memory_find_accesses'),
     domain: DOMAIN,
     bind: bindByKey((h, a) => h.handleFindAccesses(a)),
+  },
+  // ── Cheat Table (.CT) Import/Export ──
+  {
+    tool: toolByName('memory_cheat_table'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleCheatTableDispatch(a)),
+  },
+  // ── AOB Signature Generation ──
+  {
+    tool: toolByName('memory_generate_signature'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleGenerateSignature(a)),
+  },
+  // ── RTTI Standalone Tool ──
+  {
+    tool: toolByName('memory_rtti_info'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleRttiInfo(a)),
   },
   // ── Minidump Parser (cross-platform, pure TS) ──
   {
     tool: toolByName('memory_parse_dump'),
     domain: DOMAIN,
     bind: bindByKey((h, a) => h.handleMemoryParseDump(a)),
+  },
+  // ── Mono / .NET Runtime Tools (Win32-only) ──
+  {
+    tool: toolByName('memory_mono_detect'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleMonoDetect(a)),
+  },
+  {
+    tool: toolByName('memory_mono_assemblies'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleMonoAssemblies(a)),
+  },
+  {
+    tool: toolByName('memory_mono_classes'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleMonoClasses(a)),
+  },
+  {
+    tool: toolByName('memory_mono_objects'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleMonoObjects(a)),
+  },
+  {
+    tool: toolByName('memory_mono_fields'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleMonoFields(a)),
+  },
+  {
+    tool: toolByName('memory_mono_methods'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleMonoMethods(a)),
+  },
+  // ── Handle Enumeration (Win32-only) ──
+  {
+    tool: toolByName('memory_handle_enum'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleHandleEnum(a)),
+  },
+  // ── Memory Protection (cross-platform) ──
+  {
+    tool: toolByName('memory_protect'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleProtect(a)),
+  },
+  // ── Region Comparison (cross-platform) ──
+  {
+    tool: toolByName('memory_region_compare'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleRegionCompare(a)),
+  },
+  // ── Bookmarks (cross-platform) ──
+  {
+    tool: toolByName('memory_bookmark'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleBookmarkDispatch(a)),
+  },
+  // ── Type Define (cross-platform, pure TS) ──
+  {
+    tool: toolByName('memory_type_define'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleTypeDefine(a)),
+  },
+  // ── Emulator Detect (cross-platform, pure TS) ──
+  {
+    tool: toolByName('memory_emulator_detect'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleEmulatorDetect(a)),
+  },
+  // ── Custom Scan Types (CE parity) ──
+  {
+    tool: toolByName('memory_register_type'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleRegisterType(a)),
+  },
+  {
+    tool: toolByName('memory_list_types'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleListTypes(a)),
+  },
+  {
+    tool: toolByName('memory_unregister_type'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleUnregisterType(a)),
+  },
+  // ── Call Stack View (Win32-only) ──
+  {
+    tool: toolByName('memory_call_stack'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleCallStack(a)),
+  },
+  // ── Process Suspend / Resume (cross-platform) ──
+  {
+    tool: toolByName('memory_process_control'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleProcessControl(a)),
+  },
+  // ── Find References (x64dbg parity, cross-platform) ──
+  {
+    tool: toolByName('memory_find_references'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleFindReferences(a)),
+  },
+  // ── Reverse MWT (inverse of find_accesses, cross-platform) ──
+  {
+    tool: toolByName('memory_reverse_mwt'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleReverseMWT(a)),
+  },
+  // ── Code Trace (Ultimap-style, Win32-only) ──
+  {
+    tool: toolByName('memory_trace_code'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleTraceCode(a)),
+  },
+  // ── Pointer Map Persistence (.PTR parity) ──
+  {
+    tool: toolByName('memory_pointer_map'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handlePointerMap(a)),
+  },
+  // ── Inline Assembler (x64dbg parity) ──
+  {
+    tool: toolByName('memory_assemble'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleAssemble(a)),
+  },
+  // ── Auto Assembler (CE parity) ──
+  {
+    tool: toolByName('memory_auto_assemble'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleAutoAssemble(a)),
+  },
+  {
+    tool: toolByName('memory_auto_assemble_disable'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleAutoAssembleDisable(a)),
+  },
+  // ── Remote Debugging Stub (ceserver-style) ──
+  {
+    tool: toolByName('memory_remote'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleRemote(a)),
+  },
+  // ── EPT Hypervisor ──
+  {
+    tool: toolByName('memory_hypervisor'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleHypervisor(a)),
+  },
+  // ── Anti-Detection ──
+  {
+    tool: toolByName('memory_antidetection'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleAntiDetection(a)),
+  },
+  // ── Anti-Detection Check (read-only pre-flight) ──
+  {
+    tool: toolByName('memory_antidetection_check'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleAntiDetectionCheck(a)),
+  },
+  // ── Session Export (structured data dump) ──
+  {
+    tool: toolByName('memory_session_export'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleSessionExportData(a)),
+  },
+  // ── Freeze Export (structured data dump) ──
+  {
+    tool: toolByName('memory_freeze_export'),
+    domain: DOMAIN,
+    bind: bindByKey((h, a) => h.handleFreezeExport(a)),
   },
 ] as const;
 
@@ -361,6 +632,8 @@ const manifest: DomainManifest<typeof DEP_KEY, H, typeof DOMAIN> = {
       /anti.?cheat|anti.?debug|反作弊|反调试/i,
       /guard\s*page|integrity\s*check|代码完整性/i,
       /内存\s*(扫描|搜索|分析|结构|断点|注入|冻结|加速|堆|模块|反作弊)/i,
+      /mono|il2cpp|unity|\.net\s*assembly|managed\s*heap/i,
+      /Mono\s*(class|object|field|assembly|method|domain|runtime)/i,
     ],
     priority: 90,
     tools: [
@@ -373,7 +646,10 @@ const manifest: DomainManifest<typeof DEP_KEY, H, typeof DOMAIN> = {
       'memory_structure_analyze',
       'memory_vtable_parse',
       'memory_scan_session',
-      ...(IS_WIN32 ? ['memory_breakpoint', 'memory_find_accesses', 'memory_speedhack'] : []),
+      'memory_breakpoint',
+      'memory_find_accesses',
+      'memory_find_references',
+      ...(IS_WIN32 ? ['memory_speedhack'] : []),
       'memory_patch_bytes',
       'memory_freeze',
       'memory_dump',
@@ -383,14 +659,21 @@ const manifest: DomainManifest<typeof DEP_KEY, H, typeof DOMAIN> = {
             'memory_heap_enumerate',
             'memory_pe_headers',
             'memory_anticheat_detect',
+            'memory_mono_detect',
+            'memory_mono_assemblies',
+            'memory_mono_classes',
+            'memory_mono_objects',
+            'memory_mono_fields',
           ]
         : []),
       'memory_write_history',
+      'memory_batch_edit',
+      'memory_watch',
     ],
     hint: IS_WIN32
       ? 'Memory domain: scan → narrow → pointer chain → structure | breakpoint trace → patch/NOP → freeze ' +
-        ' speedhack | heap analysis | PE introspection | anti-cheat detection'
-      : 'Memory domain: scan → narrow → pointer chain → structure | patch/NOP → freeze | dump',
+        ' speedhack | heap analysis | PE introspection | anti-cheat detection | Mono/.NET runtime introspection'
+      : 'Memory domain: scan → narrow → pointer chain → structure | breakpoint trace → patch/NOP → freeze | dump',
   },
 };
 

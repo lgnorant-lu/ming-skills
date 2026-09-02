@@ -6,6 +6,7 @@
  */
 
 import { argString } from '@server/domains/shared/parse-args';
+import { cpuLimit } from '@utils/concurrency';
 import { asJsonResponse } from '@server/domains/shared/response';
 import type { ToolArgs, ToolResponse } from '@server/types';
 import { analyzeDataFlowWithTaint } from '@modules/analyzer/CodeAnalyzerDataFlow';
@@ -19,9 +20,11 @@ export async function handleAnalysisDataFlow(args: ToolArgs): Promise<ToolRespon
     });
   }
 
-  const result = await analyzeDataFlowWithTaint(code);
-  return asJsonResponse({
-    success: true,
-    ...result,
+  return cpuLimit(async (): Promise<ToolResponse> => {
+    const result = await analyzeDataFlowWithTaint(code);
+    return asJsonResponse({
+      success: true,
+      ...result,
+    });
   });
 }

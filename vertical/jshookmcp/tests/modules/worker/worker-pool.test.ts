@@ -6,6 +6,8 @@ type Listener = (payload: unknown) => void;
 
 const workerState = vi.hoisted(() => {
   class WorkerMock {
+    public readonly script: string;
+    public readonly options: Record<string, unknown>;
     public listeners = new Map<string, Listener[]>();
     public postMessage = vi.fn();
     public terminate = vi.fn(async () => 0);
@@ -18,10 +20,10 @@ const workerState = vi.hoisted(() => {
       return this;
     });
 
-    constructor(
-      public readonly script: string,
-      public readonly options: Record<string, unknown>,
-    ) {}
+    constructor(script: string, options: Record<string, unknown>) {
+      this.script = script;
+      this.options = options;
+    }
 
     on(event: string, callback: Listener) {
       const callbacks = this.listeners.get(event) ?? [];
@@ -103,7 +105,7 @@ describe('WorkerPool', () => {
       () => 'test-worker.js',
     );
 
-    const expected = Math.max(2, require('os').cpus().length - 1);
+    const expected = Math.max(2, require('node:os').cpus().length - 1);
     expect(pool.getStats().workerCount).toBe(expected);
   });
 

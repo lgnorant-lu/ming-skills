@@ -4,13 +4,7 @@
  * Every value can be overridden via the corresponding env var (loaded
  * from `.env` at startup) — mirrors the project-wide constants pattern.
  */
-
-const int = (key: string, fallback: number): number => {
-  const v = process.env[key];
-  if (v === undefined || v === '') return fallback;
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : fallback;
-};
+import { readEnvInteger as int } from '@src/config/environment';
 
 /**
  * Maximum APK size accepted by `detectFromApk`. Larger inputs are

@@ -46,7 +46,7 @@ export interface PcapngParseOptions {
    * payloads are still truncated to `maxBytesPerPacket` and inlined — i.e.
    * the handler must wire this up to enable true offloading.
    */
-  offloadPacket?: (hex: string, packetIndex: number) => string;
+  offloadPacket?: (hex: string, packetIndex: number) => string | Promise<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +170,10 @@ function detectEndianness(buffer: Buffer): PacketEndianness | null {
 // Main parser
 // ---------------------------------------------------------------------------
 
-export function parsePcapng(buffer: Buffer, options: PcapngParseOptions = {}): PcapngReadResult {
+export async function parsePcapng(
+  buffer: Buffer,
+  options: PcapngParseOptions = {},
+): Promise<PcapngReadResult> {
   const warnings: string[] = [];
   const endian = detectEndianness(buffer);
   if (endian === null) {
@@ -223,11 +226,11 @@ export function parsePcapng(buffer: Buffer, options: PcapngParseOptions = {}): P
         interfaceIndex++;
         break;
       case PCAPNG_BLOCK_TYPE.ENHANCED_PACKET:
-        parseEnhancedPacket(buffer, block, currentEndian, result, packetIndex, options);
+        await parseEnhancedPacket(buffer, block, currentEndian, result, packetIndex, options);
         packetIndex++;
         break;
       case PCAPNG_BLOCK_TYPE.SIMPLE_PACKET:
-        parseSimplePacket(buffer, block, currentEndian, result, packetIndex, options);
+        await parseSimplePacket(buffer, block, currentEndian, result, packetIndex, options);
         packetIndex++;
         break;
       case PCAPNG_BLOCK_TYPE.NAME_RESOLUTION:
@@ -345,14 +348,14 @@ function parseInterfaceDescription(
   result.interfaces.push(entry);
 }
 
-function parseEnhancedPacket(
+async function parseEnhancedPacket(
   buffer: Buffer,
   block: ParsedBlock,
   endian: PacketEndianness,
   result: PcapngReadResult,
   packetIndex: number,
   options: PcapngParseOptions,
-): void {
+): Promise<void> {
   const interfaceId = readU32(buffer, block.bodyStart, endian);
   const timestampHigh = readU32(buffer, block.bodyStart + 4, endian);
   const timestampLow = readU32(buffer, block.bodyStart + 8, endian);
@@ -373,7 +376,7 @@ function parseEnhancedPacket(
   const visibleLength = Math.min(limit, packetBytes.length);
   const truncated = visibleLength < packetBytes.length;
 
-  const payload = summarizePacketPayload(
+  const payload = await summarizePacketPayload(
     packetBytes.subarray(0, visibleLength),
     packetIndex,
     options,
@@ -393,14 +396,14 @@ function parseEnhancedPacket(
   });
 }
 
-function parseSimplePacket(
+async function parseSimplePacket(
   buffer: Buffer,
   block: ParsedBlock,
   endian: PacketEndianness,
   result: PcapngReadResult,
   packetIndex: number,
   options: PcapngParseOptions,
-): void {
+): Promise<void> {
   const originalLength = readU32(buffer, block.bodyStart, endian);
   const dataStart = block.bodyStart + 4;
   const available = block.bodyEnd - dataStart;
@@ -410,7 +413,7 @@ function parseSimplePacket(
   const visibleLength = Math.min(limit, packetBytes.length);
   const truncated = visibleLength < packetBytes.length;
 
-  const payload = summarizePacketPayload(
+  const payload = await summarizePacketPayload(
     packetBytes.subarray(0, visibleLength),
     packetIndex,
     options,
@@ -439,15 +442,15 @@ function parseSimplePacket(
  */
 const DEFAULT_OFFLOAD_THRESHOLD = 65536; // 64 KiB of hex = 32 KiB of payload
 
-function summarizePacketPayload(
+async function summarizePacketPayload(
   visibleBytes: Buffer,
   packetIndex: number,
   options: PcapngParseOptions,
-): { dataHex?: string; dataRef?: string } {
+): Promise<{ dataHex?: string; dataRef?: string }> {
   const hex = visibleBytes.toString('hex');
   const threshold = options.offloadThreshold ?? DEFAULT_OFFLOAD_THRESHOLD;
   if (hex.length > threshold && options.offloadPacket) {
-    return { dataRef: options.offloadPacket(hex, packetIndex) };
+    return { dataRef: await options.offloadPacket(hex, packetIndex) };
   }
   return { dataHex: hex };
 }

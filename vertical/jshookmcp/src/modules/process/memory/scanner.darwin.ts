@@ -5,7 +5,12 @@ import { promises as fs } from 'node:fs';
 import { logger } from '@utils/logger';
 import type { MemoryScanResult } from '@modules/process/memory/types';
 import { execAsync } from '@modules/process/memory/types';
-import { MEMORY_SCAN_TIMEOUT_MS } from '@src/constants';
+import {
+  MEMORY_SCAN_MAX_REGIONS,
+  MEMORY_SCAN_MAX_RESULTS,
+  MEMORY_SCAN_REGION_MAX_BYTES,
+  MEMORY_SCAN_TIMEOUT_MS,
+} from '@src/constants';
 import { patternToBytesMac } from './scanner.patterns';
 import { findPatternInBuffer } from '@native/NativeMemoryManager.utils';
 
@@ -56,18 +61,20 @@ async function scanMemoryMacNative(
 
   const handle = provider.openProcess(pid, false);
   const foundAddresses: string[] = [];
-  const maxResults = 1000;
-  const maxRegionSize = 32 * 1024 * 1024; // 32MB cap per region
+  // Caps are env-tunable via @src/constants (MEMORY_SCAN_*) and kept in sync
+  // with the lldb fallback script below (which receives interpolated values).
+  const maxResults = MEMORY_SCAN_MAX_RESULTS;
+  const maxRegionSize = MEMORY_SCAN_REGION_MAX_BYTES;
 
   try {
     let address = 0n;
-    for (let i = 0; i < 50000 && foundAddresses.length < maxResults; i++) {
+    for (let i = 0; i < MEMORY_SCAN_MAX_REGIONS && foundAddresses.length < maxResults; i++) {
       const region = provider.queryRegion(handle, address);
       if (!region) break;
 
       if (region.isReadable && region.size > 0 && region.size <= maxRegionSize) {
         try {
-          const result = provider.readMemory(handle, region.baseAddress, region.size);
+          const result = await provider.readMemory(handle, region.baseAddress, region.size);
           const matches = findPatternInBuffer(result.data, patternBytes, patternMask);
           for (const offset of matches) {
             foundAddresses.push(`0x${(region.baseAddress + BigInt(offset)).toString(16)}`);
@@ -107,8 +114,12 @@ async function scanMemoryMacLldb(
   const pyFile = `/tmp/lldb_scan_${tag}.py`;
   const cmdFile = `/tmp/lldb_scan_${tag}.txt`;
 
+  // Keep caps in sync with the native fast-path above (MEMORY_SCAN_* constants).
   const pyScript = `
 import lldb, json, sys
+
+MAX_RESULTS = ${MEMORY_SCAN_MAX_RESULTS}
+MAX_REGION_SIZE = ${MEMORY_SCAN_REGION_MAX_BYTES}
 
 def __lldb_init_module(debugger, internal_dict):
     proc = debugger.GetSelectedTarget().GetProcess()
@@ -123,7 +134,7 @@ def __lldb_init_module(debugger, internal_dict):
             continue
         s = info.GetRegionBase()
         sz = info.GetRegionEnd() - s
-        if sz > 32 * 1024 * 1024:
+        if sz > MAX_REGION_SIZE:
             continue
         err = lldb.SBError()
         data = proc.ReadMemory(s, sz, err)
@@ -138,9 +149,9 @@ def __lldb_init_module(debugger, internal_dict):
                     break
             if match:
                 results.append(hex(s + j))
-                if len(results) >= 1000:
+                if len(results) >= MAX_RESULTS:
                     break
-        if len(results) >= 1000:
+        if len(results) >= MAX_RESULTS:
             break
     sys.stdout.write('SCAN_RESULT:' + json.dumps({
         'success': True,

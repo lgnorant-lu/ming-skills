@@ -9,7 +9,7 @@ import type {
   BrowserSelectTabResponse,
   BrowserStatusResponse,
 } from '@tests/shared/common-test-types';
-import { readFile, writeFile } from 'fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 
 vi.mock('@utils/logger', () => ({
   logger: {
@@ -25,8 +25,12 @@ vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
 }));
 
-vi.mock('@utils/config', () => ({
-  projectRoot: '/fake/project',
+vi.mock('@src/config/env-bootstrap', () => ({
+  bootstrapRuntimeEnv: () => ({
+    projectRoot: '/fake/project',
+    envPath: '/fake/project/.env',
+    loaded: false,
+  }),
 }));
 
 import { BrowserControlHandlers } from '@server/domains/browser/handlers/browser-control';
@@ -418,6 +422,7 @@ describe('BrowserControlHandlers – handleBrowserLaunch', () => {
 
   it('falls back to headless mode on Linux display errors and persists .env', async () => {
     const prevFallback = process.env.JSHOOK_FORCE_LINUX_FALLBACK;
+    const prevHeadless = process.env.PUPPETEER_HEADLESS;
     process.env.JSHOOK_FORCE_LINUX_FALLBACK = 'true';
 
     try {
@@ -466,6 +471,86 @@ describe('BrowserControlHandlers – handleBrowserLaunch', () => {
         delete process.env.JSHOOK_FORCE_LINUX_FALLBACK;
       } else {
         process.env.JSHOOK_FORCE_LINUX_FALLBACK = prevFallback;
+      }
+      if (prevHeadless === undefined) {
+        delete process.env.PUPPETEER_HEADLESS;
+      } else {
+        process.env.PUPPETEER_HEADLESS = prevHeadless;
+      }
+    }
+  });
+
+  it('repeats fallback when headless arg and PUPPETEER_HEADLESS are both unset', async () => {
+    const prevFallback = process.env.JSHOOK_FORCE_LINUX_FALLBACK;
+    const prevHeadless = process.env.PUPPETEER_HEADLESS;
+    process.env.JSHOOK_FORCE_LINUX_FALLBACK = 'true';
+    delete process.env.PUPPETEER_HEADLESS;
+
+    try {
+      collector.launch
+        .mockRejectedValueOnce(new Error('Missing X server or $DISPLAY'))
+        .mockResolvedValueOnce({
+          action: 'launched',
+          launchOptions: {
+            headless: true,
+            args: [],
+            v8NativeSyntaxEnabled: false,
+          },
+        })
+        .mockRejectedValueOnce(new Error('Missing X server or $DISPLAY'))
+        .mockResolvedValueOnce({
+          action: 'launched',
+          launchOptions: {
+            headless: true,
+            args: [],
+            v8NativeSyntaxEnabled: false,
+          },
+        });
+      collector.getStatus.mockResolvedValue({ connected: true, pages: 1 });
+      vi.mocked(readFile).mockResolvedValue('APP_NAME=jshook\n');
+      vi.mocked(writeFile).mockResolvedValue(undefined);
+
+      const firstBody = parseJson<BrowserLaunchResponse>(await handlers.handleBrowserLaunch({}));
+      const secondBody = parseJson<BrowserLaunchResponse>(await handlers.handleBrowserLaunch({}));
+
+      expect(collector.launch).toHaveBeenNthCalledWith(1, {
+        args: [],
+        enableV8NativesSyntax: undefined,
+        headless: undefined,
+      });
+      expect(collector.launch).toHaveBeenNthCalledWith(2, {
+        args: [],
+        enableV8NativesSyntax: undefined,
+        headless: true,
+      });
+      expect(collector.launch).toHaveBeenNthCalledWith(3, {
+        args: [],
+        enableV8NativesSyntax: undefined,
+        headless: undefined,
+      });
+      expect(collector.launch).toHaveBeenNthCalledWith(4, {
+        args: [],
+        enableV8NativesSyntax: undefined,
+        headless: true,
+      });
+      expect(firstBody.success).toBe(true);
+      // @ts-expect-error
+      expect(firstBody.fallback?.applied).toBe(true);
+      expect(secondBody.success).toBe(true);
+      // @ts-expect-error
+      expect(secondBody.fallback?.applied).toBe(true);
+      expect(process.env.PUPPETEER_HEADLESS).toBeUndefined();
+      expect(writeFile).toHaveBeenCalledTimes(2);
+    } finally {
+      if (prevFallback === undefined) {
+        delete process.env.JSHOOK_FORCE_LINUX_FALLBACK;
+      } else {
+        process.env.JSHOOK_FORCE_LINUX_FALLBACK = prevFallback;
+      }
+      if (prevHeadless === undefined) {
+        delete process.env.PUPPETEER_HEADLESS;
+      } else {
+        process.env.PUPPETEER_HEADLESS = prevHeadless;
       }
     }
   });

@@ -5,7 +5,10 @@ import { asJsonResponse, asTextResponse } from '@server/domains/shared/response'
 import { ReverseEvidenceGraph } from '@server/evidence/ReverseEvidenceGraph';
 
 export class EvidenceHandlers {
-  constructor(private readonly graph: ReverseEvidenceGraph) {}
+  private readonly graph: ReverseEvidenceGraph;
+  constructor(graph: ReverseEvidenceGraph) {
+    this.graph = graph;
+  }
 
   private pickStringArg(args: Record<string, unknown>, keys: string[]): string | undefined {
     for (const key of keys) {

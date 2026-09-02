@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { PersistentCache } from '@utils/cache/PersistentCache';
-import { join } from 'path';
-import { tmpdir } from 'os';
-import { existsSync, rmSync } from 'fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { existsSync, rmSync } from 'node:fs';
 
 describe('PersistentCache', () => {
   const testDbPath = join(tmpdir(), `jshook-test-cache-${Date.now()}.db`);
@@ -56,6 +56,26 @@ describe('PersistentCache', () => {
       await cache.init();
       expect(cache.isReady()).toBe(true);
       await cache.close();
+    });
+
+    it('creates a missing parent directory for the db file (cross-platform)', async () => {
+      // Nested path whose parent directory does not exist. On Windows the old
+      // lastIndexOf('/') dir split returned '' for backslash paths, so the
+      // directory was never created and init degraded to a silent no-op cache.
+      const nestedDir = join(tmpdir(), `jshook-test-cache-nested-${Date.now()}`);
+      const nestedDb = join(nestedDir, 'sub', 'cache.db');
+      try {
+        const cache = new PersistentCache({ dbPath: nestedDb, name: 'nested-dir-test' });
+        await cache.init();
+        expect(cache.isReady()).toBe(true);
+
+        await cache.set('nested-key', { ok: true });
+        expect(await cache.get<{ ok: boolean }>('nested-key')).toEqual({ ok: true });
+
+        await cache.close();
+      } finally {
+        rmSync(nestedDir, { recursive: true, force: true });
+      }
     });
 
     it('should be idempotent', async () => {
@@ -277,6 +297,46 @@ describe('PersistentCache', () => {
       await cache.init();
       await cache.close();
       await cache.close(); // Should not throw
+    });
+  });
+
+  describe('corrupted entries', () => {
+    it('discards a corrupted JSON entry and removes the poison row', async () => {
+      const cache = new PersistentCache({ dbPath: testDbPath, name: 'corrupt-test' });
+      await cache.init();
+
+      // Simulate a torn write / manual DB edit: row exists, value is not JSON.
+      (
+        cache as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }
+      ).db
+        .prepare(
+          'INSERT OR REPLACE INTO cache_entries (key, value, expiresAt, createdAt) VALUES (?, ?, ?, ?)',
+        )
+        .run('corrupt-key', '{not valid json', Date.now() + 60_000, Date.now());
+
+      expect(await cache.get('corrupt-key')).toBeNull();
+      // Poison row is deleted — a second get is a clean miss, not another error.
+      expect(await cache.has('corrupt-key')).toBe(false);
+      expect(await cache.get('corrupt-key')).toBeNull();
+      await cache.close();
+    });
+
+    it('discards an entry that is not in the wrapped __cached format', async () => {
+      const cache = new PersistentCache({ dbPath: testDbPath, name: 'unwrap-test' });
+      await cache.init();
+
+      // Raw JSON without the { __cached: true, data } wrapper (external write).
+      (
+        cache as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }
+      ).db
+        .prepare(
+          'INSERT OR REPLACE INTO cache_entries (key, value, expiresAt, createdAt) VALUES (?, ?, ?, ?)',
+        )
+        .run('raw-key', JSON.stringify({ hello: 'world' }), Date.now() + 60_000, Date.now());
+
+      expect(await cache.get('raw-key')).toBeNull();
+      expect(await cache.has('raw-key')).toBe(false);
+      await cache.close();
     });
   });
 

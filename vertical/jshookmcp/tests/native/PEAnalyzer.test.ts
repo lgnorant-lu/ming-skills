@@ -244,10 +244,14 @@ describe('PEAnalyzer', () => {
       const originalRPM = RPMLocal as any;
       originalRPM
         .mockImplementationOnce((_h: bigint, _addr: bigint, _size: number) => {
-          return Buffer.alloc(64); // DOS
+          const dos = Buffer.alloc(64);
+          dos.writeUInt16LE(0x5a4d, 0); // MZ
+          dos.writeUInt32LE(0x80, 60); // e_lfanew
+          return dos; // DOS
         })
         .mockImplementationOnce((_h: bigint, _addr: bigint, _size: number) => {
           const buf = Buffer.alloc(264);
+          buf.writeUInt32LE(0x00004550, 0); // PE\0\0
           buf.writeUInt16LE(1, 6); // 1 section
           return buf;
         })
@@ -532,7 +536,10 @@ describe('PEAnalyzer', () => {
       const originalRPM = RPMLocal as any;
       originalRPM
         .mockImplementationOnce((_h: bigint, _addr: bigint, _size: number) => {
-          return Buffer.alloc(64); // mock DOS
+          const dos = Buffer.alloc(64);
+          dos.writeUInt16LE(0x5a4d, 0); // MZ
+          dos.writeUInt32LE(0x80, 60); // e_lfanew
+          return dos; // mock DOS
         })
         .mockImplementationOnce((_h: bigint, addr: bigint, _size: number) => {
           // Return truncated ntData of 140 bytes (not enough to fill directories)
@@ -646,11 +653,21 @@ describe('PEAnalyzer', () => {
     it('should return empty array if export directory is missing', async () => {
       const { ReadProcessMemory: RPMLocal } = await import('@native/Win32API');
       const originalRPM = RPMLocal as any;
-      originalRPM.mockImplementationOnce((_h: bigint, _addr: bigint, _size: number) => {
-        const buf = Buffer.alloc(264);
-        buf.writeUInt32LE(0, 132); // NumberOfRvaAndSizes = 0
-        return buf;
-      });
+      originalRPM
+        .mockImplementationOnce((_h: bigint, _addr: bigint, _size: number) => {
+          const dos = Buffer.alloc(64);
+          dos.writeUInt16LE(0x5a4d, 0); // MZ
+          dos.writeUInt32LE(0x80, 60); // e_lfanew
+          return dos; // DOS
+        })
+        .mockImplementationOnce((_h: bigint, _addr: bigint, _size: number) => {
+          // Valid PE32+ header with zeroed data directories (no export dir)
+          const buf = Buffer.alloc(264);
+          buf.writeUInt32LE(0x00004550, 0); // PE\0\0
+          buf.writeUInt16LE(0x20b, 24); // PE32+ magic
+          buf.writeUInt32LE(16, 132); // NumberOfRvaAndSizes
+          return buf;
+        });
       const exports = await analyzer.parseExports(1234, '0x0');
       expect(exports.length).toBe(0);
     });
@@ -695,11 +712,21 @@ describe('PEAnalyzer', () => {
     it('should return empty array if import directory is missing', async () => {
       const { ReadProcessMemory: RPMLocal } = await import('@native/Win32API');
       const originalRPM = RPMLocal as any;
-      originalRPM.mockImplementationOnce((_h: bigint, _addr: bigint, _size: number) => {
-        const buf = Buffer.alloc(264);
-        buf.writeUInt32LE(0, 132); // NumberOfRvaAndSizes = 0
-        return buf;
-      });
+      originalRPM
+        .mockImplementationOnce((_h: bigint, _addr: bigint, _size: number) => {
+          const dos = Buffer.alloc(64);
+          dos.writeUInt16LE(0x5a4d, 0); // MZ
+          dos.writeUInt32LE(0x80, 60); // e_lfanew
+          return dos; // DOS
+        })
+        .mockImplementationOnce((_h: bigint, _addr: bigint, _size: number) => {
+          // Valid PE32+ header with zeroed data directories (no import dir)
+          const buf = Buffer.alloc(264);
+          buf.writeUInt32LE(0x00004550, 0); // PE\0\0
+          buf.writeUInt16LE(0x20b, 24); // PE32+ magic
+          buf.writeUInt32LE(16, 132); // NumberOfRvaAndSizes
+          return buf;
+        });
       const imports = await analyzer.parseImports(1234, '0x0');
       expect(imports.length).toBe(0);
     });
@@ -793,10 +820,14 @@ describe('PEAnalyzer', () => {
       const originalRPM = RPMLocal as any;
       originalRPM
         .mockImplementationOnce((_h: bigint, _addr: bigint, _size: number) => {
-          return Buffer.alloc(64); // DOS
+          const dos = Buffer.alloc(64);
+          dos.writeUInt16LE(0x5a4d, 0); // MZ
+          dos.writeUInt32LE(0x80, 60); // e_lfanew
+          return dos; // DOS
         })
         .mockImplementationOnce((_h: bigint, _addr: bigint, _size: number) => {
           const buf = Buffer.alloc(264);
+          buf.writeUInt32LE(0x00004550, 0); // PE\0\0
           buf.writeUInt16LE(0x20b, 24); // PE32+
           buf.writeUInt32LE(20, 132); // numberOfRvaAndSizes = 20 (>16)
           // Also make `off + 8 <= ntData.length` FALSE by making the buffer physically shorter than required

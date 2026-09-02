@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReverseEvidenceGraph, resetIdCounter } from '@server/evidence/ReverseEvidenceGraph';
 import type { EvidenceNodeType } from '@server/evidence/types';
 import * as testUrls from '@tests/shared/test-urls';
+import { logger } from '@utils/logger';
 
 describe('ReverseEvidenceGraph (EVID-01~03, EVID-05)', () => {
   let graph: ReverseEvidenceGraph;
@@ -298,6 +299,192 @@ describe('ReverseEvidenceGraph (EVID-01~03, EVID-05)', () => {
       graph2.restoreSnapshot(null);
       graph2.restoreSnapshot({ schemaVersion: 2, graph: { nodes: [], edges: [] } });
       expect(graph2.nodeCount).toBe(0);
+    });
+
+    it('trims restored nodes and edges back to the configured caps', () => {
+      const source = new ReverseEvidenceGraph();
+      const nodes = Array.from({ length: 6 }, (_, i) => source.addNode('request', `n${i}`, {}));
+      for (let i = 0; i < nodes.length - 1; i++) {
+        source.addEdge(nodes[i]!.id, nodes[i + 1]!.id, 'triggers');
+      }
+      const snapshot = source.exportSnapshot();
+      resetIdCounter();
+
+      const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+      const capped = new ReverseEvidenceGraph({ maxNodes: 3, maxEdges: 2 });
+      capped.restoreSnapshot(snapshot);
+      warnSpy.mockRestore();
+
+      expect(capped.nodeCount).toBe(3);
+      expect(capped.edgeCount).toBe(2);
+      expect(capped.droppedNodeCount).toBe(3);
+    });
+
+    it('restoreSnapshot returns the counts dropped by the restore trim', () => {
+      const source = new ReverseEvidenceGraph();
+      const nodes = Array.from({ length: 6 }, (_, i) => source.addNode('request', `n${i}`, {}));
+      for (let i = 0; i < nodes.length - 1; i++) {
+        source.addEdge(nodes[i]!.id, nodes[i + 1]!.id, 'triggers');
+      }
+      const snapshot = source.exportSnapshot();
+      resetIdCounter();
+
+      const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+      const capped = new ReverseEvidenceGraph({ maxNodes: 3, maxEdges: 2 });
+      const dropped = capped.restoreSnapshot(snapshot);
+      warnSpy.mockRestore();
+
+      // 3 oldest nodes evicted, cascading 3 connected edges; the 2 surviving
+      // edges stay under the edge cap.
+      expect(dropped).toEqual({ droppedNodes: 3, droppedEdges: 3 });
+    });
+
+    it('restoreSnapshot reports zero drops for a snapshot within the caps', () => {
+      const source = new ReverseEvidenceGraph();
+      source.addNode('request', 'a', {});
+      source.addNode('request', 'b', {});
+      const snapshot = source.exportSnapshot();
+      resetIdCounter();
+
+      const restored = new ReverseEvidenceGraph();
+      const dropped = restored.restoreSnapshot(snapshot);
+      expect(dropped).toEqual({ droppedNodes: 0, droppedEdges: 0 });
+    });
+
+    it('restoreSnapshot reports zero drops for an invalid snapshot', () => {
+      const graph2 = new ReverseEvidenceGraph();
+      expect(graph2.restoreSnapshot(null)).toEqual({ droppedNodes: 0, droppedEdges: 0 });
+      expect(graph2.restoreSnapshot({ schemaVersion: 2, graph: { nodes: [], edges: [] } })).toEqual(
+        {
+          droppedNodes: 0,
+          droppedEdges: 0,
+        },
+      );
+    });
+  });
+
+  describe('unbounded growth caps (a3-02)', () => {
+    it('evicts the oldest nodes when the node cap is exceeded and counts drops', () => {
+      const capped = new ReverseEvidenceGraph({ maxNodes: 3, maxEdges: 10 });
+      const n1 = capped.addNode('request', 'n1', {});
+      capped.addNode('request', 'n2', {});
+      capped.addNode('request', 'n3', {});
+      const n4 = capped.addNode('request', 'n4', {});
+
+      expect(capped.nodeCount).toBe(3);
+      expect(capped.getNode(n1.id)).toBeUndefined(); // oldest evicted
+      expect(capped.getNode(n4.id)).toBeDefined();
+      expect(capped.droppedNodeCount).toBe(1);
+    });
+
+    it('evicts the oldest edges when the edge cap is exceeded and counts drops', () => {
+      const capped = new ReverseEvidenceGraph({ maxNodes: 10, maxEdges: 2 });
+      const nodes = Array.from({ length: 4 }, (_, i) => capped.addNode('function', `f${i}`, {}));
+      capped.addEdge(nodes[0]!.id, nodes[1]!.id, 'triggers');
+      capped.addEdge(nodes[1]!.id, nodes[2]!.id, 'triggers');
+      capped.addEdge(nodes[2]!.id, nodes[3]!.id, 'triggers');
+
+      expect(capped.edgeCount).toBe(2);
+      expect(capped.getEdgesFrom(nodes[0]!.id)).toHaveLength(0); // e1 evicted
+      expect(capped.getEdgesFrom(nodes[1]!.id)).toHaveLength(1); // e2 survives
+      expect(capped.droppedEdgeCount).toBe(1);
+    });
+
+    it('cascades connected-edge removal when a node is evicted', () => {
+      const capped = new ReverseEvidenceGraph({ maxNodes: 2, maxEdges: 10 });
+      const a = capped.addNode('script', 'a', {});
+      const b = capped.addNode('function', 'b', {});
+      capped.addEdge(a.id, b.id, 'contains');
+
+      capped.addNode('function', 'c', {}); // evicts node a
+
+      expect(capped.getNode(a.id)).toBeUndefined();
+      expect(capped.edgeCount).toBe(0); // edge a→b cascaded away
+      expect(capped.droppedNodeCount).toBe(1);
+    });
+
+    it('does not evict anything below the cap', () => {
+      const capped = new ReverseEvidenceGraph({ maxNodes: 5, maxEdges: 5 });
+      for (let i = 0; i < 3; i++) {
+        const n = capped.addNode('request', `r${i}`, {});
+        capped.addEdge(n.id, n.id, 'references');
+      }
+      expect(capped.nodeCount).toBe(3);
+      expect(capped.edgeCount).toBe(3);
+      expect(capped.droppedNodeCount).toBe(0);
+      expect(capped.droppedEdgeCount).toBe(0);
+    });
+
+    it('counts node-eviction cascade edges as dropped', () => {
+      const capped = new ReverseEvidenceGraph({ maxNodes: 2, maxEdges: 10 });
+      const a = capped.addNode('script', 'a', {});
+      const b = capped.addNode('function', 'b', {});
+      capped.addEdge(a.id, b.id, 'contains');
+      capped.addNode('function', 'c', {}); // evicts a → cascades the edge
+
+      expect(capped.droppedNodeCount).toBe(1);
+      expect(capped.droppedEdgeCount).toBe(1); // cascade edges are observable drops
+    });
+  });
+
+  describe('eviction observability (security-s3)', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('warns once per node-eviction batch', () => {
+      const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+      const capped = new ReverseEvidenceGraph({ maxNodes: 2, maxEdges: 10 });
+      capped.addNode('request', 'n1', {});
+      capped.addNode('request', 'n2', {});
+      capped.addNode('request', 'n3', {}); // one eviction batch
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('evicted'));
+    });
+
+    it('warns once per edge-eviction batch', () => {
+      const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+      const capped = new ReverseEvidenceGraph({ maxNodes: 10, maxEdges: 1 });
+      const nodes = Array.from({ length: 3 }, (_, i) => capped.addNode('function', `f${i}`, {}));
+      capped.addEdge(nodes[0]!.id, nodes[1]!.id, 'triggers');
+      capped.addEdge(nodes[1]!.id, nodes[2]!.id, 'triggers'); // evicts the first edge
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('evicted'));
+    });
+
+    it('emits evidence-evicted event with batch counts', () => {
+      const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
+      const fakeBus = {
+        emit: (event: string, payload: Record<string, unknown>) => {
+          emitted.push({ event, payload });
+          return Promise.resolve();
+        },
+      } as any;
+      const capped = new ReverseEvidenceGraph({ maxNodes: 2, maxEdges: 10 });
+      capped.setEventBus(fakeBus);
+
+      capped.addNode('request', 'n1', {});
+      capped.addNode('request', 'n2', {});
+      capped.addNode('request', 'n3', {}); // evicts n1
+
+      const evict = emitted.find((e) => e.event === 'evidence-evicted');
+      expect(evict).toBeDefined();
+      expect(evict!.payload.reason).toBe('node-cap');
+      expect(evict!.payload.droppedNodes).toBe(1);
+      expect(evict!.payload.droppedEdges).toBe(0);
+    });
+
+    it('exportSnapshot reports cumulative dropped counts', () => {
+      const capped = new ReverseEvidenceGraph({ maxNodes: 2, maxEdges: 10 });
+      capped.addNode('request', 'n1', {});
+      capped.addNode('request', 'n2', {});
+      capped.addNode('request', 'n3', {}); // evicts n1
+
+      const snap = capped.exportSnapshot();
+      expect(snap.droppedNodes).toBe(1);
+      expect(snap.droppedEdges).toBe(0);
     });
   });
 

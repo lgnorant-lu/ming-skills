@@ -74,6 +74,21 @@ describe('parseElfSections', () => {
     mockReadFileSync.mockReturnValue(elf64Header());
     expect(parseElfSections('/x')).toEqual([]);
   });
+
+  it('returns [] for a truncated string-table header without throwing', () => {
+    // shOff=64, shEntSize=64, shNum=1, shStrNdx=1 → strHdrOff=128. Buffer
+    // length 156: strHdrOff+24 <= len passes the old bounds check, but the
+    // readBigUInt64LE(strHdrOff+0x18) needs 8 more bytes (strHdrOff+32 > len),
+    // which previously threw ERR_BUFFER_OUT_OF_BOUNDS.
+    const b = elf64Header();
+    b.writeBigUInt64LE(64n, 0x28); // shOff
+    b.writeUInt16LE(64, 0x3a); // shEntSize
+    b.writeUInt16LE(1, 0x3c); // shNum
+    b.writeUInt16LE(1, 0x3e); // shStrNdx
+    mockReadFileSync.mockReturnValue(Buffer.concat([b, Buffer.alloc(156 - 64)]));
+    expect(() => parseElfSections('/x')).not.toThrow();
+    expect(parseElfSections('/x')).toEqual([]);
+  });
 });
 
 describe('parseElfSymbols', () => {

@@ -649,4 +649,68 @@ describe('TraceDB', () => {
     expect(chunks[0]?.sequence).toBe(1);
     expect(chunks[0]?.chunkIsBase64).toBe(true);
   });
+
+  it('prunes oldest events beyond maxRows on flush', () => {
+    const pruneDb = new TraceDB({ dbPath: join(testDir, 'prune-events.db'), maxRows: 5 });
+    try {
+      for (let i = 0; i < 10; i++) {
+        pruneDb.insertEvent(makeEvent({ timestamp: i, data: `{"i":${i}}` }));
+      }
+      pruneDb.flush();
+
+      expect(pruneDb.query('SELECT COUNT(*) AS cnt FROM events').rows[0]![0]).toBe(5);
+
+      const timestamps = pruneDb.query('SELECT timestamp FROM events ORDER BY timestamp ASC');
+      expect(timestamps.rows.map((r) => r[0])).toEqual([5, 6, 7, 8, 9]);
+    } finally {
+      pruneDb.close();
+    }
+  });
+
+  it('prunes old heap snapshots beyond maxRows', () => {
+    const pruneDb = new TraceDB({ dbPath: join(testDir, 'prune-snapshots.db'), maxRows: 2 });
+    try {
+      for (let i = 0; i < 3; i++) {
+        pruneDb.insertHeapSnapshot({
+          timestamp: Date.now() + i,
+          snapshotData: Buffer.from(`snap-${i}`),
+          summary: `{"i":${i}}`,
+        });
+      }
+
+      const snapshots = pruneDb.getHeapSnapshots();
+      expect(snapshots).toHaveLength(2);
+      expect(snapshots.map((s) => s.summary)).toEqual(['{"i":1}', '{"i":2}']);
+    } finally {
+      pruneDb.close();
+    }
+  });
+
+  it('prune() bounds every append-only table', () => {
+    const pruneDb = new TraceDB({ dbPath: join(testDir, 'prune-all.db'), maxRows: 3 });
+    try {
+      for (let i = 0; i < 6; i++) {
+        pruneDb.insertSample({
+          timestamp: i,
+          selfTime: i,
+          aggregateTime: i,
+          functionName: 'fn',
+          scriptId: null,
+          url: null,
+          lineNumber: null,
+          columnNumber: null,
+        });
+      }
+      for (let i = 0; i < 6; i++) {
+        pruneDb.insertMemoryDelta(makeDelta({ address: `0x${i}` }));
+      }
+      pruneDb.flush();
+      pruneDb.prune();
+
+      expect(pruneDb.query('SELECT COUNT(*) FROM samples').rows[0]![0]).toBe(3);
+      expect(pruneDb.query('SELECT COUNT(*) FROM memory_deltas').rows[0]![0]).toBe(3);
+    } finally {
+      pruneDb.close();
+    }
+  });
 });

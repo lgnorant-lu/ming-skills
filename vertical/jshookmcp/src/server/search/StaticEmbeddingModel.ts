@@ -4,6 +4,7 @@ import { access, mkdir, readFile, rename, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import { readEnvInteger, readEnvNullableString, readEnvString } from '@src/config/environment';
 
 interface TokenizerEncoding {
   ids: number[];
@@ -32,10 +33,7 @@ export interface StaticEmbeddingTensor {
 
 const MODEL_FILENAMES = ['tokenizer.json', 'model.safetensors'] as const;
 type ModelFilename = (typeof MODEL_FILENAMES)[number];
-const FETCH_TIMEOUT_MS = Math.max(
-  1,
-  Number.parseInt(process.env.SEARCH_VECTOR_FETCH_TIMEOUT_MS ?? '15000', 10) || 15_000,
-);
+const FETCH_TIMEOUT_MS = readEnvInteger('SEARCH_VECTOR_FETCH_TIMEOUT_MS', 15_000, { min: 1 });
 
 let float16Lookup: Float32Array | null = null;
 
@@ -145,7 +143,7 @@ export function parseStaticEmbeddingTensor(bytes: Uint8Array): StaticEmbeddingTe
 }
 
 function getModelCacheDirectory(modelId: string): string {
-  const overridden = process.env.JSHOOK_EMBEDDING_MODEL_CACHE_DIR?.trim();
+  const overridden = readEnvNullableString('JSHOOK_EMBEDDING_MODEL_CACHE_DIR', { trim: true });
   const root = overridden
     ? resolve(overridden)
     : resolve(homedir(), '.jshookmcp', 'cache', 'models');
@@ -164,7 +162,10 @@ async function fileExists(path: string): Promise<boolean> {
 }
 
 function getModelUrl(modelId: string, filename: ModelFilename): string {
-  const endpoint = (process.env.HF_ENDPOINT?.trim() || 'https://huggingface.co').replace(/\/$/, '');
+  const endpoint = readEnvString('HF_ENDPOINT', 'https://huggingface.co', { trim: true }).replace(
+    /\/$/,
+    '',
+  );
   const encodedModelId = modelId
     .split('/')
     .map((segment) => encodeURIComponent(segment))

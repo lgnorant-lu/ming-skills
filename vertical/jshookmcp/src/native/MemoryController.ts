@@ -31,8 +31,10 @@ export class MemoryController {
     return this.platformProvider;
   }
 
-  private readBuffer(pid: number, address: bigint, size: number): Buffer {
+  private async readBuffer(pid: number, address: bigint, size: number): Promise<Buffer> {
     if (process.platform === 'win32') {
+      // Low-frequency single-read path (write_value/undo/redo). Left synchronous;
+      // the scanner hot path uses the async provider (see a4-01 registry).
       const handle = openProcessForMemory(pid, false);
       try {
         return ReadProcessMemory(handle, address, size);
@@ -44,14 +46,14 @@ export class MemoryController {
     const provider = this.getPortableProvider();
     const handle = provider.openProcess(pid, false);
     try {
-      const result = provider.readMemory(handle, address, size);
+      const result = await provider.readMemory(handle, address, size);
       return result.data.subarray(0, result.bytesRead);
     } finally {
       provider.closeProcess(handle);
     }
   }
 
-  private writeBuffer(pid: number, address: bigint, data: Buffer): void {
+  private async writeBuffer(pid: number, address: bigint, data: Buffer): Promise<void> {
     if (process.platform === 'win32') {
       const handle = openProcessForMemory(pid, true);
       try {
@@ -77,7 +79,7 @@ export class MemoryController {
           MemoryProtection.ReadWrite,
         ).oldProtection;
       }
-      provider.writeMemory(handle, address, data);
+      await provider.writeMemory(handle, address, data);
     } finally {
       try {
         if (oldProtection !== undefined) {
@@ -100,8 +102,8 @@ export class MemoryController {
     const { patternBytes } = parsePattern(value, valueType as Parameters<typeof parsePattern>[1]);
     const newBuf = Buffer.from(patternBytes);
 
-    const oldBuf = this.readBuffer(pid, addr, newBuf.length);
-    this.writeBuffer(pid, addr, newBuf);
+    const oldBuf = await this.readBuffer(pid, addr, newBuf.length);
+    await this.writeBuffer(pid, addr, newBuf);
 
     const entry: WriteHistoryEntry = {
       id: randomUUID(),
@@ -143,7 +145,7 @@ export class MemoryController {
       const addr = BigInt(entry.address);
       const oldBuf = Buffer.from(entry.oldValue);
 
-      this.writeBuffer(entry.pid, addr, oldBuf);
+      await this.writeBuffer(entry.pid, addr, oldBuf);
 
       entry.undone = true;
       this.undoneStack.push(entry);
@@ -168,7 +170,7 @@ export class MemoryController {
       const addr = BigInt(entry.address);
       const newBuf = Buffer.from(entry.newValue);
 
-      this.writeBuffer(entry.pid, addr, newBuf);
+      await this.writeBuffer(entry.pid, addr, newBuf);
 
       entry.undone = false;
       return entry;
@@ -201,15 +203,13 @@ export class MemoryController {
 
     // Start periodic write
     entry.timer = setInterval(() => {
-      try {
-        this.writeBuffer(pid, addr, valueBuf);
-      } catch {
+      void this.writeBuffer(pid, addr, valueBuf).catch(() => {
         // If write fails, deactivate and fully evict from the index
         // so stale entries don't accumulate.
         entry.isActive = false;
         if (entry.timer) clearInterval(entry.timer);
         this.freezes.delete(entry.id);
-      }
+      });
     }, interval);
     if (typeof entry.timer.unref === 'function') entry.timer.unref();
 

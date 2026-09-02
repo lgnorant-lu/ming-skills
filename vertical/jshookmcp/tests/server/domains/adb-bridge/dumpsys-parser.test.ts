@@ -374,3 +374,21 @@ describe('parseWifi', () => {
     expect(wifi.scanResults).toHaveLength(0);
   });
 });
+
+describe('parseActivity topPid selection', () => {
+  it('prefers the resumed/focused record when the resumed package has multiple records', () => {
+    const raw = [
+      'ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)',
+      '  ActivityRecord{abc u0 com.android.chrome/.Old t1}',
+      '    pid=1111',
+      '  ActivityRecord{def u0 com.android.chrome/.Main t1}(resumed)',
+      '    pid=2222',
+      '  mResumedActivity: ActivityRecord{def u0 com.android.chrome/.Main t1}',
+    ].join('\n');
+
+    const activity = parseActivity(raw);
+    expect(activity.topProcess).toBe('com.android.chrome');
+    // Must be the resumed record's pid, not the first matching package record.
+    expect(activity.topPid).toBe(2222);
+  });
+});

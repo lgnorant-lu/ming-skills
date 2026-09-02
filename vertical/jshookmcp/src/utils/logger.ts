@@ -1,4 +1,5 @@
 import { sensitiveJsonReplacer } from '@modules/security/RedactionService';
+import { readEnvString } from '@src/config/environment';
 
 const ANSI = {
   gray: '\x1b[90m',
@@ -99,4 +100,9 @@ class Logger {
   }
 }
 
-export const logger = new Logger((process.env.LOG_LEVEL as LogLevel) || 'info');
+const configuredLogLevel = readEnvString('LOG_LEVEL', 'info', { trim: true }).toLowerCase();
+const initialLogLevel: LogLevel = ['debug', 'info', 'warn', 'error'].includes(configuredLogLevel)
+  ? (configuredLogLevel as LogLevel)
+  : 'info';
+
+export const logger = new Logger(initialLogLevel);

@@ -26,6 +26,21 @@ export type HttpJsonResult = {
 
 const execFileAsync = promisify(execFile);
 
+// ── default limits (overridable per call via options/args) ──
+
+/** External command version check timeout (e.g. `command --version`). */
+const DEFAULT_COMMAND_VERSION_TIMEOUT_MS = 10_000;
+/** Longest a spawned process is allowed to run before SIGTERM. */
+const DEFAULT_PROCESS_TIMEOUT_MS = 300_000;
+/** Captured stdout cap before truncation flags. */
+const DEFAULT_MAX_STDOUT_BYTES = 10 * 1024 * 1024;
+/** Captured stderr cap before truncation flags. */
+const DEFAULT_MAX_STDERR_BYTES = 1 * 1024 * 1024;
+/** Grace period between SIGTERM and SIGKILL for a timed-out process. */
+const KILL_GRACE_PERIOD_MS = 2_000;
+/** Default timeout for HTTP JSON requests. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+
 export function toTextResponse(payload: Record<string, unknown>): TextToolResponse {
   return {
     content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
@@ -100,7 +115,7 @@ export async function checkExternalCommand(
 ): Promise<TextToolResponse> {
   try {
     const { stdout, stderr } = await execFileAsync(command, versionArgs, {
-      timeout: 10_000,
+      timeout: DEFAULT_COMMAND_VERSION_TIMEOUT_MS,
     });
     const version = (stdout || stderr).trim().split('\n')[0];
     return toTextResponse({
@@ -130,9 +145,9 @@ export async function runProcess(
     cwd?: string;
   } = {},
 ): Promise<ProcessRunResult> {
-  const timeoutMs = options.timeoutMs ?? 300_000;
-  const maxStdout = options.maxStdoutBytes ?? 10 * 1024 * 1024;
-  const maxStderr = options.maxStderrBytes ?? 1 * 1024 * 1024;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_PROCESS_TIMEOUT_MS;
+  const maxStdout = options.maxStdoutBytes ?? DEFAULT_MAX_STDOUT_BYTES;
+  const maxStderr = options.maxStderrBytes ?? DEFAULT_MAX_STDERR_BYTES;
 
   return await new Promise<ProcessRunResult>((resolveResult) => {
     const startedAt = Date.now();
@@ -168,7 +183,7 @@ export async function runProcess(
     const timeoutHandle = setTimeout(() => {
       timedOut = true;
       child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 2_000);
+      setTimeout(() => child.kill('SIGKILL'), KILL_GRACE_PERIOD_MS);
     }, timeoutMs);
 
     child.stdout.on('data', (chunk: Buffer) => {
@@ -250,7 +265,7 @@ export async function requestJson(
   url: string,
   method = 'GET',
   bodyObj?: Record<string, unknown>,
-  timeoutMs = 15_000,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<HttpJsonResult> {
   const body = bodyObj ? JSON.stringify(bodyObj) : undefined;
 

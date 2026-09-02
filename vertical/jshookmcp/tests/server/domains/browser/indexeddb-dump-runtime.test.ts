@@ -40,7 +40,12 @@ function createDatabase(
     transaction(storeName: string) {
       const store = stores[storeName];
       if (!store) throw new Error(`Missing store: ${storeName}`);
+      const txListeners: Record<string, Array<(e: unknown) => void>> = {};
       return {
+        error: undefined,
+        addEventListener(type: string, cb: (e: unknown) => void) {
+          (txListeners[type] ??= []).push(cb);
+        },
         objectStore() {
           const api = {
             getAll(_range?: unknown) {

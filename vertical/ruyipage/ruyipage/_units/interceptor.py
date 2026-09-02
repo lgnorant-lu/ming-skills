@@ -1149,7 +1149,6 @@ class Interceptor(object):
         if "beforeRequestSent" in phases:
             try:
                 self._request_collector = self._owner.network.add_data_collector(
-                    ["beforeRequestSent"],
                     data_types=["request"],
                 )
             except Exception as e:
@@ -1159,7 +1158,6 @@ class Interceptor(object):
         if collect_response:
             try:
                 self._response_collector = self._owner.network.add_data_collector(
-                    ["responseCompleted"],
                     data_types=["response"],
                 )
             except Exception as e:

@@ -54,6 +54,7 @@ export interface ObjectPoolEntry {
  *  - An external symbol address
  */
 export class ObjectPool {
+  private readonly baseAddress: bigint;
   private readonly entries: ObjectPoolEntry[];
   private readonly length: number;
 
@@ -63,10 +64,8 @@ export class ObjectPool {
    * @param data - Raw ObjectPool bytes (must include header + all entries)
    * @param baseAddress - Base address where this pool is mapped (for address resolution)
    */
-  constructor(
-    data: Uint8Array,
-    private readonly baseAddress: bigint = 0n,
-  ) {
+  constructor(data: Uint8Array, baseAddress: bigint = 0n) {
+    this.baseAddress = baseAddress;
     if (data.length < 8) {
       throw new ToolError('VALIDATION', 'ObjectPool data too small (need >= 8 bytes for header)', {
         details: { dataSize: data.length },

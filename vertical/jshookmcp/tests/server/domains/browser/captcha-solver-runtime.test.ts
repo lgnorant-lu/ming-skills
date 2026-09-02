@@ -235,4 +235,84 @@ describe('captcha-solver runtime coverage', () => {
     expect(parsed.injected).toBe(true);
     expect(injectedInputValue).toBe('widget-token-456');
   });
+
+  it('uses the shared CAPTCHA_DEFAULT_TIMEOUT_MS default for widget solving', async () => {
+    vi.useFakeTimers();
+    // Poll interval must be set before module load (constants are read at import time).
+    process.env.CAPTCHA_POLL_INTERVAL_MS = '5000';
+    const { handleWidgetChallengeSolve } = await loadModule();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/in.php')) {
+        return { json: async () => ({ status: 1, request: 'task-default-timeout' }) } as any;
+      }
+      if (url.includes('/res.php')) {
+        // Never-ready response — the poll loop runs until the timeout fires.
+        return { json: async () => ({ status: 0, request: 'CAPCHA_NOT_READY' }) } as any;
+      }
+      throw new Error(`Unexpected fetch url: ${url}`);
+    });
+    (globalThis as any).fetch = fetchMock;
+
+    const collector = createCollector(createPage());
+    const promise = handleWidgetChallengeSolve(
+      {
+        mode: 'external_service',
+        siteKey: 'site-key-timeout',
+        apiKey: 'test-key',
+      },
+      collector,
+    );
+    let settled = false;
+    promise.then(() => {
+      settled = true;
+    });
+
+    // Shared default is CAPTCHA_DEFAULT_TIMEOUT_MS (180s) — at 179s the old
+    // hard-coded 120s default would already have timed out.
+    await vi.advanceTimersByTimeAsync(179_000);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    const parsed = parseJson<any>(await promise);
+    expect(parsed.success).toBe(false);
+    expect(parsed.error).toContain('timeout');
+  });
+
+  it('caps hook-mode wait at CAPTCHA_HOOK_TIMEOUT_MAX_MS', async () => {
+    const { handleWidgetChallengeSolve } = await loadModule();
+    let capturedHookTimeout: number | null = null;
+    const page = createPage({
+      evaluate: vi.fn(async (pageFunction: any, hookTimeoutMs: number, callbackName: string) => {
+        capturedHookTimeout = hookTimeoutMs;
+        const prevWindow = (globalThis as any).window;
+        (globalThis as any).window = { [callbackName]: vi.fn() };
+        try {
+          const promise = pageFunction(hookTimeoutMs, callbackName);
+          (globalThis as any).window[callbackName]('hook-token');
+          return await promise;
+        } finally {
+          (globalThis as any).window = prevWindow;
+        }
+      }),
+    });
+    const collector = createCollector(page);
+
+    // Default timeoutMs (180s) exceeds the hook ceiling — the wait must be
+    // capped at CAPTCHA_HOOK_TIMEOUT_MAX_MS (30s).
+    const parsed = parseJson<any>(
+      await handleWidgetChallengeSolve(
+        {
+          mode: 'hook',
+          siteKey: 'site-key-hook-cap',
+          callbackName: 'captchaDoneCap',
+        },
+        collector,
+      ),
+    );
+
+    expect(parsed.success).toBe(true);
+    expect(parsed.token).toBe('hook-token');
+    expect(capturedHookTimeout).toBe(30_000);
+  });
 });

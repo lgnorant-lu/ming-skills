@@ -196,13 +196,26 @@ export class ToolRegistry {
 
     for (const [name, spec] of this.specs) {
       promises.push(
-        probeCommand(spec.command, spec.versionArgs).then((result) => {
-          results[name] = result;
-          this.probeCache.set(name, result);
-        }),
+        probeCommand(spec.command, spec.versionArgs)
+          .then((result) => {
+            results[name] = result;
+            this.probeCache.set(name, result);
+          })
+          .catch((error: unknown) => {
+            // A single probe must never fail the whole batch (that would also
+            // prevent the cache from ever becoming valid, forcing a full
+            // re-probe on every call). Degrade the tool to unavailable and
+            // surface the error in its result instead.
+            const reason = error instanceof Error ? error.message : String(error);
+            const failure: ProbeResult = { available: false, reason: `Probe threw: ${reason}` };
+            results[name] = failure;
+            this.probeCache.set(name, failure);
+          }),
       );
     }
 
+    // Refresh the expiry even when some probes failed, so partial results are
+    // reused within the TTL instead of triggering a full re-probe every call.
     await Promise.all(promises);
     this.probeCacheExpiry = now + this.PROBE_CACHE_TTL;
 

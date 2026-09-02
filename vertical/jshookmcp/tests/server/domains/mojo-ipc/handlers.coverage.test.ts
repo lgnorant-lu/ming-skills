@@ -697,10 +697,10 @@ describe('MojoIPCHandlers — coverage expansion', () => {
       expect(result).toMatchObject({ success: true, totalAvailable: 1 });
     });
 
-    it('handles limit=0 by clamping to 0 (below default 100)', async () => {
+    it('clamps limit=0 up to 1 (slice(0, 0) would return empty)', async () => {
       const result = await handlers.handleMojoMessagesGet({ limit: 0 });
       expect(monitor.getMessages).toHaveBeenCalledWith({
-        limit: 0,
+        limit: 1,
         interfaceName: undefined,
         messageType: undefined,
         sinceTimestamp: undefined,
@@ -710,10 +710,23 @@ describe('MojoIPCHandlers — coverage expansion', () => {
       expect(result).toMatchObject({ success: true });
     });
 
-    it('handles negative limit by passing undefined through argNumber', async () => {
+    it('clamps negative limit up to 1 (slice(0, -N) would drop the last N messages)', async () => {
       const result = await handlers.handleMojoMessagesGet({ limit: -5 });
       expect(monitor.getMessages).toHaveBeenCalledWith({
-        limit: -5,
+        limit: 1,
+        interfaceName: undefined,
+        messageType: undefined,
+        sinceTimestamp: undefined,
+        hexSearch: undefined,
+        direction: undefined,
+      });
+      expect(result).toMatchObject({ success: true });
+    });
+
+    it('falls back to default 100 when limit is NaN', async () => {
+      const result = await handlers.handleMojoMessagesGet({ limit: 'not-a-number' });
+      expect(monitor.getMessages).toHaveBeenCalledWith({
+        limit: 100,
         interfaceName: undefined,
         messageType: undefined,
         sinceTimestamp: undefined,

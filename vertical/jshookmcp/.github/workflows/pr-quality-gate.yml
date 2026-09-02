@@ -55,7 +55,8 @@ jobs:
             server.json
             tsconfig.json
             vitest.config.ts
-            biome.json
+            .oxlintrc.json
+            .oxfmtrc.json
 
           # 账号年龄与 fork 频次：新号 / 批量 fork 是 spam 强信号。
           min-account-age: 30

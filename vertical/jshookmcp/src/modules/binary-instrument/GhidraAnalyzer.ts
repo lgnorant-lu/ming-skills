@@ -8,6 +8,7 @@ import { probeCommand, type ProbeResult } from '@modules/external/ToolProbe';
 import { logger } from '@utils/logger';
 import { GHIDRA_TIMEOUT_MS } from '@src/constants';
 import { PrerequisiteError } from '@errors/PrerequisiteError';
+import { readEnvNullableString } from '@src/config/environment';
 
 const GHIDRA_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 const GHIDRA_ENV_PATHS = ['GHIDRA_HEADLESS_PATH', 'GHIDRA_ANALYZE_HEADLESS'] as const;
@@ -297,14 +298,14 @@ export class GhidraAnalyzer {
 
   private async resolveFromEnvironment(): Promise<ProbeResult | null> {
     for (const key of GHIDRA_ENV_PATHS) {
-      const raw = process.env[key]?.trim();
+      const raw = readEnvNullableString(key, { trim: true });
       if (!raw) continue;
       const resolved = await this.probeCandidate(raw, key);
       if (resolved) return resolved;
     }
 
     for (const key of GHIDRA_HOME_ENV_PATHS) {
-      const raw = process.env[key]?.trim();
+      const raw = readEnvNullableString(key, { trim: true });
       if (!raw) continue;
       const resolved = await this.probeHomeDirectory(raw, key);
       if (resolved) return resolved;

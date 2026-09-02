@@ -1,4 +1,5 @@
 import type { PluginLifecycleContext } from '@server/plugins/PluginContract';
+import { readEnvNullableString } from '@src/config/environment';
 
 function normalizeSegment(value: string): string {
   return value
@@ -29,7 +30,7 @@ export function getPluginBooleanConfig(
   fallback: boolean,
 ): boolean {
   for (const candidate of envCandidates(pluginId, key)) {
-    const parsed = parseBoolean(process.env[candidate]);
+    const parsed = parseBoolean(readEnvNullableString(candidate) ?? undefined);
     if (parsed !== undefined) return parsed;
   }
 
@@ -49,11 +50,13 @@ const VALID_BOOST_TIERS: ReadonlySet<BoostTier> = new Set<BoostTier>([
  */
 export function getPluginBoostTier(pluginId: string): BoostTier {
   for (const candidate of envCandidates(pluginId, 'BOOST_DOMAIN')) {
-    const raw = process.env[candidate]?.trim().toLowerCase();
+    const raw = readEnvNullableString(candidate, { trim: true })?.toLowerCase();
     if (raw && VALID_BOOST_TIERS.has(raw as BoostTier)) return raw as BoostTier;
   }
 
-  const globalDefault = process.env.MCP_DEFAULT_PLUGIN_BOOST_TIER?.trim().toLowerCase();
+  const globalDefault = readEnvNullableString('MCP_DEFAULT_PLUGIN_BOOST_TIER', {
+    trim: true,
+  })?.toLowerCase();
   if (globalDefault && VALID_BOOST_TIERS.has(globalDefault as BoostTier))
     return globalDefault as BoostTier;
 

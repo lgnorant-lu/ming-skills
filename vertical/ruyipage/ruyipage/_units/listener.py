@@ -28,10 +28,12 @@ import time
 import logging
 import threading
 import base64
-from queue import Queue, Empty
+from collections import deque
+from queue import Queue, Empty, Full
 
 from .._bidi import session as bidi_session
 from .._functions.queue_utils import queue_get as _queue_get
+from .._functions.settings import Settings
 
 logger = logging.getLogger('ruyipage')
 
@@ -241,8 +243,11 @@ class Listener(object):
         self._targets = None  # True=全部, set=URL模式匹配
         self._is_regex = False
         self._method_filter = None
-        self._caught = Queue()
-        self._packets = []
+        # 事件由 driver 的事件线程写入，用户线程读取，两侧都要加锁；
+        # 两个缓冲区都设上限，避免长时间监听高流量站点时无限增长。
+        self._lock = threading.Lock()
+        self._caught = Queue(maxsize=Settings.listen_max_packets)
+        self._packets = deque(maxlen=Settings.listen_max_packets)
         self._subscription_id = None
         self._subscribed_events = []
         self._response_collector = None
@@ -275,7 +280,8 @@ class Listener(object):
                 print(f"[{packet.status}] {packet.method} {packet.url}")
         """
         self._drain_queue()
-        return self._packets[:]
+        with self._lock:
+            return list(self._packets)
 
     def start(self, targets=True, is_regex=False, method=None, collect_response=True):
         """开始监听网络事件。
@@ -342,14 +348,14 @@ class Listener(object):
         else:
             self._targets = True
 
-        self._caught = Queue()
-        self._packets = []
+        self._caught = Queue(maxsize=Settings.listen_max_packets)
+        with self._lock:
+            self._packets = deque(maxlen=Settings.listen_max_packets)
         self._response_collector = None
 
         if collect_response:
             try:
                 self._response_collector = self._owner.network.add_data_collector(
-                    ['responseCompleted'],
                     data_types=['response'],
                 )
             except Exception as e:
@@ -521,7 +527,8 @@ class Listener(object):
                 self._caught.get_nowait()
             except Empty:
                 break
-        self._packets.clear()
+        with self._lock:
+            self._packets.clear()
 
     def _on_response(self, params):
         """处理响应完成事件"""
@@ -556,8 +563,7 @@ class Listener(object):
             owner=self._owner,
         )
 
-        self._caught.put(packet)
-        self._packets.append(packet)
+        self._offer(packet)
 
     def _on_fetch_error(self, params):
         """处理请求失败事件"""
@@ -579,8 +585,28 @@ class Listener(object):
             timestamp=params.get('timestamp', 0),
         )
 
-        self._caught.put(packet)
-        self._packets.append(packet)
+        self._offer(packet)
+
+    def _offer(self, packet):
+        """记录一个数据包。
+
+        本方法运行在 driver 的事件线程上，任何阻塞都会拖慢整个事件分发，
+        因此等待队列满时丢弃最旧的未消费包，而不是阻塞等待空位。
+        """
+        with self._lock:
+            self._packets.append(packet)
+
+        try:
+            self._caught.put_nowait(packet)
+        except Full:
+            try:
+                self._caught.get_nowait()
+            except Empty:
+                pass
+            try:
+                self._caught.put_nowait(packet)
+            except Full:
+                logger.debug('listen 等待队列已满，丢弃数据包: %s', packet.url)
 
     def _match(self, url, method):
         """检查 URL 和方法是否匹配"""
@@ -605,7 +631,8 @@ class Listener(object):
         while not self._caught.empty():
             try:
                 packet = self._caught.get_nowait()
-                if packet not in self._packets:
-                    self._packets.append(packet)
             except Empty:
                 break
+            with self._lock:
+                if packet not in self._packets:
+                    self._packets.append(packet)

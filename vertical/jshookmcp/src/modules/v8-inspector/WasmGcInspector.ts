@@ -214,7 +214,6 @@ export async function inspectWasmGc(
 
         // Build a synthetic enumeration by scanning "function wasm-function["
         // patterns in callable globals — this is a heuristic for WASM GC presence.
-        const wasmPatternSeen = new Set();
         try {
           // Walk the global object looking for WASM-exported functions
           const seen = new Set();
@@ -226,7 +225,6 @@ export async function inspectWasmGc(
                 if (src.includes('wasm-function[') || src.includes('WebAssembly')) {
                   if (!seen.has(src.substring(0, 80))) {
                     seen.add(src.substring(0, 80));
-                    wasmPatternSeen.add({ name: key, isWasmExport: src.includes('wasm-function[') });
                   }
                 }
               }

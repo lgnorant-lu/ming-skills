@@ -12,12 +12,10 @@ const collectorHelpers = vi.hoisted(() => ({
   collectInlineScripts: vi.fn(async (): Promise<MockCollectedFile[]> => []),
   collectServiceWorkers: vi.fn(async (): Promise<MockCollectedFile[]> => []),
   collectWebWorkers: vi.fn(async (): Promise<MockCollectedFile[]> => []),
-  analyzeDependencies: vi.fn(
-    (files: Array<{ url: string }>): MockDependencyGraph => ({
-      nodes: files.map((file) => ({ id: file.url, url: file.url, type: 'external' })),
-      edges: [],
-    }),
-  ),
+  analyzeDependencies: vi.fn((files: Array<{ url: string }>): MockDependencyGraph => ({
+    nodes: files.map((file) => ({ id: file.url, url: file.url, type: 'external' })),
+    edges: [],
+  })),
   setupWebWorkerTracking: vi.fn(async () => undefined),
 }));
 

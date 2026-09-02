@@ -479,10 +479,21 @@ def set_files(driver, context, element, files):
     })
 
 
-def build_pen_action(x, y, pressure=0.5, tilt_x=0, tilt_y=0,
-                     twist=0, tangential_pressure=0.0, button=0, duration=50,
-                     altitude_angle=None, azimuth_angle=None,
-                     width=None, height=None):
+def build_pen_action(
+    x,
+    y,
+    pressure=0.5,
+    tilt_x=0,
+    tilt_y=0,
+    twist=0,
+    tangential_pressure=0.0,
+    button=0,
+    duration=50,
+    altitude_angle=None,
+    azimuth_angle=None,
+    width=None,
+    height=None,
+):
     """构建 pen (触控笔) pointer 动作序列。
 
     按照 W3C BiDi 规范，pen 类型的 pointer action 支持额外的
@@ -492,8 +503,8 @@ def build_pen_action(x, y, pressure=0.5, tilt_x=0, tilt_y=0,
         x:                     目标 X 坐标 (视口像素)。
         y:                     目标 Y 坐标 (视口像素)。
         pressure:              笔尖压力，范围 [0.0, 1.0]。默认 0.5。
-        tilt_x:                X 轴倾斜角度，范围 [-90, 90]。默认 0。
-        tilt_y:                Y 轴倾斜角度，范围 [-90, 90]。默认 0。
+        tilt_x:                已从 BiDi 删除的兼容参数；仅 0/None 可用。
+        tilt_y:                已从 BiDi 删除的兼容参数；仅 0/None 可用。
         twist:                 旋转角度，范围 [0, 359]。默认 0。
         tangential_pressure:   切向压力，范围 [-1.0, 1.0]。默认 0.0。
         button:                鼠标按钮编号。默认 0。
@@ -508,27 +519,37 @@ def build_pen_action(x, y, pressure=0.5, tilt_x=0, tilt_y=0,
     Returns:
         list: BiDi actions 列表，可直接传入 perform_actions。
     """
+    if tilt_x not in (0, None) or tilt_y not in (0, None):
+        raise ValueError(
+            "tilt_x and tilt_y were removed from WebDriver BiDi; "
+            "use altitude_angle and azimuth_angle"
+        )
+    common = {
+        'pressure': pressure,
+        'twist': twist,
+        'tangentialPressure': tangential_pressure,
+    }
+    if altitude_angle is not None:
+        common['altitudeAngle'] = altitude_angle
+    if azimuth_angle is not None:
+        common['azimuthAngle'] = azimuth_angle
+    if width is not None:
+        common['width'] = width
+    if height is not None:
+        common['height'] = height
+
     move_action = {
-        'type': 'pointerMove', 'x': x, 'y': y, 'duration': duration,
-        'pressure': pressure, 'tiltX': tilt_x, 'tiltY': tilt_y,
-        'twist': twist, 'tangentialPressure': tangential_pressure
+        'type': 'pointerMove',
+        'x': x,
+        'y': y,
+        'duration': duration,
+        **common,
     }
     down_action = {
-        'type': 'pointerDown', 'button': button,
-        'pressure': pressure, 'tiltX': tilt_x, 'tiltY': tilt_y
+        'type': 'pointerDown',
+        'button': button,
+        **common,
     }
-
-    # W3C BiDi 规范扩展属性
-    if altitude_angle is not None:
-        move_action['altitudeAngle'] = altitude_angle
-        down_action['altitudeAngle'] = altitude_angle
-    if azimuth_angle is not None:
-        move_action['azimuthAngle'] = azimuth_angle
-        down_action['azimuthAngle'] = azimuth_angle
-    if width is not None:
-        move_action['width'] = width
-    if height is not None:
-        move_action['height'] = height
 
     return [{
         'type': 'pointer',
@@ -583,38 +604,42 @@ def build_key_action(keys):
     return [{'type': 'key', 'id': 'kbd0', 'actions': acts}]
 
 
-def build_wheel_action(x, y, delta_x=0, delta_y=120, delta_z=0,
-                       delta_mode=0, duration=0, origin="viewport"):
+def build_wheel_action(
+    x,
+    y,
+    delta_x=0,
+    delta_y=120,
+    delta_z=0,
+    delta_mode=0,
+    duration=0,
+    origin="viewport",
+):
     """构建 wheel (滚轮) 滚动动作。
 
-    按照 W3C BiDi 规范，wheel scroll 动作支持三轴滚动
-    以及 deltaMode 控制滚动单位。
+    按照 W3C BiDi 规范构建以 CSS 像素为单位的二维滚动动作。
 
     Args:
         x:          滚动位置的 X 坐标 (视口像素)。
         y:          滚动位置的 Y 坐标 (视口像素)。
         delta_x:    水平滚动量。正值向右，负值向左。默认 0。
         delta_y:    垂直滚动量。正值向下，负值向上。默认 120。
-        delta_z:    Z 轴滚动量 (用于 3D 滚动设备)。默认 0。
-        delta_mode: 滚动单位模式。默认 0。
-                    - 0: 像素 (pixel)
-                    - 1: 行 (line)
-                    - 2: 页 (page)
+        delta_z:    已删除的兼容参数；仅 0/None 可用。
+        delta_mode: 已删除的兼容参数；仅 0/None 可用。
         duration:   滚动动画时长 (毫秒)。默认 0。
         origin:     坐标参考原点。"viewport"(默认) / "pointer" / 元素引用。
 
     Returns:
         list: BiDi actions 列表，可直接传入 perform_actions。
     """
+    if delta_z not in (0, None) or delta_mode not in (0, None):
+        raise ValueError(
+            "delta_z and delta_mode are not part of WebDriver BiDi wheel actions"
+        )
     action = {
         'type': 'scroll',
         'x': x, 'y': y,
         'deltaX': delta_x, 'deltaY': delta_y,
     }
-    if delta_z != 0:
-        action['deltaZ'] = delta_z
-    if delta_mode != 0:
-        action['deltaMode'] = delta_mode
     if duration != 0:
         action['duration'] = duration
     if origin != "viewport":

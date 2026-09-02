@@ -112,7 +112,6 @@ const SYNONYM_GROUPS: SynonymGroup[] = [
     concept: 'memory-heap',
     synonyms: ['memory', 'heap', 'leak', 'allocation', 'retained', 'object', 'gc', 'snapshot'],
     tools: [
-      'performance_take_heap_snapshot',
       'v8_heap_snapshot_capture',
       'v8_heap_snapshot_analyze',
       'v8_heap_find_leaks',
@@ -203,13 +202,7 @@ const SYNONYM_GROUPS: SynonymGroup[] = [
   {
     concept: 'v8-internals',
     synonyms: ['v8', 'bytecode', 'jit', 'turbofan', 'deoptimize', 'optimize', 'ignition'],
-    tools: [
-      'v8_bytecode_extract',
-      'v8_turbofan_inspect',
-      'v8_jit_inspect',
-      'v8_deopt_trace',
-      'debugger_disassemble',
-    ],
+    tools: ['v8_bytecode_extract', 'v8_turbofan_inspect', 'v8_deopt_trace', 'debugger_disassemble'],
     confidence: 0.9,
     description: 'Inspect V8 internals: bytecode, JIT, deoptimization',
   },

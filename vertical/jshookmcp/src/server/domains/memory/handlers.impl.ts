@@ -18,6 +18,7 @@ import type { MemoryScanner } from '@native/MemoryScanner';
 import type { MemoryScanSessionManager } from '@native/MemoryScanSession';
 import type { PointerChainEngine } from '@native/PointerChainEngine';
 import type { HardwareBreakpointEngine } from '@native/HardwareBreakpoint';
+import type { SoftwareBreakpointEngine } from '@native/SoftwareBreakpoint';
 import type { CodeInjector } from '@native/CodeInjector';
 import type { MemoryController } from '@native/MemoryController';
 import type { Speedhack } from '@native/Speedhack';
@@ -42,7 +43,22 @@ import {
 } from './handlers/find-accesses';
 import { RegionHandlers } from './handlers/region-enumerate';
 import { MinidumpHandlers } from './handlers/minidump-parse';
+import { MonoHandlers } from './handlers/mono';
 import { MemoryAuditTrail } from '@modules/process/memory/AuditTrail';
+import { HandleEnumHandlers } from './handlers/handle-enum';
+import { ProtectHandlers } from './handlers/protect';
+import { RegionCompareHandlers } from './handlers/region-compare';
+import { BookmarkHandlers } from './handlers/bookmark';
+import { FindReferencesHandlers } from './handlers/find-references';
+import { ReverseMWTHandlers } from './handlers/reverse-mwt';
+import { TraceCodeHandlers } from './handlers/trace-code';
+import { PointerMapHandlers } from './handlers/pointer-map';
+import { AssembleHandlers } from './handlers/assemble';
+import { AutoAssemblerHandlers } from './handlers/auto-assembler';
+import { HypervisorHandlers } from './handlers/hypervisor';
+import { AntiDetectionHandlers } from './handlers/antidetection';
+import { AntiDetectionCheckHandlers } from './handlers/antidetection-check';
+
 import { logger } from '@utils/logger';
 
 export class MemoryScanHandlers {
@@ -56,6 +72,21 @@ export class MemoryScanHandlers {
   private readonly regions: RegionHandlers;
   private readonly findAccesses: FindAccessesHandlers;
   private readonly minidump: MinidumpHandlers;
+  private readonly mono: MonoHandlers;
+  private readonly handleEnum: HandleEnumHandlers;
+  private readonly protect: ProtectHandlers;
+  private readonly regionCompare: RegionCompareHandlers;
+  private readonly bookmarks: BookmarkHandlers;
+  private readonly findRefs: FindReferencesHandlers;
+  private readonly reverseMwt: ReverseMWTHandlers;
+  private readonly traceCode: TraceCodeHandlers;
+  private readonly ptrMaps: PointerMapHandlers;
+  private readonly assembler: AssembleHandlers;
+  private readonly aa: AutoAssemblerHandlers;
+  private readonly hypervisor: HypervisorHandlers;
+  private readonly antidetection: AntiDetectionHandlers;
+  private readonly antidetectionCheck: AntiDetectionCheckHandlers;
+
   /** Shared audit trail for destructive operations (write/freeze/patch). */
   readonly auditTrail = new MemoryAuditTrail();
 
@@ -65,6 +96,8 @@ export class MemoryScanHandlers {
     ptrEngine: PointerChainEngine,
     structAnalyzer: import('@native/StructureAnalyzer').StructureAnalyzer,
     bpEngine: HardwareBreakpointEngine | null,
+    vehEngine: import('@native/VehDebugger').VehDebuggerEngine | null,
+    softBpEngine: SoftwareBreakpointEngine | null,
     injector: CodeInjector,
     memCtrl: MemoryController,
     speedhackEngine: Speedhack | null,
@@ -79,7 +112,15 @@ export class MemoryScanHandlers {
     this.scans = new ScanHandlers(scanner, eventBus, processManager, ctx, this.auditTrail);
     this.ptrChains = new PointerChainHandlers(ptrEngine, processManager, ctx, this.auditTrail);
     this.structures = new StructureHandlers(structAnalyzer, processManager, ctx, this.auditTrail);
-    this.hooks = new HookHandlers(bpEngine, injector, processManager, ctx, this.auditTrail);
+    this.hooks = new HookHandlers(
+      bpEngine,
+      vehEngine,
+      softBpEngine,
+      injector,
+      processManager,
+      ctx,
+      this.auditTrail,
+    );
     this.readwrite = new ReadWriteHandlers(memCtrl, processManager, ctx, this.auditTrail);
     this.integrity = new IntegrityHandlers(
       speedhackEngine,
@@ -99,6 +140,20 @@ export class MemoryScanHandlers {
       ctx,
     );
     this.minidump = new MinidumpHandlers();
+    this.mono = new MonoHandlers(processManager, ctx);
+    this.handleEnum = new HandleEnumHandlers(processManager, ctx);
+    this.protect = new ProtectHandlers(processManager, ctx, this.auditTrail);
+    this.regionCompare = new RegionCompareHandlers(processManager, ctx);
+    this.bookmarks = new BookmarkHandlers(processManager, ctx);
+    this.findRefs = new FindReferencesHandlers(processManager, ctx);
+    this.reverseMwt = new ReverseMWTHandlers(memCtrl, processManager, ctx);
+    this.traceCode = new TraceCodeHandlers(processManager, ctx);
+    this.ptrMaps = new PointerMapHandlers();
+    this.assembler = new AssembleHandlers(processManager, ctx, this.auditTrail);
+    this.aa = new AutoAssemblerHandlers(injector, scanner, memCtrl, processManager);
+    this.hypervisor = new HypervisorHandlers();
+    this.antidetection = new AntiDetectionHandlers();
+    this.antidetectionCheck = new AntiDetectionCheckHandlers();
   }
 
   // ── Session ──
@@ -117,6 +172,8 @@ export class MemoryScanHandlers {
   handleScanList = (args: Record<string, unknown>) => this.sessions.handleScanList(args);
   handleScanDelete = (args: Record<string, unknown>) => this.sessions.handleScanDelete(args);
   handleScanExport = (args: Record<string, unknown>) => this.sessions.handleScanExport(args);
+  handleSessionExportData = (args: Record<string, unknown>) =>
+    this.sessions.handleSessionExportData(args);
 
   // ── Scan ──
 
@@ -126,12 +183,20 @@ export class MemoryScanHandlers {
   handlePointerScan = (args: Record<string, unknown>) => this.scans.handlePointerScan(args);
   handleGroupScan = (args: Record<string, unknown>) => this.scans.handleGroupScan(args);
   handleAobScan = (args: Record<string, unknown>) => this.scans.handleAobScan(args);
+  handleGenerateSignature = (args: Record<string, unknown>) =>
+    this.scans.handleGenerateSignature(args);
+  handleSearchString = (args: Record<string, unknown>) => this.scans.handleSearchString(args);
+  handleRegisterType = (args: Record<string, unknown>) => this.scans.handleRegisterType(args);
+  handleListTypes = (args: Record<string, unknown>) => this.scans.handleListTypes(args);
+  handleUnregisterType = (args: Record<string, unknown>) => this.scans.handleUnregisterType(args);
 
   // ── Pointer Chain ──
 
   handlePointerChainDispatch(args: Record<string, unknown>) {
     const action = String(args['action'] ?? '');
     switch (action) {
+      case 'autoscan':
+        return this.ptrChains.handlePointerChainAutoscan(args);
       case 'validate':
         return this.ptrChains.handlePointerChainValidate(args);
       case 'resolve':
@@ -144,6 +209,8 @@ export class MemoryScanHandlers {
   }
   handlePointerChainScan = (args: Record<string, unknown>) =>
     this.ptrChains.handlePointerChainScan(args);
+  handlePointerChainAutoscan = (args: Record<string, unknown>) =>
+    this.ptrChains.handlePointerChainAutoscan(args);
   handlePointerChainValidate = (args: Record<string, unknown>) =>
     this.ptrChains.handlePointerChainValidate(args);
   handlePointerChainResolve = (args: Record<string, unknown>) =>
@@ -160,6 +227,17 @@ export class MemoryScanHandlers {
     this.structures.handleStructureExportC(args);
   handleStructureCompare = (args: Record<string, unknown>) =>
     this.structures.handleStructureCompare(args);
+  handleRttiInfo = (args: Record<string, unknown>) => this.structures.handleRttiInfo(args);
+
+  // ── Cheat Table ──
+
+  handleCheatTableDispatch(args: Record<string, unknown>) {
+    const action = String(args['action'] ?? '');
+    if (action === 'import') return this.structures.handleCheatTableImport(args);
+    if (action === 'sign') return this.structures.handleCheatTableSign(args);
+    if (action === 'verify') return this.structures.handleCheatTableVerify(args);
+    return this.structures.handleCheatTableExport(args);
+  }
 
   // ── Hook (breakpoint + injection) ──
 
@@ -185,6 +263,12 @@ export class MemoryScanHandlers {
   handlePatchNop = (args: Record<string, unknown>) => this.hooks.handlePatchNop(args);
   handlePatchUndo = (args: Record<string, unknown>) => this.hooks.handlePatchUndo(args);
   handleCodeCaves = (args: Record<string, unknown>) => this.hooks.handleCodeCaves(args);
+  handleMemoryAllocate = (args: Record<string, unknown>) => this.hooks.handleMemoryAllocate(args);
+  handleMemoryFree = (args: Record<string, unknown>) => this.hooks.handleMemoryFree(args);
+  handleInjectShellcode = (args: Record<string, unknown>) => this.hooks.handleInjectShellcode(args);
+  handleInjectDll = (args: Record<string, unknown>) => this.hooks.handleInjectDll(args);
+  handleCallStack = (args: Record<string, unknown>) => this.hooks.handleCallStack(args);
+  handleProcessControl = (args: Record<string, unknown>) => this.hooks.handleProcessControl(args);
 
   // ── Read / Write ──
 
@@ -204,6 +288,9 @@ export class MemoryScanHandlers {
   handleDump = (args: Record<string, unknown>) => this.readwrite.handleDump(args);
   handleWriteUndo = (args: Record<string, unknown>) => this.readwrite.handleWriteUndo(args);
   handleWriteRedo = (args: Record<string, unknown>) => this.readwrite.handleWriteRedo(args);
+  handleBatchEdit = (args: Record<string, unknown>) => this.readwrite.handleBatchEdit(args);
+  handleWatch = (args: Record<string, unknown>) => this.readwrite.handleWatch(args);
+  handleFreezeExport = (args: Record<string, unknown>) => this.readwrite.handleFreezeExport(args);
 
   // ── Integrity (speedhack + heap + PE + anti-cheat) ──
 
@@ -232,6 +319,41 @@ export class MemoryScanHandlers {
   handleIntegrityCheck = (args: Record<string, unknown>) =>
     this.integrity.handleIntegrityCheck(args);
 
+  // ── Type Define ──
+
+  handleTypeDefine = (args: Record<string, unknown>) => this.structures.handleTypeDefine(args);
+
+  // ── Emulator Detection ──
+
+  async handleEmulatorDetect(args: Record<string, unknown>) {
+    const { detectEmulator, listKnownEmulators } = await import('./handlers/emulator');
+    const processName = typeof args.processName === 'string' ? args.processName : '';
+    const moduleNames = Array.isArray(args.moduleNames)
+      ? (args.moduleNames as string[])
+      : undefined;
+    const listAll = args.list === true || args.list === 'true';
+
+    if (listAll) {
+      return {
+        success: true,
+        knownEmulators: listKnownEmulators(),
+        count: listKnownEmulators().length,
+      };
+    }
+
+    if (!processName) {
+      throw new Error(
+        'memory_emulator_detect: missing required argument "processName" (or set list=true to list all known emulators)',
+      );
+    }
+
+    const result = detectEmulator(processName, moduleNames);
+    return {
+      success: true,
+      ...result,
+    };
+  }
+
   // ── Region Enumeration ──
 
   handleRegionEnumerate = (args: Record<string, unknown>) =>
@@ -242,10 +364,132 @@ export class MemoryScanHandlers {
   handleFindAccesses = (args: Record<string, unknown>) =>
     this.findAccesses.handleFindAccesses(args);
 
+  // ── Find References (x64dbg parity) ──
+
+  handleFindReferences = (args: Record<string, unknown>) =>
+    this.findRefs.handleFindReferences(args);
+
+  // ── Reverse MWT (inverse of find_accesses) ──
+
+  handleReverseMWT = (args: Record<string, unknown>) => this.reverseMwt.handleReverseMWT(args);
+
+  // ── Code Trace (Ultimap-style) ──
+
+  handleTraceCode = (args: Record<string, unknown>) => this.traceCode.handleTraceCode(args);
+
   // ── Minidump Parser ──
 
   handleMemoryParseDump = (args: Record<string, unknown>) =>
     this.minidump.handleMemoryParseDump(args);
+
+  // ── Mono / .NET Runtime ──
+
+  handleMonoDetect = (args: Record<string, unknown>) => this.mono.handleMonoDetect(args);
+  handleMonoAssemblies = (args: Record<string, unknown>) => this.mono.handleMonoAssemblies(args);
+  handleMonoClasses = (args: Record<string, unknown>) => this.mono.handleMonoClasses(args);
+  handleMonoObjects = (args: Record<string, unknown>) => this.mono.handleMonoObjects(args);
+  handleMonoFields = (args: Record<string, unknown>) => this.mono.handleMonoFields(args);
+  handleMonoMethods = (args: Record<string, unknown>) => this.mono.handleMonoMethods(args);
+  // ── Handle Enumeration ──
+
+  handleHandleEnum = (args: Record<string, unknown>) => this.handleEnum.handleHandleEnum(args);
+
+  // ── Memory Protection ──
+
+  handleProtect = (args: Record<string, unknown>) => this.protect.handleProtect(args);
+
+  // ── Region Comparison ──
+
+  handleRegionCompare = (args: Record<string, unknown>) =>
+    this.regionCompare.handleRegionCompare(args);
+
+  // ── Pointer Map Persistence (.PTR parity) ──
+
+  handlePointerMap = (args: Record<string, unknown>) => this.ptrMaps.handlePointerMap(args);
+
+  // ── Inline Assembler (x64dbg parity) ──
+
+  handleAssemble = (args: Record<string, unknown>) => this.assembler.handleAssemble(args);
+
+  // ── Auto Assembler (CE parity) ──
+
+  handleAutoAssemble = (args: Record<string, unknown>) => this.aa.handleAutoAssemble(args);
+  handleAutoAssembleDisable = (args: Record<string, unknown>) =>
+    this.aa.handleAutoAssembleDisable(args);
+
+  // ── Bookmarks ──
+
+  handleBookmarkDispatch(args: Record<string, unknown>) {
+    return this.bookmarks.handleBookmarkDispatch(args);
+  }
+
+  // ── Anti-Detection ──
+
+  handleAntiDetection = (args: Record<string, unknown>) =>
+    this.antidetection.handleAntiDetection(args);
+
+  handleAntiDetectionCheck = (args: Record<string, unknown>) =>
+    this.antidetectionCheck.handleCheck(args);
+
+  // ── EPT Hypervisor ──
+
+  handleHypervisor = (args: Record<string, unknown>) => this.hypervisor.handleHypervisor(args);
+
+  // ── Remote Debugging Stub ──
+
+  async handleRemote(args: Record<string, unknown>): Promise<unknown> {
+    const { getOrCreateRemoteProxy, getRemoteProxy, removeRemoteProxy, listRemoteProxies } =
+      await import('@native/RemoteProxy');
+
+    const action = typeof args.action === 'string' ? args.action : 'status';
+    const proxyId = typeof args.proxyId === 'string' ? args.proxyId : 'default';
+    const url = typeof args.url === 'string' ? args.url : '';
+
+    if (action === 'disconnect') {
+      const removed = removeRemoteProxy(proxyId);
+      return { disconnected: removed, proxyId };
+    }
+
+    if (action === 'status') {
+      const proxy = getRemoteProxy(proxyId);
+      if (proxy) return proxy.status;
+      return { proxies: listRemoteProxies() };
+    }
+
+    if (action === 'connect') {
+      if (!url) throw new Error('memory_remote: "url" is required for connect action');
+
+      const authToken = typeof args.authToken === 'string' ? args.authToken : undefined;
+      const connectTimeoutMs =
+        typeof args.connectTimeoutMs === 'number' ? args.connectTimeoutMs : undefined;
+
+      const proxy = getOrCreateRemoteProxy(proxyId, { url, authToken, connectTimeoutMs });
+      await proxy.connect();
+      return proxy.status;
+    }
+
+    if (action === 'forward') {
+      if (!url) throw new Error('memory_remote: "url" is required for forward action');
+
+      const toolName = typeof args.toolName === 'string' ? args.toolName : '';
+      if (!toolName) throw new Error('memory_remote: "toolName" is required for forward action');
+
+      const toolArgs =
+        typeof args.toolArgs === 'object' && args.toolArgs !== null
+          ? (args.toolArgs as Record<string, unknown>)
+          : {};
+      const requestTimeoutMs =
+        typeof args.requestTimeoutMs === 'number' ? args.requestTimeoutMs : undefined;
+
+      const proxy = getOrCreateRemoteProxy(proxyId, { url });
+      const result = await proxy.forward(toolName, toolArgs, requestTimeoutMs);
+      return { result, proxyId };
+    }
+
+    throw new Error(
+      `memory_remote: invalid action "${action}" — expected connect, disconnect, status, or forward`,
+    );
+  }
 }
 
 // ── FindAccessesHandlers dependency adapters ──

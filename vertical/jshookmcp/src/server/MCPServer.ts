@@ -1,7 +1,7 @@
-import { McpServer, type RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/server';
+import type { RegisteredTool, Tool } from '@modelcontextprotocol/server';
 import type { Server } from 'node:http';
 import type { Socket } from 'node:net';
-import { CompleteRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { Config } from '@internal-types/index';
 import { logger } from '@utils/logger';
 import { CacheManager } from '@utils/cache';
@@ -14,6 +14,8 @@ import type { ToolProfile } from '@server/ToolCatalog';
 import { ToolExecutionRouter } from '@server/ToolExecutionRouter';
 import { ToolCallContextGuard } from '@server/ToolCallContextGuard';
 import { ToolCircuitBreaker } from '@server/security/ToolCircuitBreaker';
+import { TaskManager } from '@server/tasks/TaskManager';
+import { TaskStoreAdapter } from '@server/tasks/TaskStoreAdapter';
 import { LargeDataOffloader } from '@server/ToolResponseOffloader';
 import { createToolHandlerMap } from '@server/ToolHandlerMap';
 import type { ToolArgs } from '@server/types';
@@ -22,6 +24,9 @@ import { createDomainProxy, resolveEnabledDomains } from '@server/MCPServer.doma
 import { getLoaderMetadata } from '@server/registry/discovery';
 import type { DomainTtlEntry } from '@server/MCPServer.activation.ttl';
 import { closeServer, startHttpTransport, startStdioTransport } from '@server/MCPServer.transport';
+import { startArtifactRetentionScheduler } from '@utils/artifactRetention';
+import { createLoopLagSampler } from '@utils/loopLag';
+import { createToolLatencyTracker } from '@utils/toolLatency';
 import { McpLogTransport } from '@server/transport/McpLogTransport';
 import type { McpLogLevel } from '@server/transport/McpLogTransport';
 import {
@@ -73,6 +78,15 @@ import {
 } from '@server/extensions/ExtensionManager';
 import { executeToolWithTracking as executeToolWithTrackingImpl } from '@server/MCPServer.execution';
 
+/**
+ * Info-level logs are forwarded to the MCP client at a reduced rate: lines
+ * whose count is 1 modulo INFO_LOG_FORWARD_EVERY (the 1st, 11th, 21st, ...)
+ * are sent, so a noisy info stream can't amplify into O(log lines × active
+ * sessions) notifications. warn/error always forward; debug is dropped
+ * entirely.
+ */
+const INFO_LOG_FORWARD_EVERY = 10;
+
 export interface MCPServerRuntimeOptions {
   browserFleetLeaseStore?: BrowserFleetLeaseStore;
 }
@@ -92,6 +106,8 @@ export class MCPServer implements MCPServerContext {
   public readonly router: ToolExecutionRouter;
   public readonly contextGuard: ToolCallContextGuard;
   public readonly circuitBreaker = new ToolCircuitBreaker();
+  /** MCP 2.0 Tasks protocol — background scheduler for long-running tool operations. */
+  public readonly taskManager = new TaskManager();
   private readonly circuitBrokenTools = new Set<string>();
   private readonly searchQualityTracker = new SearchQualityTracker();
   /** Offloads large response data (>512KB) to disk / DetailedDataManager to keep context lean. */
@@ -105,6 +121,26 @@ export class MCPServer implements MCPServerContext {
   private clientInitialized = false;
   private cacheAdaptersRegistered = false;
   private cacheRegistrationPromise?: Promise<void>;
+  /**
+   * Stop handle for the artifact retention sweep, wired in start() and
+   * released by closeServer(). The scheduler is idempotent at module level,
+   * so the CLI entry's own call shares this timer instead of stacking one.
+   */
+  artifactRetentionStop: (() => void) | null = null;
+  /**
+   * Event-loop lag sampler + its stop handle, wired in start() and released by
+   * closeServer() — mirrors the artifactRetentionStop lifecycle pattern. The
+   * sampler exposes p50/p90/p99 through the /health verbose branch (r1-1).
+   */
+  loopLagSampler: import('@utils/loopLag').LoopLagSampler | null = null;
+  loopLagStop: (() => void) | null = null;
+  /**
+   * Per-tool latency tracker + its eventBus unsubscribe handle, wired in start()
+   * and released by closeServer() — mirrors the loopLagSampler lifecycle pattern.
+   * The tracker exposes top-N slow tools through the /health verbose branch (r1-2).
+   */
+  toolLatencyTracker: import('@utils/toolLatency').ToolLatencyTracker | null = null;
+  toolLatencyStop: (() => void) | null = null;
   /** Structured log transport for MCP `notifications/message`. */
   public readonly mcpLog = new McpLogTransport();
   public readonly baseTier: ToolProfile;
@@ -260,7 +296,7 @@ export class MCPServer implements MCPServerContext {
     this.detailedData = new DetailedDataManager();
     this.eventBus = createServerEventBus();
     this.tokenBudget.setExternalCleanup(() => this.detailedData.clear());
-    const { tools, profile } = resolveToolsForRegistration();
+    const { tools, profile } = resolveToolsForRegistration(config);
     this.selectedTools = tools;
     this.baseTier = profile;
     this.enabledDomains = this.resolveEnabledDomains(this.selectedTools);
@@ -329,6 +365,8 @@ export class MCPServer implements MCPServerContext {
       }
     }
     this.handlerDeps = Object.fromEntries(depsEntries) as ToolHandlerDeps;
+    // Expose the task scheduler to domain bind closures (deps.taskManager).
+    (this.handlerDeps as Record<string, unknown>)['taskManager'] = this.taskManager;
 
     const selectedToolNames = new Set(this.selectedTools.map((t) => t.name));
     this.router = new ToolExecutionRouter(
@@ -371,18 +409,32 @@ export class MCPServer implements MCPServerContext {
           logging: {},
           completions: {},
           prompts: { listChanged: true },
+          // Legacy (2025-11-25) tasks capability. The handlers themselves are
+          // installed explicitly below — v2 has no taskStore option
+          // (SEP-2663 moved tasks to the Extensions Track).
+          // requests.tools.call intentionally omitted: no handler creates
+          // tasks via extra.taskStore yet — declaring it would promise
+          // CreateTaskResult-shaped replies that tools/call never produces.
+          tasks: {
+            list: {},
+            cancel: {},
+          },
         },
       },
     );
+    new TaskStoreAdapter(this.taskManager).install(this.server.server);
 
     // Attach structured MCP log transport
-    this.mcpLog.attach(this.server, MCP_LOG_ENABLED);
+    const loggingConfig = config.server?.logging;
+    this.mcpLog.attach(this.server, loggingConfig?.enabled ?? MCP_LOG_ENABLED);
     const validLevels = new Set<string>(['debug', 'info', 'warning', 'error']);
-    if (validLevels.has(MCP_LOG_LEVEL)) {
-      this.mcpLog.setLevel(MCP_LOG_LEVEL as McpLogLevel);
+    const configuredLogLevel = loggingConfig?.level ?? MCP_LOG_LEVEL;
+    if (validLevels.has(configuredLogLevel)) {
+      this.mcpLog.setLevel(configuredLogLevel as McpLogLevel);
     }
-    if (MCP_LOG_FILE_DIR) {
-      this.mcpLog.enableFileLogging(MCP_LOG_FILE_DIR);
+    const configuredLogDir = loggingConfig?.fileDir ?? MCP_LOG_FILE_DIR;
+    if (configuredLogDir) {
+      this.mcpLog.enableFileLogging(configuredLogDir);
     }
 
     // Circuit breaker: deactivate blocked tools so the model won't attempt them
@@ -398,17 +450,21 @@ export class MCPServer implements MCPServerContext {
     this.server.server.oninitialized = () => {
       this.clientInitialized = true;
     };
+    // Rate-limit the info forward path (see INFO_LOG_FORWARD_EVERY) while
+    // always forwarding warn/error; debug is dropped entirely.
+    let infoLogCount = 0;
     logger.onLog((level, message, args) => {
       if (!this.clientInitialized) return;
+      // Drop debug — forwarding every debug/info line as an MCP notification
+      // broadcast to all HTTP sessions is a quadratic amplification risk
+      // (O(log lines × sessions)) under load.
+      if (level === 'debug') return;
+      if (level === 'info') {
+        infoLogCount += 1;
+        if (infoLogCount % INFO_LOG_FORWARD_EVERY !== 1) return;
+      }
       try {
-        const mcpLevel =
-          level === 'warn'
-            ? 'Warning'
-            : level === 'error'
-              ? 'Error'
-              : level === 'debug'
-                ? 'Debug'
-                : 'Info';
+        const mcpLevel = level === 'warn' ? 'Warning' : level === 'error' ? 'Error' : 'Info';
 
         const data = args.length > 0 ? ' ' + JSON.stringify(args) : '';
         void this.server.server
@@ -508,7 +564,7 @@ export class MCPServer implements MCPServerContext {
       });
     });
 
-    this.server.server.setRequestHandler(CompleteRequestSchema, async (request) => {
+    this.server.server.setRequestHandler('completion/complete', async (request) => {
       try {
         const refName = (request.params.ref as { name?: string }).name;
         if (!refName) {
@@ -661,7 +717,28 @@ export class MCPServer implements MCPServerContext {
   async start(): Promise<void> {
     await this.registerCaches();
     await this.cache.init();
-    const transportMode = MCP_TRANSPORT.toLowerCase();
+    // Explicit lifecycle wiring: the artifact retention sweep is started by
+    // the server (async, unref'd, non-blocking) so every embedder path gets
+    // the default cleanup — not a module-level side effect. The scheduler is
+    // idempotent at module level, sharing one timer with the CLI entry call.
+    this.artifactRetentionStop = startArtifactRetentionScheduler();
+    // r1-1: production event-loop lag metric — always on (cheap on-demand
+    // sampling via monitorEventLoopDelay, no timer), so /health verbose can
+    // report p50/p90/p99 regardless of E2E env gating. Stopped in closeServer().
+    const loopLagSampler = createLoopLagSampler();
+    this.loopLagSampler = loopLagSampler;
+    this.loopLagStop = loopLagSampler.enable();
+    // r1-2: per-tool latency histograms — always on (synchronous ring-buffer push
+    // on the 'tool:called' eventBus path, no timers), so /health verbose can report
+    // top-N slow tools regardless of E2E env gating. Unsubscribed in closeServer().
+    const toolLatencyTracker = createToolLatencyTracker();
+    this.toolLatencyTracker = toolLatencyTracker;
+    this.toolLatencyStop = this.eventBus.on('tool:called', (payload) => {
+      if (typeof payload.durationMs === 'number') {
+        toolLatencyTracker.record(payload.toolName, payload.durationMs);
+      }
+    });
+    const transportMode = (this.config.server?.transport ?? MCP_TRANSPORT).toLowerCase();
     if (transportMode === 'http') {
       await startHttpTransport(this);
     } else {

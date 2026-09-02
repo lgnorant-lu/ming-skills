@@ -199,23 +199,10 @@ async function syncProjectMetadata(summary) {
   }
   await writeJson(serverJsonPath, serverJson);
 
+  // README metadata sync is block-only (metadata-sync markers). The one-time
+  // migration replaces for the legacy badge / "17+ domains" copy were removed
+  // after the README was migrated — they no longer matched any text.
   let readme = await readFile(readmePath, 'utf-8');
-  readme = readme.replace(
-    '[![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)',
-    '[![Node.js >= 20](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)',
-  );
-  readme = readme.replace(
-    'An MCP (Model Context Protocol) server providing a comprehensive set of **built-in tools** across **17+ domains** (including core meta-tools) — with runtime extension loading from `plugins/` and `workflows/` for AI-assisted JavaScript analysis and security analysis.',
-    'An MCP (Model Context Protocol) server providing a manifest-driven catalog of **built-in tools** across multiple domains — with runtime extension loading from `plugins/` and `workflows/` for AI-assisted JavaScript analysis and security analysis.',
-  );
-  readme = readme.replace(
-    '- **Domain Self-Discovery**: Runtime manifest scanning (`domains/*/manifest.ts`) replaces hardcoded imports; add new domains by creating a single manifest file',
-    '- **Manifest-Driven Metadata**: Domain manifests remain the source of truth, and the build syncs generated tool/domain metadata from them',
-  );
-  readme = readme.replace(
-    /## Tool Domains\s+The server provides built-in tools across \*\*17\+ domains\*\* \([^)]+\)\.\s+/m,
-    '## Tool Domains\n\n',
-  );
   readme = replaceOrInsertReadmeBlock(readme, buildReadmeMetadataBlock(summary));
   await writeFile(readmePath, readme, 'utf-8');
 }

@@ -1,4 +1,5 @@
 import { R } from '@server/domains/shared/ResponseBuilder';
+import { NETWORK_SMART_HANDLE_THRESHOLD_BYTES } from '@src/constants';
 import type { ToolResponse } from '@server/types';
 import {
   EXCLUDED_RESOURCE_TYPES,
@@ -382,7 +383,10 @@ export async function handleNetworkGetRequests(
       deduplicateUrls,
     });
 
-    const processedResult = detailedDataManager.smartHandle(result.finalPayload, 25600);
+    const processedResult = await detailedDataManager.smartHandle(
+      result.finalPayload,
+      NETWORK_SMART_HANDLE_THRESHOLD_BYTES,
+    );
     return R.ok()
       .merge(processedResult as Record<string, unknown>)
       .json();

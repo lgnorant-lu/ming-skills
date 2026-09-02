@@ -1,4 +1,7 @@
 import * as parser from '@babel/parser';
+import traverse from '@babel/traverse';
+import generate from '@babel/generator';
+import * as t from '@babel/types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const loggerState = vi.hoisted(() => ({
@@ -14,6 +17,9 @@ vi.mock('@src/utils/logger', () => ({
 }));
 
 import { JScramberDeobfuscator } from '@modules/deobfuscator/JScramblerDeobfuscator';
+import { createJscramblerCore } from '@modules/deobfuscator/jscrambler-core';
+
+const core = createJscramblerCore({ parser, traverse, generate, types: t });
 
 describe('JScramberDeobfuscator bug fixes', () => {
   beforeEach(() => {
@@ -130,14 +136,13 @@ describe('JScramberDeobfuscator bug fixes', () => {
       expect(result.code).toContain('state = 1');
     });
 
-    it('does not swallow unflatten failures silently', async () => {
-      const deobfuscator = new JScramberDeobfuscator() as any;
+    it('does not swallow unflatten failures silently', () => {
       const ast = parser.parse(
         'while (true) { switch (state) { case 0: boom(); state = 1; break; case 1: bust(); state = 0; break; } }',
         { sourceType: 'module' },
       );
       const warnings: string[] = [];
-      deobfuscator.restoreControlFlow(ast, warnings);
+      core.restoreControlFlow(ast, warnings);
       expect(warnings.some((w) => w.includes('control-flow'))).toBe(true);
     });
   });

@@ -1,9 +1,12 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
-import * as child_process from 'child_process';
+import * as child_process from 'node:child_process';
 import * as http from 'node:http';
 import * as net from 'node:net';
 import { once } from 'node:events';
+import { buildTestHost } from '@tests/shared/test-urls';
 import { ProxyHandlers } from '@server/domains/proxy/index';
+import { readBodyPreview } from '@server/domains/proxy/handlers.impl';
+import { PROXY_CAPTURE_BODY_SKIP_BYTES } from '@src/constants/proxy';
 import { TEST_HTTP_URLS, withPath } from '@tests/shared/test-urls';
 import { runWithToolRequestContext } from '@server/runtime/ToolRequestContext';
 
@@ -159,8 +162,8 @@ describe('ProxyHandlers (Integration)', () => {
 
   it('should generate an error if exporting CA without HTTPS enabled', async () => {
     // Remove CA cert so the handler can't find it
-    const fs = await import('fs');
-    const path = await import('path');
+    const fs = await import('node:fs');
+    const path = await import('node:path');
     const home = process.env.HOME || process.env.USERPROFILE || '/tmp';
     const certPath = path.join(home, '.jshookmcp', 'ca', 'ca.pem');
     const certExisted = fs.existsSync(certPath);
@@ -949,6 +952,78 @@ describe('ProxyHandlers (Integration)', () => {
     }
   });
 
+  it('skips body capture for oversized responses (Content-Length precheck)', async () => {
+    const bigBody = 'A'.repeat(PROXY_CAPTURE_BODY_SKIP_BYTES + 1024);
+    const upstream = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(bigBody);
+    });
+    const upstreamPort = await listen(upstream);
+    const proxyPort = testPort + 21;
+
+    try {
+      await handlers.handleProxyStart({ port: proxyPort, useHttps: false });
+      const ruleRes = await handlers.handleProxyAddRule({
+        action: 'forward',
+        method: 'GET',
+        urlPattern: '/big-body/',
+      });
+      expect(parseResponse(ruleRes).success).toBe(true);
+
+      const response = await sendRawHttpRequest(
+        proxyPort,
+        [
+          `GET http://127.0.0.1:${upstreamPort}/big-body HTTP/1.1`,
+          `Host: 127.0.0.1:${upstreamPort}`,
+          'Connection: close',
+          '',
+          '',
+        ].join('\r\n'),
+      );
+
+      expect(response).toContain('200 OK');
+
+      const logs = await waitForCapturedLogs(handlers, 'big-body', (entries) =>
+        entries.some((entry) => entry.type === 'response' && entry.bodySkipped),
+      );
+      const responseLog = logs.find((entry) => entry.type === 'response')!;
+      expect(responseLog.bodySkipped).toMatch(/exceeds/);
+      expect(responseLog.bodyBytes).toBe(Buffer.byteLength(bigBody, 'utf8'));
+      expect(responseLog.bodyTextPreview).toBeUndefined();
+    } finally {
+      await new Promise((resolve, reject) => {
+        upstream.close((error) => (error ? reject(error) : resolve(undefined)));
+      });
+    }
+  });
+
+  it('capture:false disables request/response capture entirely', async () => {
+    await handlers.handleProxyStart({ port: testPort + 22, useHttps: false, capture: false });
+    const ruleRes = await handlers.handleProxyAddRule({
+      action: 'mock_response',
+      method: 'GET',
+      urlPattern: '/no-capture/',
+      mockStatus: 200,
+      mockBody: 'ok',
+    });
+    expect(parseResponse(ruleRes).success).toBe(true);
+
+    const response = await sendRawHttpRequest(
+      testPort + 22,
+      [
+        `GET http://127.0.0.1:${testPort + 22}/no-capture HTTP/1.1`,
+        'Host: 127.0.0.1',
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n'),
+    );
+
+    expect(response).toContain('200');
+    const logs = parseResponse(await handlers.handleProxyGetRequests({}));
+    expect(logs.logs).toEqual([]);
+  });
+
   it('should clear cached request logs', async () => {
     const res = await handlers.handleProxyClearLogs({});
     expect(parseResponse(res).success).toBe(true);
@@ -1301,5 +1376,74 @@ describe('ProxyHandlers (Integration)', () => {
     );
     expect(final.stopped).toBe(true);
     expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it('returns empty logs when capture is disabled even with stale buffered entries', async () => {
+    // Simulate a previous capture=true session that left sensitive entries behind.
+    (handlers as any).captureEnabled = false;
+    (handlers as any).captureBuffer = [
+      {
+        type: 'request',
+        id: 'stale',
+        url: `http://${buildTestHost('secret')}`,
+        timestamp: Date.now(),
+      },
+    ];
+
+    const data = parseResponse(await handlers.handleProxyGetRequests({}));
+
+    expect(data.captureEnabled).toBe(false);
+    expect(data.count).toBe(0);
+    expect(data.logs).toEqual([]);
+  });
+
+  it('clears stale captured traffic when starting with capture:false', async () => {
+    (handlers as any).captureBuffer = [
+      {
+        type: 'request',
+        id: 'stale',
+        url: `http://${buildTestHost('secret')}`,
+        timestamp: Date.now(),
+      },
+    ];
+
+    await handlers.handleProxyStart({ port: testPort + 23, useHttps: false, capture: false });
+
+    expect((handlers as any).captureBuffer).toEqual([]);
+    const data = parseResponse(await handlers.handleProxyGetRequests({}));
+    expect(data.logs).toEqual([]);
+    expect(parseResponse(await handlers.handleProxyStatus({})).capture).toBe(false);
+  });
+
+  it('rejects a reuse request whose capture flag mismatches the running proxy', async () => {
+    installFakeRuleServer(handlers);
+    Object.assign(handlers as unknown as Record<string, unknown>, {
+      currentPort: 8080,
+      currentUseHttps: false,
+    });
+
+    const result = await handlers.handleProxyStart({ port: 8080, useHttps: false, capture: false });
+    const data = parseAnyResponse(result);
+
+    expect(result.isError).toBe(true);
+    expect(data.error).toContain('capture=');
+  });
+
+  it('reports the capture flag in proxy status', async () => {
+    const data = parseResponse(await handlers.handleProxyStatus({}));
+    expect(data.capture).toBe(true);
+  });
+
+  it('prechecks against the actual buffered body size, not just the Content-Length hint', async () => {
+    const bigBuffer = Buffer.alloc(PROXY_CAPTURE_BODY_SKIP_BYTES + 1024, 0x61);
+    const getText = vi.fn(async () => bigBuffer.toString('utf8'));
+    const body = { buffer: bigBuffer, getText };
+
+    // A small (or compressed-transfer) Content-Length hint must not bypass the precheck.
+    const result = await readBodyPreview(body, 42);
+
+    expect(result.bodySkipped).toMatch(/exceeds/);
+    expect(result.bodyBytes).toBe(bigBuffer.length);
+    expect(getText).not.toHaveBeenCalled();
   });
 });

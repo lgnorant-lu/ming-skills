@@ -56,6 +56,34 @@ describe('FrameworkStateHandlers', () => {
     handlers = new FrameworkStateHandlers({ getActivePage });
   });
 
+  it('detaches the CDP health-check session after the probe', async () => {
+    const detach = vi.fn(async () => undefined);
+    (page as any).createCDPSession = vi.fn(async () => ({
+      send: vi.fn(async () => ({ result: { value: 1 } })),
+      detach,
+    }));
+    page.evaluate.mockResolvedValueOnce({ detected: 'none', states: [], found: false });
+
+    await handlers.handleFrameworkStateExtract({});
+
+    expect(detach).toHaveBeenCalledOnce();
+  });
+
+  it('detaches the CDP health-check session when the probe fails', async () => {
+    const detach = vi.fn(async () => undefined);
+    (page as any).createCDPSession = vi.fn(async () => ({
+      send: vi.fn(async () => {
+        throw new Error('CDP gone');
+      }),
+      detach,
+    }));
+
+    const body = parseJson<ErrorResult>(await handlers.handleFrameworkStateExtract({}));
+
+    expect(body.success).toBe(false);
+    expect(detach).toHaveBeenCalledOnce();
+  });
+
   // ─── Default args ───
 
   it('uses default extract options when args are omitted', async () => {

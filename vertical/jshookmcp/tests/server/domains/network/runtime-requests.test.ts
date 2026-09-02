@@ -15,10 +15,15 @@ import type {
   NetworkStatsResponse,
 } from '@tests/shared/common-test-types';
 
+const smartHandleThresholds = vi.hoisted(() => ({ values: [] as number[] }));
+
 vi.mock('@src/utils/DetailedDataManager', () => ({
   DetailedDataManager: {
     getInstance: () => ({
-      smartHandle: (payload: any) => payload,
+      smartHandle: (payload: any, threshold?: number) => {
+        if (threshold !== undefined) smartHandleThresholds.values.push(threshold);
+        return payload;
+      },
     }),
   },
 }));
@@ -29,7 +34,9 @@ vi.mock('@src/server/domains/shared/modules', () => ({
   CodeCollector: vi.fn(),
 }));
 
+import { NETWORK_SMART_HANDLE_THRESHOLD_BYTES } from '@src/constants';
 import { AdvancedHandlersBase } from '@server/domains/network/handlers.base';
+import { ToolError } from '@errors/ToolError';
 import { TEST_URLS, withPath } from '@tests/shared/test-urls';
 
 describe('AdvancedHandlersBase (requests)', () => {
@@ -106,6 +113,28 @@ describe('AdvancedHandlersBase (requests)', () => {
         type: 'Fetch',
         injected: true,
       });
+    });
+
+    it('passes NETWORK_SMART_HANDLE_THRESHOLD_BYTES to smartHandle', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getNetworkRequests.mockReturnValue([
+        {
+          requestId: 'req-1',
+          url: `${testUrls.TEST_URLS.root}/api/one`,
+          method: 'GET',
+          type: 'XHR',
+          timestamp: 111,
+        },
+      ]);
+      consoleMonitor.getFetchRequests.mockResolvedValue([]);
+      consoleMonitor.getXHRRequests.mockResolvedValue([]);
+      smartHandleThresholds.values.length = 0;
+
+      const body = parseJson<NetworkRequestsResponse>(
+        await handler.handleNetworkGetRequests({ limit: 100 }),
+      );
+      expect(body.success).toBe(true);
+      expect(smartHandleThresholds.values).toEqual([NETWORK_SMART_HANDLE_THRESHOLD_BYTES]);
     });
 
     it('merges injected requests with CDP requests without duplicating identical entries', async () => {
@@ -760,6 +789,32 @@ describe('AdvancedHandlersBase (requests)', () => {
       // Response of 2000 chars > 1024 min, so it should be truncated
       expect(body.summary).toBeDefined();
       expect(body.summary?.truncated).toBe(true);
+    });
+
+    it('reports skip reason without retrying when the body was skipped (content-length over cap)', async () => {
+      consoleMonitor.isNetworkEnabled.mockReturnValue(true);
+      consoleMonitor.getResponseBody.mockRejectedValue(
+        new ToolError(
+          'NOT_FOUND',
+          'Response body skipped for req-1: content-length exceeds the single-body cap',
+          {
+            details: {
+              skipped: true,
+              reason: 'content-length over single-body cap',
+              requestId: 'req-1',
+            },
+          },
+        ),
+      );
+
+      const body = parseJson<NetworkResponseBodyResponse & { skipped?: boolean; reason?: string }>(
+        await handler.handleNetworkGetResponseBody({ requestId: 'req-1', retries: 3 }),
+      );
+      expect(body.success).toBe(false);
+      expect(body.skipped).toBe(true);
+      expect(body.reason).toBe('content-length over single-body cap');
+      expect(body.attempts).toBe(1);
+      expect(consoleMonitor.getResponseBody).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -20,13 +20,12 @@ const DEFAULT_MAX_ERRORS = 10;
  * are captured or the timeout elapses, plus the current device.lost state.
  */
 export class ErrorCaptureHandler {
+  private deps: WebGPUDomainDependencies;
   private ddm: DetailedDataManager;
   private pageLockManager = getPageLockManager();
 
-  constructor(
-    _ctx: MCPServerContext,
-    private deps: WebGPUDomainDependencies,
-  ) {
+  constructor(_ctx: MCPServerContext, deps: WebGPUDomainDependencies) {
+    this.deps = deps;
     this.ddm = DetailedDataManager.getInstance();
   }
 

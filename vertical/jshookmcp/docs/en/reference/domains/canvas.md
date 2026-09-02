@@ -31,7 +31,7 @@ Canvas game engine reverse analysis domain plus Skia rendering capture, supporti
 | `canvas_pick_object_at_point` | Pick / hit-test the topmost object at a given screen coordinate using the engine's hit-test system |
 | `canvas_trace_click_handler` | Trace a click event from DOM to JS call stack. |
 | `canvas_scene_search` | Search a previously-dumped scene tree (canvas_scene_dump output) for nodes by name regex and/or type. Pure-compute — no browser session required. Returns matching nodes with their path from root, depth, and engine-specific properties. |
-| `canvas_inject_draw_hook` | Intercept Canvas 2D (drawImage/fillText/strokeText) and WebGL (drawArrays/drawElements) draw calls into a ring buffer on the page. Actions: install (wrap prototypes), read (dump captured calls), uninstall (restore). |
+| `canvas_inject_draw_hook` | Intercept Canvas 2D (drawImage/fillText/strokeText) and WebGL (drawArrays/drawElements) draw calls into a ring buffer on the page. Actions: install (wrap prototypes), read (dump captured calls), uninstall (restore). Set timing=true at install to also sample a requestAnimationFrame loop; then includeTiming=true at read to get frame-level stats (avg/p95 frame time, dropped frames, 60fps budget misses). |
 | `skia_detect_renderer` | Detect the active Skia renderer backend from the current page context. |
 | `skia_extract_scene` | Extract a lightweight Skia scene tree from the selected canvas. |
 | `skia_correlate_objects` | Correlate requested Skia node identifiers with the extracted scene tree. |

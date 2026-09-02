@@ -317,7 +317,13 @@ export async function handleHumanTyping(
     if (clearFirst) {
       await context.evaluate((sel: string) => {
         const el = document.querySelector(sel) as HTMLInputElement;
-        if (el) el.value = '';
+        if (el) {
+          el.value = '';
+          // Dispatch input/change so framework-controlled inputs (React etc.)
+          // observe the clear instead of restoring the previous state.
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
       }, selector);
     }
 

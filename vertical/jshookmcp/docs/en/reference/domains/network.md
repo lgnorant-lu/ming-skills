@@ -21,7 +21,7 @@ Request capture, response extraction, HAR export, safe replay, and performance t
 - browser + network
 - network + workflow
 
-## Full tool list (41)
+## Full tool list (38)
 
 | Tool | Description |
 | --- | --- |
@@ -33,11 +33,8 @@ Request capture, response extraction, HAR export, safe replay, and performance t
 | `network_get_response_body` | Get the response body for a captured request. |
 | `network_get_stats` | Get network statistics. |
 | `performance_get_metrics` | Get page performance metrics. |
-| `performance_coverage` | Start or stop code coverage recording. |
-| `performance_take_heap_snapshot` | Take a V8 heap memory snapshot |
 | `performance_trace` | Start or stop a Chrome performance trace. |
 | `profiler_cpu` | Start or stop CPU profiling. |
-| `profiler_heap_sampling` | Start or stop heap allocation sampling. |
 | `console_get_exceptions` | Get captured uncaught exceptions from the page |
 | `console_inject` | Inject an in-page script, XHR, fetch, or function monitor. |
 | `console_inject_fetch_interceptor` | Inject a fetch interceptor. |

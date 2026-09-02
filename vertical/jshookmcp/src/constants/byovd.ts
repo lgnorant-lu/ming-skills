@@ -1,0 +1,30 @@
+/**
+ * BYOVD (Bring Your Own Vulnerable Driver) constants.
+ *
+ * All BYOVD operations are gated behind JSHOOK_BYOVD_ENABLE=1.
+ * Loading kernel drivers is inherently dangerous — these constants
+ * are deliberately conservative to minimise BSOD risk.
+ */
+
+import { bool, int } from './helpers';
+
+/** Master enable gate — must be explicitly set to '1'. */
+export const BYOVD_ENABLED = bool('JSHOOK_BYOVD_ENABLE', false);
+
+/** Maximum IOCTL calls per second (rate-limit guard). */
+export const BYOVD_MAX_IOCTL_PER_SEC = int('BYOVD_MAX_IOCTL_PER_SEC', 100);
+
+/** Maximum bytes per single read operation. */
+export const BYOVD_MAX_READ_BYTES = int('BYOVD_MAX_READ_BYTES', 1024 * 1024);
+
+/** Maximum bytes per single write operation. */
+export const BYOVD_MAX_WRITE_BYTES = int('BYOVD_MAX_WRITE_BYTES', 64 * 1024);
+
+/** Timeout (ms) for driver service start. */
+export const BYOVD_SERVICE_START_TIMEOUT_MS = int('BYOVD_SERVICE_START_TIMEOUT_MS', 30_000);
+
+/** Timeout (ms) for driver service stop. */
+export const BYOVD_SERVICE_STOP_TIMEOUT_MS = int('BYOVD_SERVICE_STOP_TIMEOUT_MS', 30_000);
+
+/** Chunk size for physical-memory R/W (ThrottleStop supports 1/2/4/8 byte ops). */
+export const BYOVD_PHYSICAL_CHUNK_SIZE = int('BYOVD_PHYSICAL_CHUNK_SIZE', 8);

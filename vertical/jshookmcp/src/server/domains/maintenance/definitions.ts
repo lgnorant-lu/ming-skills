@@ -1,4 +1,4 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import { tool } from '@server/registry/tool-builder';
 
 // ── Token Budget ──
@@ -65,7 +65,7 @@ export const cacheTools: Tool[] = [
       .array(
         'namespaces',
         { type: 'string' },
-        'Restrict eviction to these cache namespaces (by name). Empty/omitted = all caches.',
+        'Restrict eviction to these cache namespaces (by name). Omitted = all caches; empty list = nothing.',
       ),
   ),
   tool('clear_all_caches', (t) =>

@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { classifyGpu, classifyGpuInputs } from '@server/domains/maintenance/gpu-detect';
+import {
+  classifyGpu,
+  classifyGpuInputs,
+  parseLinuxOutput,
+  parseMacOutput,
+} from '@server/domains/maintenance/gpu-detect';
 
 describe('gpu-detect classifyGpu', () => {
   it('classifies the caller-supplied WebGL, WebGPU, and device strings', () => {
@@ -60,6 +65,21 @@ describe('gpu-detect classifyGpu', () => {
     it('flags RTX 4090 as non-cloud (consumer GPU)', () => {
       const c = classifyGpu('NVIDIA GeForce RTX 4090');
       expect(c.isCloudGpu).toBe(false);
+    });
+
+    it('does not match cloud models as substrings (RTX A4000 vs A40)', () => {
+      const c = classifyGpu('NVIDIA RTX A4000');
+      expect(c.isCloudGpu).toBe(false);
+    });
+
+    it('does not match cloud models as substrings (A1000 vs A100)', () => {
+      const c = classifyGpu('NVIDIA RTX A1000');
+      expect(c.isCloudGpu).toBe(false);
+    });
+
+    it('still matches cloud models adjacent to punctuation (A100-SXM4)', () => {
+      const c = classifyGpu('NVIDIA A100-SXM4-40GB');
+      expect(c.isCloudGpu).toBe(true);
     });
 
     it('flags Intel UHD as non-cloud', () => {
@@ -137,6 +157,81 @@ describe('gpu-detect classifyGpu', () => {
     it('detects AMD vendor', () => {
       const c = classifyGpu('AMD Radeon RX 6800 XT');
       expect(c.model).toBe('AMD Radeon RX 6800 XT');
+    });
+  });
+
+  describe('parseLinuxOutput', () => {
+    it('parses nvidia-smi CSV rows', () => {
+      const gpus = parseLinuxOutput('NVIDIA GeForce RTX 3080, 555.42, 12288\n');
+      expect(gpus).toHaveLength(1);
+      expect(gpus[0]).toMatchObject({
+        vendor: 'NVIDIA',
+        model: 'NVIDIA GeForce RTX 3080',
+        driverVersion: '555.42',
+        memoryMB: 12288,
+      });
+    });
+
+    it('keeps an AMD lspci line with commas as one model (default no-domain address)', () => {
+      const gpus = parseLinuxOutput(
+        '01:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi 21 [Radeon RX 6800]\n',
+      );
+      expect(gpus).toHaveLength(1);
+      expect(gpus[0]!.vendor).toBe('AMD');
+      expect(gpus[0]!.model).toContain('Radeon RX 6800');
+      expect(gpus[0]!.driverVersion).toBeUndefined();
+    });
+
+    it('keeps a domain-prefixed lspci line with commas as one model', () => {
+      const gpus = parseLinuxOutput(
+        '0000:01:00.0 VGA compatible controller: Intel Corporation Device, Model XYZ\n',
+      );
+      expect(gpus).toHaveLength(1);
+      expect(gpus[0]!.vendor).toBe('Intel');
+      expect(gpus[0]!.model).toContain('Intel Corporation Device, Model XYZ');
+      expect(gpus[0]!.driverVersion).toBeUndefined();
+    });
+
+    it('falls back to a single unknown GPU for non-empty unparsable output', () => {
+      const gpus = parseLinuxOutput('something unrelated\n');
+      expect(gpus).toHaveLength(1);
+      expect(gpus[0]).toMatchObject({ vendor: 'unknown', model: 'Unknown (see rawOutput)' });
+    });
+  });
+
+  describe('parseMacOutput', () => {
+    it('keeps per-GPU vendors on a dual-GPU Mac', () => {
+      const gpus = parseMacOutput(
+        'Chipset Model: Apple M1 Pro\n' +
+          'VRAM (Total): 16 GB\n' +
+          'Vendor: Apple\n' +
+          'Chipset Model: AMD Radeon Pro W5500M\n' +
+          'VRAM (Total): 8 GB\n' +
+          'Vendor: AMD (0x1002)\n',
+      );
+      expect(gpus).toHaveLength(2);
+      expect(gpus[0]).toMatchObject({ model: 'Apple M1 Pro', vendor: 'Apple', memoryMB: 16384 });
+      expect(gpus[1]).toMatchObject({
+        model: 'AMD Radeon Pro W5500M',
+        vendor: 'AMD (0x1002)',
+        memoryMB: 8192,
+      });
+    });
+
+    it('converts VRAM reported in GB to MB', () => {
+      const gpus = parseMacOutput('Chipset Model: Apple M2 Max\nVRAM (Total): 32 GB\n');
+      expect(gpus[0]!.memoryMB).toBe(32768);
+    });
+
+    it('keeps VRAM reported in MB as-is', () => {
+      const gpus = parseMacOutput('Chipset Model: Intel UHD Graphics 630\nVRAM (Total): 1536 MB\n');
+      expect(gpus[0]!.memoryMB).toBe(1536);
+    });
+
+    it('applies a Vendor line printed before any Chipset Model', () => {
+      const gpus = parseMacOutput('Vendor: Apple\nChipset Model: Apple M1\n');
+      expect(gpus).toHaveLength(1);
+      expect(gpus[0]).toMatchObject({ model: 'Apple M1', vendor: 'Apple' });
     });
   });
 });

@@ -1,8 +1,8 @@
-import koffi from 'koffi';
+import { requireKoffi, type KoffiLibraryHandle, type KoffiCallable } from '../koffi-loader';
 
-let _ntdll: ReturnType<typeof koffi.load> | null = null;
-function ntdll(): ReturnType<typeof koffi.load> {
-  if (!_ntdll) _ntdll = koffi.load('ntdll.dll');
+let _ntdll: KoffiLibraryHandle | null = null;
+function ntdll(): KoffiLibraryHandle {
+  if (!_ntdll) _ntdll = requireKoffi().load('ntdll.dll');
   return _ntdll;
 }
 
@@ -12,7 +12,7 @@ export function ntSuccess(s: number): boolean {
 
 // Lazy function resolvers
 
-let _NtCreateThreadEx: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtCreateThreadEx: KoffiCallable | null = null;
 function getNtCTE() {
   if (!_NtCreateThreadEx) {
     _NtCreateThreadEx = ntdll().func(
@@ -22,7 +22,7 @@ function getNtCTE() {
   return _NtCreateThreadEx;
 }
 
-let _NtAllocateVirtualMemory: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtAllocateVirtualMemory: KoffiCallable | null = null;
 function getNtAVM() {
   if (!_NtAllocateVirtualMemory) {
     _NtAllocateVirtualMemory = ntdll().func(
@@ -32,7 +32,7 @@ function getNtAVM() {
   return _NtAllocateVirtualMemory;
 }
 
-let _NtWriteVirtualMemory: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtWriteVirtualMemory: KoffiCallable | null = null;
 function getNtWVM() {
   if (!_NtWriteVirtualMemory) {
     _NtWriteVirtualMemory = ntdll().func(
@@ -42,7 +42,7 @@ function getNtWVM() {
   return _NtWriteVirtualMemory;
 }
 
-let _NtProtectVirtualMemory: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtProtectVirtualMemory: KoffiCallable | null = null;
 function getNtPVM() {
   if (!_NtProtectVirtualMemory) {
     _NtProtectVirtualMemory = ntdll().func(
@@ -52,7 +52,7 @@ function getNtPVM() {
   return _NtProtectVirtualMemory;
 }
 
-let _NtClose: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtClose: KoffiCallable | null = null;
 function getNtClose() {
   if (!_NtClose) _NtClose = ntdll().func('int32 NtClose(void *)');
   return _NtClose;
@@ -60,6 +60,14 @@ function getNtClose() {
 
 const MEM_COMMIT = 0x1000;
 const MEM_RESERVE = 0x2000;
+
+/**
+ * NtCreateThreadEx ThreadDesiredAccess mask. Note: the Windows SDK defines
+ * THREAD_ALL_ACCESS as 0x1F03FF; 0x1FFFFF is the PROCESS_ALL_ACCESS mask.
+ * Passing the broader mask requests every thread access right at once, which
+ * NtCreateThreadEx accepts; kept as-is for behavioral compatibility.
+ */
+const THREAD_DESIRED_ACCESS = 0x1fffff;
 
 export function ntCreateThreadEx(
   hProcess: bigint,
@@ -69,8 +77,8 @@ export function ntCreateThreadEx(
 ): { status: number; handle: bigint } {
   const handleBuf = Buffer.alloc(8);
   const status = getNtCTE()(
-    koffi.address(handleBuf),
-    0x1fffff,
+    requireKoffi().address(handleBuf),
+    THREAD_DESIRED_ACCESS,
     null,
     hProcess,
     startAddr as unknown as bigint,
@@ -95,9 +103,9 @@ export function ntAllocateVirtualMemory(
   sizeBuf.writeBigUInt64LE(BigInt(size), 0);
   const status = getNtAVM()(
     hProcess,
-    koffi.address(addrBuf),
+    requireKoffi().address(addrBuf),
     0,
-    koffi.address(sizeBuf),
+    requireKoffi().address(sizeBuf),
     MEM_COMMIT | MEM_RESERVE,
     protect,
   ) as number;
@@ -110,9 +118,9 @@ export function ntWriteVirtualMemory(hProcess: bigint, targetAddr: bigint, data:
   return getNtWVM()(
     hProcess,
     targetAddr as unknown as bigint,
-    koffi.address(data),
+    requireKoffi().address(data),
     BigInt(data.length),
-    koffi.address(wrote),
+    requireKoffi().address(wrote),
   ) as number;
 }
 
@@ -129,10 +137,10 @@ export function ntProtectVirtualMemory(
   const oldBuf = Buffer.alloc(4);
   const status = getNtPVM()(
     hProcess,
-    koffi.address(addrBuf),
-    koffi.address(sizeBuf),
+    requireKoffi().address(addrBuf),
+    requireKoffi().address(sizeBuf),
     newProtect,
-    koffi.address(oldBuf),
+    requireKoffi().address(oldBuf),
   ) as number;
   return { status, oldProtect: oldBuf.readUInt32LE(0) };
 }

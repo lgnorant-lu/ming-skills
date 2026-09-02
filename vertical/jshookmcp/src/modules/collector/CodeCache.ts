@@ -1,6 +1,6 @@
-import fs from 'fs/promises';
-import path from 'path';
-import crypto from 'crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import crypto from 'node:crypto';
 import { logger } from '@utils/logger';
 import { getCodeCacheDir } from '@utils/outputPaths';
 import type { CodeFile, CollectCodeResult } from '@internal-types/index';
@@ -146,7 +146,11 @@ export class CodeCache {
     try {
       const cachePath = this.getCachePath(key);
       await fs.mkdir(this.cacheDir, { recursive: true });
-      await fs.writeFile(cachePath, JSON.stringify(entry, null, 2), 'utf-8');
+      // Compact JSON (no pretty-print): multi-MB entries stay on the main
+      // thread only once, and indentation roughly doubles the payload size
+      // with no reader benefit (b1-04). Worker-izing the stringify is tracked
+      // separately.
+      await fs.writeFile(cachePath, JSON.stringify(entry), 'utf-8');
       logger.debug(`Cache saved: ${url} (${(result.totalSize / 1024).toFixed(2)} KB)`);
     } catch (error) {
       logger.error('Failed to save cache:', error);

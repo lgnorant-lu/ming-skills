@@ -3,7 +3,7 @@
  *
  * Delegates to six sub-handler modules:
  *   - CoreHandlers:       enable/disable/status/requests/response/stats
- *   - PerformanceHandlers: coverage/tracing/profiling
+ *   - PerformanceHandlers: metrics/tracing/CPU profiling
  *   - ConsoleHandlers:     exceptions/interceptors/tracers
  *   - ReplayHandlers:      auth extraction, HAR export, request replay
  *   - InterceptHandlers:   response interception
@@ -14,7 +14,6 @@ import type { CodeCollector } from '@server/domains/shared/modules/collector';
 import type { ConsoleMonitor } from '@server/domains/shared/modules/collector';
 import { PerformanceMonitor } from '@server/domains/shared/modules';
 import type { EventBus, ServerEventMap } from '@server/EventBus';
-import type { TraceRecorder } from '@modules/trace/TraceRecorder';
 import { DetailedDataManager } from '@utils/DetailedDataManager';
 
 import { CoreHandlers } from './handlers/core-handlers';
@@ -45,7 +44,6 @@ export class AdvancedToolHandlers {
     collector: CodeCollector,
     consoleMonitor: ConsoleMonitor,
     eventBus?: EventBus<ServerEventMap>,
-    getTraceRecorder?: () => TraceRecorder | null,
   ) {
     this.collector = collector;
     this.consoleMonitor = consoleMonitor;
@@ -55,7 +53,6 @@ export class AdvancedToolHandlers {
     this.perf = new PerformanceHandlers({
       collector,
       getPerformanceMonitor: () => this.getPerformanceMonitor(),
-      getTraceRecorder,
     });
     this.consoleHandlers = new ConsoleHandlers({ consoleMonitor });
     this.replay = new ReplayHandlers({ consoleMonitor });
@@ -93,14 +90,6 @@ export class AdvancedToolHandlers {
 
   handlePerformanceGetMetrics = (args: Record<string, unknown>) =>
     this.perf.handlePerformanceGetMetrics(args);
-  handlePerformanceCoverage = (args: Record<string, unknown>) =>
-    this.perf.handlePerformanceCoverage(args);
-  handlePerformanceStartCoverage = (args: Record<string, unknown>) =>
-    this.perf.handlePerformanceStartCoverage(args);
-  handlePerformanceStopCoverage = (args: Record<string, unknown>) =>
-    this.perf.handlePerformanceStopCoverage(args);
-  handlePerformanceTakeHeapSnapshot = (args: Record<string, unknown>) =>
-    this.perf.handlePerformanceTakeHeapSnapshot(args);
   handlePerformanceTraceStart = (args: Record<string, unknown>) =>
     this.perf.handlePerformanceTraceStart(args);
   handlePerformanceTraceStop = (args: Record<string, unknown>) =>
@@ -116,14 +105,6 @@ export class AdvancedToolHandlers {
     String(args['action'] ?? '') === 'stop'
       ? this.perf.handleProfilerCpuStop(args)
       : this.perf.handleProfilerCpuStart(args);
-  handleProfilerHeapSamplingStart = (args: Record<string, unknown>) =>
-    this.perf.handleProfilerHeapSamplingStart(args);
-  handleProfilerHeapSamplingStop = (args: Record<string, unknown>) =>
-    this.perf.handleProfilerHeapSamplingStop(args);
-  handleProfilerHeapSamplingDispatch = (args: Record<string, unknown>) =>
-    String(args['action'] ?? '') === 'stop'
-      ? this.perf.handleProfilerHeapSamplingStop(args)
-      : this.perf.handleProfilerHeapSamplingStart(args);
 
   // ── Console ──
 

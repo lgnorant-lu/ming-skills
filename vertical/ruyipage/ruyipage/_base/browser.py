@@ -9,6 +9,7 @@ import os
 import sys
 import time
 import atexit
+import shutil
 import socket
 import secrets
 import logging
@@ -606,7 +607,9 @@ class Firefox(object):
 
             # 解析参数
             if isinstance(addr_or_opts, FirefoxOptions):
-                self._options = addr_or_opts
+                # 每个实例持有自己的副本：启动会把端口/profile/fpfile 写回选项，
+                # 共用同一对象时并发启动会挤在同一个 profile 目录上。
+                self._options = addr_or_opts.copy()
             elif isinstance(addr_or_opts, str):
                 self._options = FirefoxOptions()
                 self._options.set_address(addr_or_opts)
@@ -739,6 +742,27 @@ class Firefox(object):
         finally:
             self._process = None
 
+    def _remove_auto_profile(self, attempts=3, delay=0.3):
+        """删除自动创建的临时 profile 目录。
+
+        Windows 上 Firefox 退出后句柄释放存在延迟，单次 rmtree 常留下残目录，
+        因此这里重试几次再放弃。
+        """
+        path = self._auto_profile
+        if not path:
+            return
+
+        for index in range(attempts):
+            shutil.rmtree(path, ignore_errors=True)
+            if not os.path.exists(path):
+                break
+            if index < attempts - 1:
+                time.sleep(delay)
+        else:
+            logger.warning("临时 profile 目录未能删除，请手动清理: %s", path)
+
+        self._auto_profile = None
+
     def _cleanup_failed_startup(self):
         if self._driver:
             try:
@@ -751,11 +775,7 @@ class Firefox(object):
 
         if not self._options.is_existing_only:
             self._terminate_owned_process_tree()
-            if self._auto_profile:
-                import shutil
-
-                shutil.rmtree(self._auto_profile, ignore_errors=True)
-                self._auto_profile = None
+            self._remove_auto_profile()
         else:
             self._process = None
 
@@ -1058,17 +1078,12 @@ class Firefox(object):
                     self._process.wait(timeout=timeout)
                 except Exception:
                     pass
+                # terminate() 只作用于启动进程，Firefox 的 content 进程会继续
+                # 占用 profile 目录，因此仍需确保整棵进程树退出。
+                self._terminate_owned_process_tree(timeout=timeout)
                 self._process = None
 
-            # 清理临时 profile
-            if self._auto_profile:
-                import shutil
-
-                try:
-                    shutil.rmtree(self._auto_profile, ignore_errors=True)
-                except Exception:
-                    pass
-                self._auto_profile = None
+            self._remove_auto_profile()
 
             # 清理单例
             with self._lock:
@@ -1125,6 +1140,10 @@ class Firefox(object):
 
     def _cleanup_on_exit(self):
         if not self._driver:
+            # 连接可能已经断开，但自动创建的 profile 目录仍需回收。
+            if not self._options.is_existing_only:
+                self._terminate_owned_process_tree()
+                self._remove_auto_profile()
             return
 
         if self._should_close_browser_on_exit():
@@ -1132,6 +1151,7 @@ class Firefox(object):
                 self.quit(timeout=3, force=True)
             except Exception:
                 self._detach_on_exit()
+                self._remove_auto_profile()
             return
 
         self._detach_on_exit()

@@ -1,4 +1,8 @@
-import { replaceOutsideProtectedRanges } from './ast-safe-replace';
+import {
+  createProtectedRangeResolver,
+  replaceOutsideProtectedRanges,
+  type ProtectedRangeResolver,
+} from './ast-safe-replace';
 
 export type SolvedConstraint = {
   pattern: string;
@@ -12,6 +16,7 @@ type SolveConstraintsState = {
   replaceInPlace: boolean;
   maxIterations: number;
   iterations: number;
+  resolver: ProtectedRangeResolver;
 };
 
 type StaticReplacementRule = {
@@ -97,8 +102,11 @@ function recordSolve(
 
 function applyStaticRules(state: SolveConstraintsState, rules: StaticReplacementRule[]): void {
   for (const rule of rules) {
-    state.output = replaceOutsideProtectedRanges(state.output, rule.regex, (fullMatch) =>
-      recordSolve(state, rule.pattern, fullMatch, rule.replacement),
+    state.output = replaceOutsideProtectedRanges(
+      state.output,
+      rule.regex,
+      (fullMatch) => recordSolve(state, rule.pattern, fullMatch, rule.replacement),
+      state.resolver,
     );
   }
 }
@@ -124,6 +132,7 @@ function applyConstantComparisons(state: SolveConstraintsState): void {
         ? `/* ${fullMatch} => ${result} */ if (${result})`
         : `if (${result})`;
     },
+    state.resolver,
   );
 }
 
@@ -139,6 +148,7 @@ function applyOpaqueFalsyRules(state: SolveConstraintsState): void {
 
       return recordSolve(state, 'opaque-falsy', fullMatch, 'false');
     },
+    state.resolver,
   );
 }
 
@@ -146,7 +156,10 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function collectStringArrays(output: string): Map<string, string[]> {
+function collectStringArrays(
+  output: string,
+  resolver: ProtectedRangeResolver,
+): Map<string, string[]> {
   const stringArrays = new Map<string, string[]>();
 
   replaceOutsideProtectedRanges(
@@ -157,13 +170,14 @@ function collectStringArrays(output: string): Map<string, string[]> {
       stringArrays.set(name, items);
       return fullMatch;
     },
+    resolver,
   );
 
   return stringArrays;
 }
 
 function applyStringArrayAccesses(state: SolveConstraintsState): void {
-  const stringArrays = collectStringArrays(state.output);
+  const stringArrays = collectStringArrays(state.output, state.resolver);
   if (stringArrays.size === 0) {
     return;
   }
@@ -190,6 +204,7 @@ function applyStringArrayAccesses(state: SolveConstraintsState): void {
         state.iterations += 1;
         return recordSolve(state, 'string-array-access', fullMatch, JSON.stringify(items[index]!));
       },
+      state.resolver,
     );
   }
 }
@@ -210,6 +225,7 @@ export function solveConstraints(options: {
     replaceInPlace: options.replaceInPlace,
     maxIterations: options.maxIterations,
     iterations: 0,
+    resolver: createProtectedRangeResolver(options.code),
   };
 
   applyConstantComparisons(state);

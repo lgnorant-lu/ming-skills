@@ -79,13 +79,15 @@ import {
 import { buildTestUrl, TEST_FTP_URLS, TEST_HOSTS, TEST_URLS } from '@tests/shared/test-urls';
 
 class MockSocket extends EventEmitter {
+  private readonly onWrite?: (socket: MockSocket) => void;
   public readonly destroy = vi.fn(() => this);
   public readonly setTimeout = vi.fn((_timeoutMs: number, _onTimeout?: () => void) => this);
   public alpnProtocol = 'h2';
   public written: Buffer = Buffer.from('');
 
-  constructor(private readonly onWrite?: (socket: MockSocket) => void) {
+  constructor(onWrite?: (socket: MockSocket) => void) {
     super();
+    this.onWrite = onWrite;
   }
 
   public readonly end = vi.fn((data?: string | Buffer) => {

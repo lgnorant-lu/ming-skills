@@ -10,6 +10,7 @@ import {
   getExtensionRegistryDir,
   getCodeCacheDir,
   getTlsKeyLogDir,
+  getEphemeralKeylogDir,
 } from '@utils/outputPaths';
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -162,5 +163,11 @@ describe('outputPaths', () => {
     expect(typeof getExtensionRegistryDir()).toBe('string');
     expect(typeof getCodeCacheDir()).toBe('string');
     expect(typeof getTlsKeyLogDir()).toBe('string');
+  });
+
+  it('nests the ephemeral keylog dir under the TLS keylog dir', () => {
+    const sealedDir = getEphemeralKeylogDir();
+    expect(sealedDir.startsWith(getTlsKeyLogDir())).toBe(true);
+    expect(sealedDir.endsWith('sealed')).toBe(true);
   });
 });

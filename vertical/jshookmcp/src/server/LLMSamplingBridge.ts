@@ -15,8 +15,7 @@
  *
  * @module LLMSamplingBridge
  */
-
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { logger } from '@utils/logger';
 import { getToolRequestContext } from '@server/runtime/ToolRequestContext';
 
@@ -34,7 +33,10 @@ export interface SampleTextParams {
 }
 
 export class LLMSamplingBridge {
-  constructor(private readonly mcpServer: McpServer) {}
+  private readonly mcpServer: McpServer;
+  constructor(mcpServer: McpServer) {
+    this.mcpServer = mcpServer;
+  }
 
   /**
    * Check whether the connected client has declared `capabilities.sampling`.

@@ -1,4 +1,4 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import { describe, expect, it } from 'vitest';
 
 import { advancedTools } from '@server/domains/network/definitions';
@@ -94,15 +94,23 @@ describe('network tool definitions', () => {
   it('contains expected performance tools', async () => {
     const names = new Set(advancedTools.map((t) => t.name));
     expect(names.has('performance_get_metrics')).toBe(true);
-    expect(names.has('performance_coverage')).toBe(true);
-    expect(names.has('performance_take_heap_snapshot')).toBe(true);
     expect(names.has('performance_trace')).toBe(true);
+    // Retired duplicates — superseded by browser/v8-inspector tools
+    expect(names.has('performance_coverage')).toBe(false);
+    expect(names.has('performance_take_heap_snapshot')).toBe(false);
   });
 
   it('contains expected profiler tools', async () => {
     const names = new Set(advancedTools.map((t) => t.name));
     expect(names.has('profiler_cpu')).toBe(true);
-    expect(names.has('profiler_heap_sampling')).toBe(true);
+    // Retired duplicate — superseded by v8_heap_sampling
+    expect(names.has('profiler_heap_sampling')).toBe(false);
+  });
+
+  it('profiler_cpu exposes optional samplingInterval', async () => {
+    const props = getProperties(findTool('profiler_cpu'));
+    expect(props.samplingInterval?.type).toBe('number');
+    expect(props.samplingInterval?.description).toContain('microseconds');
   });
 
   it('contains expected console tools', async () => {
@@ -245,13 +253,6 @@ describe('network tool definitions', () => {
     expect(props.categories?.type).toBe('array');
     expect(props.screenshots).toBeDefined();
     expect(props.screenshots?.type).toBe('boolean');
-  });
-
-  it('profiler_heap_sampling has samplingInterval property', async () => {
-    const tool = findTool('profiler_heap_sampling');
-    const props = getProperties(tool);
-    expect(props.samplingInterval).toBeDefined();
-    expect(props.samplingInterval?.type).toBe('number');
   });
 
   it('http_request_build exposes expected builder properties', async () => {

@@ -30,6 +30,34 @@ export interface PageHookState {
     startTime: number;
   } | null;
   allocations: PageAllocationRecord[];
+  /**
+   * GPU timestamp-query state (Fix 2). Populated when the page device supports
+   * the `timestamp-query` feature; used to attach per-pass GPU durations to
+   * captured commands.
+   */
+  timestampQuery?: {
+    supported: boolean;
+    /** Query set with `count` slots (2 per pass: begin + end). */
+    querySet: any;
+    /** Total allocated slots. */
+    count: number;
+    /** Next free slot index. */
+    next: number;
+    /** ns per GPU clock tick (device.limits.timestampPeriod). */
+    timestampPeriod: number;
+    /** Passes awaiting resolution: commandIndex is filled at pass end(). */
+    pending: Array<{ commandIndex: number | null; begin: number; end: number }>;
+    /** Resolved per-command GPU timings keyed by command index (ns). */
+    results: Record<number, { startNs: number; endNs: number; elapsedNs: number }>;
+    /** True when the slot pool was exhausted (further passes untimed). */
+    overflow: boolean;
+    /** True while an async resolveQuerySet + mapAsync chain is in flight. */
+    resolving: boolean;
+    /** Timestamp of the most recent resolve kick-off (ms). */
+    resolveStartedAt: number;
+    /** Page device used for query resolution (null when unsupported). */
+    device: any;
+  };
 }
 
 /** Re-exported via CDPIntegration for backward compatibility. */

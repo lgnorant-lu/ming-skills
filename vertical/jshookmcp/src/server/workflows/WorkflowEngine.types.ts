@@ -34,8 +34,10 @@ export interface PreflightWarning {
 }
 
 export class PreflightError extends Error {
-  constructor(readonly warnings: PreflightWarning[]) {
+  readonly warnings: PreflightWarning[];
+  constructor(warnings: PreflightWarning[]) {
     super(`Workflow preflight failed with ${warnings.length} unsatisfied prerequisite(s)`);
+    this.warnings = warnings;
     this.name = 'PreflightError';
   }
 }

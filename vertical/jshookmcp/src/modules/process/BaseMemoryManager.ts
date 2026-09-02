@@ -11,6 +11,7 @@ import type {
   ModuleInfo,
   PatternType,
 } from '@modules/process/types';
+import { buildPatternBytesAndMask } from '@modules/process/memory/scanner.patterns';
 
 export abstract class BaseMemoryManager {
   abstract readonly platform: string;
@@ -63,72 +64,12 @@ export abstract class BaseMemoryManager {
     pattern: string,
     patternType: PatternType,
   ): { bytes: number[]; mask: number[] } {
-    const bytes: number[] = [];
-    const mask: number[] = [];
-
-    switch (patternType) {
-      case 'hex': {
-        const hexParts = pattern.trim().split(/\s+/);
-        for (const part of hexParts) {
-          if (part === '??' || part === '**' || part === '?') {
-            bytes.push(0);
-            mask.push(0);
-          } else {
-            const byte = parseInt(part, 16);
-            if (!isNaN(byte)) {
-              bytes.push(byte);
-              mask.push(1);
-            }
-          }
-        }
-        break;
-      }
-      case 'int32': {
-        const int32Val = parseInt(pattern);
-        if (!isNaN(int32Val)) {
-          const buf = Buffer.allocUnsafe(4);
-          buf.writeInt32LE(int32Val, 0);
-          bytes.push(...Array.from(buf));
-          mask.push(1, 1, 1, 1);
-        }
-        break;
-      }
-      case 'int64': {
-        const int64Val = BigInt.asIntN(64, BigInt(pattern));
-        const buf = Buffer.allocUnsafe(8);
-        buf.writeBigInt64LE(int64Val, 0);
-        bytes.push(...Array.from(buf));
-        mask.push(1, 1, 1, 1, 1, 1, 1, 1);
-        break;
-      }
-      case 'float': {
-        const floatVal = parseFloat(pattern);
-        if (!isNaN(floatVal)) {
-          const buf = Buffer.allocUnsafe(4);
-          buf.writeFloatLE(floatVal, 0);
-          bytes.push(...Array.from(buf));
-          mask.push(1, 1, 1, 1);
-        }
-        break;
-      }
-      case 'double': {
-        const doubleVal = parseFloat(pattern);
-        if (!isNaN(doubleVal)) {
-          const buf = Buffer.allocUnsafe(8);
-          buf.writeDoubleLE(doubleVal, 0);
-          bytes.push(...Array.from(buf));
-          mask.push(1, 1, 1, 1, 1, 1, 1, 1);
-        }
-        break;
-      }
-      case 'string': {
-        const stringBuf = Buffer.from(pattern, 'utf8');
-        bytes.push(...Array.from(stringBuf));
-        mask.push(...stringBuf.map(() => 1));
-        break;
-      }
-    }
-
-    return { bytes, mask };
+    // Delegate to the shared scanner pattern parser (lenient). Unlike the
+    // scanner variants this legacy helper returns empty arrays instead of
+    // throwing on an empty result.
+    const { patternBytes, mask } = buildPatternBytesAndMask(pattern, patternType, {
+      throwOnEmpty: false,
+    });
+    return { bytes: patternBytes, mask };
   }
 }

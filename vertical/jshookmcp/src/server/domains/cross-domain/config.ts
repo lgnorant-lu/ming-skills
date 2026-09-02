@@ -1,3 +1,10 @@
+import {
+  readEnvBoolean,
+  readEnvInteger,
+  readEnvNullableString,
+  readEnvString,
+} from '@src/config/environment';
+
 export interface CrossDomainConfig {
   fridaEnabled: boolean;
   fridaServerHost: string;
@@ -17,55 +24,30 @@ export interface CrossDomainConfig {
 
 let cachedConfig: CrossDomainConfig | null = null;
 
-function readBool(envKey: string, defaultValue: boolean): boolean {
-  const raw = process.env[envKey];
-  if (raw === undefined) {
-    return defaultValue;
-  }
-  return raw.toLowerCase() !== 'false' && raw !== '0';
-}
-
-function readString(envKey: string, defaultValue: string): string {
-  return process.env[envKey] ?? defaultValue;
-}
-
-function readInt(envKey: string, defaultValue: number): number {
-  const raw = process.env[envKey];
-  if (raw === undefined) {
-    return defaultValue;
-  }
-  const parsed = parseInt(raw, 10);
-  return Number.isFinite(parsed) ? parsed : defaultValue;
-}
-
-function readPath(envKey: string): string | null {
-  const raw = process.env[envKey];
-  if (raw === undefined || raw.trim() === '') {
-    return null;
-  }
-  return raw.trim();
-}
-
 function buildConfig(): CrossDomainConfig {
-  const ghidraHeadlessPath = readPath('GHIDRA_HEADLESS_PATH');
-  const unidbgJarPath = readPath('UNIDBG_JAR_PATH');
-  const mojoInterfaceRegistryPath = readPath('MOJO_INTERFACE_REGISTRY_PATH');
-  const boringsslCertPath = readPath('BORINGSSL_CERT_PATH');
+  const pathOptions = { trim: true } as const;
+  const ghidraHeadlessPath = readEnvNullableString('GHIDRA_HEADLESS_PATH', pathOptions);
+  const unidbgJarPath = readEnvNullableString('UNIDBG_JAR_PATH', pathOptions);
+  const mojoInterfaceRegistryPath = readEnvNullableString(
+    'MOJO_INTERFACE_REGISTRY_PATH',
+    pathOptions,
+  );
+  const boringsslCertPath = readEnvNullableString('BORINGSSL_CERT_PATH', pathOptions);
   const platform = process.platform;
 
   return {
-    fridaEnabled: readBool('FRIDA_ENABLED', true),
-    fridaServerHost: readString('FRIDA_SERVER_HOST', '127.0.0.1'),
-    fridaServerPort: readInt('FRIDA_SERVER_PORT', 27042),
+    fridaEnabled: readEnvBoolean('FRIDA_ENABLED', true),
+    fridaServerHost: readEnvString('FRIDA_SERVER_HOST', '127.0.0.1', { trim: true }),
+    fridaServerPort: readEnvInteger('FRIDA_SERVER_PORT', 27042, { min: 1, max: 65_535 }),
     ghidraEnabled: ghidraHeadlessPath !== null,
     ghidraHeadlessPath,
     unidbgEnabled: unidbgJarPath !== null,
     unidbgJarPath,
     etwEnabled: platform === 'win32',
-    etwSessionName: readString('ETW_SESSION_NAME', 'jshookmcp_etw'),
-    mojoEnabled: readBool('MOJO_ENABLED', true),
+    etwSessionName: readEnvString('ETW_SESSION_NAME', 'jshookmcp_etw', { trim: true }),
+    mojoEnabled: readEnvBoolean('MOJO_ENABLED', true),
     mojoInterfaceRegistryPath,
-    boringsslEnabled: readBool('BORINGSSL_ENABLED', true),
+    boringsslEnabled: readEnvBoolean('BORINGSSL_ENABLED', true),
     boringsslCertPath,
     platform,
   };

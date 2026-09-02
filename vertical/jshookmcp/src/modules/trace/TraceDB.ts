@@ -43,13 +43,42 @@ try {
 const WRITE_SQL_PATTERN =
   /\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|REPLACE|PRAGMA)\b/i;
 
+/**
+ * Append-only tables that grow linearly with a recording session and are
+ * therefore subject to row pruning. `network_resources` (upsert by request_id)
+ * and `metadata` (key-value) are excluded — they are bounded by cardinality,
+ * not by session length.
+ */
+const PRUNED_TABLES = [
+  'events',
+  'memory_deltas',
+  'heap_snapshots',
+  'network_chunks',
+  'samples',
+  'console_logs',
+  'exceptions',
+] as const;
+
+/** Default per-table row cap for long trace sessions. */
+const DEFAULT_MAX_ROWS = 100_000;
+
+/**
+ * Unbuffered inserts (samples, console logs, exceptions) are high-frequency and
+ * one row each; running a full prune per row would turn O(1) inserts into O(n)
+ * deletes. Instead prune every N rows so overshoot is bounded by this interval.
+ */
+const IMMEDIATE_PRUNE_INTERVAL = 1000;
+
 export class TraceDB {
+  private readonly options: TraceDBOptions;
   private readonly db: import('better-sqlite3').Database;
   private readonly batchSize: number;
+  private readonly maxRows: number;
   private eventBuffer: TraceEvent[] = [];
   private memoryBuffer: MemoryDelta[] = [];
   private networkChunkBuffer: NetworkTraceChunk[] = [];
   private closed = false;
+  private immediateRowsSincePrune = 0;
 
   private insertEventStmt!: import('better-sqlite3').Statement;
   private insertDeltaStmt!: import('better-sqlite3').Statement;
@@ -61,7 +90,8 @@ export class TraceDB {
   private insertConsoleLogStmt!: import('better-sqlite3').Statement;
   private insertExceptionStmt!: import('better-sqlite3').Statement;
 
-  constructor(private readonly options: TraceDBOptions) {
+  constructor(options: TraceDBOptions) {
+    this.options = options;
     if (!Database) {
       throw new Error(formatBetterSqlite3Error(new Error("Cannot find package 'better-sqlite3'")));
     }
@@ -72,6 +102,7 @@ export class TraceDB {
       throw new Error(formatBetterSqlite3Error(error), { cause: error });
     }
     this.batchSize = options.batchSize ?? 200;
+    this.maxRows = options.maxRows ?? DEFAULT_MAX_ROWS;
 
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
@@ -132,6 +163,7 @@ export class TraceDB {
       sample.lineNumber,
       sample.columnNumber,
     );
+    this.maybePruneImmediate();
   }
 
   insertConsoleLog(log: TraceConsoleLog): void {
@@ -149,6 +181,7 @@ export class TraceDB {
       log.columnNumber,
       log.executionContextId,
     );
+    this.maybePruneImmediate();
   }
 
   insertException(exception: TraceException): void {
@@ -167,6 +200,7 @@ export class TraceDB {
       exception.stackTrace,
       exception.executionContextId,
     );
+    this.maybePruneImmediate();
   }
 
   upsertNetworkResource(resource: NetworkTraceResource): void {
@@ -214,6 +248,10 @@ export class TraceDB {
   insertHeapSnapshot(snapshot: HeapSnapshotRecord): void {
     this.ensureOpen();
     this.insertSnapshotStmt.run(snapshot.timestamp, snapshot.snapshotData, snapshot.summary);
+    // Snapshots are large BLOBs and arrive rarely, so prune eagerly rather than
+    // through the immediate-insert counter (a single oversized snapshot is the
+    // "多次快照线性增长" unbounded-growth case RAM audit #5 calls out).
+    this.prune();
   }
 
   setMetadata(key: string, value: string): void {
@@ -223,6 +261,15 @@ export class TraceDB {
 
   flush(): void {
     if (this.closed) return;
+    // No pending rows → nothing to write. Skipping also avoids running the prune
+    // pass on every read, since most read methods call flush() first.
+    if (
+      this.eventBuffer.length === 0 &&
+      this.memoryBuffer.length === 0 &&
+      this.networkChunkBuffer.length === 0
+    ) {
+      return;
+    }
 
     const flushTransaction = this.db.transaction(() => {
       for (const event of this.eventBuffer) {
@@ -269,6 +316,9 @@ export class TraceDB {
     this.eventBuffer = [];
     this.memoryBuffer = [];
     this.networkChunkBuffer = [];
+    // Bound the append-only tables after each flush (the buffered bulk-write
+    // boundary) — RAM audit #5.
+    this.prune();
   }
 
   // ── Read operations ──
@@ -543,6 +593,47 @@ export class TraceDB {
   }
 
   // ── Lifecycle ──
+
+  /**
+   * Delete oldest rows from every append-only table so each holds at most
+   * `maxRows` rows (RAM audit #5: recording a long session plus multiple
+   * snapshots previously grew the DB linearly with no DELETE/prune at all).
+   *
+   * The delete uses a MAX(id) window rather than an OFFSET subquery: `id` is the
+   * INTEGER PRIMARY KEY (rowid), so `MAX(id)` is an O(1) probe and the range
+   * delete only walks the pruned prefix. Because ids are never reused
+   * (AUTOINCREMENT), gaps from earlier prunes mean at MOST `maxRows` rows are
+   * retained — never more — which is exactly the invariant we want.
+   *
+   * @returns the total number of rows removed across all tables.
+   */
+  prune(): number {
+    this.ensureOpen();
+    if (this.maxRows <= 0) return 0;
+
+    let removed = 0;
+    for (const table of PRUNED_TABLES) {
+      const result = this.db
+        .prepare(`DELETE FROM ${table} WHERE id <= (SELECT MAX(id) FROM ${table}) - ?`)
+        .run(this.maxRows);
+      removed += result.changes;
+    }
+    return removed;
+  }
+
+  /**
+   * Gate a prune for the high-frequency unbuffered inserts (samples, console
+   * logs, exceptions): running a full 7-table prune per row would be O(n)
+   * deletes per insert. Prune every IMMEDIATE_PRUNE_INTERVAL rows instead, so
+   * overshoot above `maxRows` is bounded by that interval.
+   */
+  private maybePruneImmediate(): void {
+    this.immediateRowsSincePrune++;
+    if (this.immediateRowsSincePrune >= IMMEDIATE_PRUNE_INTERVAL) {
+      this.immediateRowsSincePrune = 0;
+      this.prune();
+    }
+  }
 
   close(): void {
     if (this.closed) return;

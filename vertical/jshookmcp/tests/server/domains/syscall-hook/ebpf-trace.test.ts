@@ -43,6 +43,40 @@ describe('SyscallHookHandlers — eBPF trace behavioral tests', () => {
       expect(ev0).toHaveProperty('returnValue');
     });
 
+    it('uses the shared base default syscall pool when syscalls omitted', async () => {
+      const handlers = new SyscallHookHandlers();
+      const res = (await handlers.handleSyscallEbpfTrace({
+        simulate: true,
+        durationSec: 2,
+      })) as Record<string, unknown>;
+      expect(res.syscallsTraced).toEqual([
+        'read',
+        'write',
+        'openat',
+        'close',
+        'fstat',
+        'mmap',
+        'mprotect',
+        'munmap',
+        'brk',
+        'ioctl',
+      ]);
+      for (const ev of res.events as Array<Record<string, unknown>>) {
+        expect([
+          'read',
+          'write',
+          'openat',
+          'close',
+          'fstat',
+          'mmap',
+          'mprotect',
+          'munmap',
+          'brk',
+          'ioctl',
+        ]).toContain(ev.syscall);
+      }
+    });
+
     it('uses custom syscalls when provided', async () => {
       const handlers = new SyscallHookHandlers();
       const res = (await handlers.handleSyscallEbpfTrace({
@@ -96,6 +130,34 @@ describe('SyscallHookHandlers — eBPF trace behavioral tests', () => {
       expect(script).toContain('sys_enter_openat');
       expect(script).toContain('sys_exit_read');
       expect(script).toContain('pid == 1234');
+    });
+
+    it('extends the base default pool with network/process syscalls in script mode', async () => {
+      const handlers = new SyscallHookHandlers();
+      const res = (await handlers.handleSyscallEbpfTrace({
+        durationSec: 2,
+      })) as Record<string, unknown>;
+      expect(res.mode).toBe('script');
+      expect(res.syscallsTraced).toEqual([
+        'read',
+        'write',
+        'openat',
+        'close',
+        'fstat',
+        'mmap',
+        'mprotect',
+        'munmap',
+        'brk',
+        'ioctl',
+        'connect',
+        'sendto',
+        'recvfrom',
+        'clone',
+        'execve',
+      ]);
+      const script = res.script as string;
+      expect(script).toContain('sys_enter_connect');
+      expect(script).toContain('sys_enter_clone');
     });
 
     it('generates script without PID filter when pid is 0', async () => {

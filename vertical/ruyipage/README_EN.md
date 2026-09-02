@@ -19,6 +19,7 @@
 > - Built-in **HTTP / SOCKS5 password proxy** support, including **one password proxy per tab**
 > - Built on **Firefox + WebDriver BiDi**
 > - Can directly obtain **closed shadow root** nodes
+> - Built-in **JS breakpoint debugging** (`page.debugger`): breakpoints, conditional breakpoints, stepping, call stack, scope, source reading, pause on exception
 > - Better suited for **high-risk scenarios**
 
 [![PyPI version](https://img.shields.io/pypi/v/ruyiPage.svg)](https://pypi.org/project/ruyiPage/)
@@ -27,19 +28,22 @@
 [![GitHub stars](https://img.shields.io/github/stars/LoseNine/ruyipage?style=social)](https://github.com/LoseNine/ruyipage/stargazers)
 [![Downloads](https://static.pepy.tech/badge/ruyipage)](https://pepy.tech/project/ruyipage)
 
+## ❤️ Sponsors
+
+> [Want to appear here?](mailto:losenine@163.com)
+
 <table>
-  <tr>
-    <td width="180" align="center">
-      <a href="https://xjbtoken.site/">
-        <img src="images/xjbtoken.svg" width="160" alt="XJB AI" />
-      </a>
-    </td>
-    <td>
-      <sub>Sponsor</sub><br>
-      <a href="https://xjbtoken.site/"><b>XJBToken</b></a><br>
-      A low-cost and practical AI Token relay station, covering the full GPT 5.4 / 5.5 series and Claude Opus 4.6 / 4.7 Kiro and Max routes. Designed for clean, stable, and durable everyday use, and used by Ruyi itself: <a href="https://xjbtoken.site/">https://xjbtoken.site/</a>.
-    </td>
-  </tr>
+
+<tr>
+<td width="180"><a href="http://www.fastaitoken.com/register"><img src="images/fastaitoken.svg" alt="FastAIToken" width="150"></a></td>
+<td>🎉 Thanks to FastAIToken for sponsoring this project! <a href="http://www.fastaitoken.com/register">FastAIToken</a> is an AI API aggregation platform built for developers, supporting OpenAI, Claude, Gemini and other mainstream large models. Top-ups are 1:1 — 1 CNY = 1 USD of API credit — so developers can reach the world's leading models at a lower cost and with less friction.<br>
+
+🚀 Multiple routes are available: an ultra-cheap 0.02x OpenAI promotional group (limited time), a 0.25x OpenAI group, 0.7x Claude with 95% fixed caching, and a 1.2x Claude Max route. A public status page shows the availability, latency, and health of every group in real time, and 7×24 human technical support (not a bot) responds quickly to developer requests.<br>
+
+🦊 Covers the full GPT 5.4 / 5.5 series plus the Kiro and Max routes for Claude Opus 4.6 / 4.7 / 4.8. Clean, stable, and durable for everyday use — used by Ruyi itself: <a href="http://www.fastaitoken.com/register">http://www.fastaitoken.com/register</a>
+</td>
+</tr>
+
 </table>
 
 ## Real-World Showcase
@@ -572,6 +576,25 @@ Unlike many automation libraries that rely heavily on CDP (Chrome DevTools Proto
 - **Built-in user context isolation**, suitable for multi-account and multi-session flows in one browser
 - **High-level APIs that are easy to get started with**, which also helps teams keep a consistent code style
 
+### BiDi Specification Sync
+
+The repository keeps a reproducible W3C Editor's Draft snapshot and a
+source-derived coverage report:
+
+- [Specification snapshot](examples/w3c_bidi/w3c_bidi_apis.json)
+- [Coverage report](examples/w3c_bidi/W3C_BIDI_COMPARISON.md)
+
+All 67 commands in the current core snapshot have low-level `_bidi` wrappers,
+and all 24 events can be subscribed through the generic `page.events` entry
+point. External specifications such as Bluetooth and Permissions are tracked
+separately. Whether a new command works at runtime still depends on the Firefox
+version.
+
+```bash
+python examples/w3c_bidi/extract_w3c_bidi.py --check
+python examples/w3c_bidi/generate_comparison.py --check
+```
+
 ### High-Risk Scenario Recommendation
 
 If your target site is highly sensitive to automation, the Firefox kernel solution provided by this project is the recommended first choice, or use any Firefox fingerprint browser:
@@ -600,10 +623,11 @@ Before diving into the details, this table gives a quick overview of what `ruyiP
 | Navigation events | `page.navigation` | `navigationStarted`, `load`, `historyUpdated`, etc. |
 | Generic events | `page.events` | `browsingContext` / `network` / `script` / `input` / `log` events |
 | Network control | `page.capture` / `page.network` / `page.intercept` | Passive capture, headers, cache control, interception, mocking, fail, collector |
-| Browsing contexts | `page.contexts` | `getTree`, create tab/window, reload, viewport |
+| Browsing contexts | `page.contexts` | `getTree`, create tab/window, reload, viewport, screencast |
 | Browser-level tools | `page.browser_tools` | user contexts, client windows |
 | Script capabilities | `page.get_realms()` / `page.eval_handle()` / `page.disown_handles()` | realms, remote handles, preload scripts |
-| Emulation | `page.emulation` | UA, viewport, screen, orientation, JS toggle |
+| Emulation | `page.emulation` | UA, viewport, screen, orientation, media features, viewport meta, JS toggle |
+| JS debugging | `page.debugger` | Breakpoints, conditional breakpoints, event/XHR breakpoints, stepping, call stack, scope, source reading, object expansion, pause on exception, blackboxing |
 | WebExtension | `page.extensions` | Install unpacked extensions, install xpi, uninstall |
 | Local storage | `page.local_storage` / `page.session_storage` | Read and write local/session storage |
 
@@ -1394,7 +1418,6 @@ Where:
 
 ```python
 collector = page.network.add_data_collector(
-    ["responseCompleted"],
     data_types=["response"],
 )
 
@@ -1649,7 +1672,220 @@ Suitable for:
 
 ---
 
-## 15. Representative Examples
+## 15. JS Breakpoint Debugging
+
+High-level entry: `page.debugger`
+
+The WebDriver BiDi specification has **no** debugger module, and Firefox removed CDP entirely in version 141, so breakpoint-level debugging is normally out of reach for a BiDi framework. `ruyiPage` adds a second channel over Firefox's own DevTools remote debugging protocol (RDP), which runs **alongside the BiDi connection without disturbing it**.
+
+### Enabling
+
+The devtools server has to be started with Firefox, so configure it before creating the page:
+
+```python
+from ruyipage import FirefoxOptions, FirefoxPage
+
+opts = FirefoxOptions()
+opts.enable_debugger()          # writes the required prefs and adds --start-debugger-server
+page = FirefoxPage(opts)
+
+page.debugger.start()           # connect and attach to the current tab
+```
+
+`enable_debugger(port=6000)` selects the port. `start(auto_resume_after=30)` enables the pause watchdog (see the caveats below).
+
+### Reading source
+
+```python
+for s in page.debugger.sources():
+    print(s.url)
+
+code = page.debugger.source_text('app.js')          # also accepts a Source object
+lines = page.debugger.breakable_lines('app.js')     # which lines accept a breakpoint
+```
+
+`source_text()` returns **the exact text the JS engine is executing**, so its line numbers line up with breakpoint locations and the `line` reported in the call stack. Downloading the URL yourself cannot match that:
+
+- `eval` / `new Function` / blob scripts have no downloadable address at all
+- inline `<script>` line numbers are relative to the whole HTML document
+
+### Setting breakpoints
+
+```python
+bp = page.debugger.set_breakpoint('app.js', 42)
+bp = page.debugger.set_breakpoint('app.js', 42, condition='quantity > 3')
+
+page.debugger.remove_breakpoint(bp)
+page.debugger.clear_breakpoints()
+```
+
+When `column` is omitted it is resolved from the source's real breakpoint positions. Firefox **silently ignores** breakpoints that do not land on a valid position (no error, never fires), so never guess the column.
+
+Breakpoints are keyed by URL, and the server re-applies them after navigation, so there is no need to set them again.
+
+### Pausing and stepping
+
+```python
+state = page.debugger.wait_paused(timeout=30)   # -> PausedState
+print(state.why, state.url, state.line)
+
+page.debugger.step_over()
+page.debugger.step_into()
+page.debugger.step_out()
+page.debugger.resume()
+
+page.debugger.pause()                            # pause immediately
+page.debugger.on_paused(lambda s: print(s))      # callback style
+```
+
+### Call stack and scope
+
+```python
+for f in page.debugger.frames():
+    print(f.display_name, f.url, f.line, f.arguments)
+
+scope = page.debugger.scope()                      # locals + function arguments
+scope = page.debugger.scope(include_parents=True)  # also closures and globals
+```
+
+`scope()` walks out to the **function boundary** by default (the current block plus its enclosing function), stopping before the global scope. Reading only the innermost block would show a single uninitialised variable when paused on `const x = ...`, with every function argument missing.
+
+### Expanding objects
+
+Objects in scope come back as `RemoteObject`, with the protocol's embedded preview already decoded into readable values (arrays become `list`, plain objects become `dict`). That layer costs **no extra request**:
+
+```python
+items = scope['items']
+print(items.class_name, items.value, items.truncated)
+```
+
+A preview carries at most ten entries; `truncated` is `True` when it does not fit. For the full contents:
+
+```python
+page.debugger.expand(obj, depth=3)          # recursive expansion
+page.debugger.get_property(obj, 'probe')    # targeted lookup (use this for large objects)
+page.debugger.constructor_name(obj)         # real class name, e.g. 'Cart'
+```
+
+> `class_name` reflects the JS `[[Class]]`, which is `'Object'` for ordinary class instances; the real class name is derived from the prototype chain by `constructor_name()`.
+>
+> `window` has over a thousand properties, so a full `expand()` gets cut off at `max_items` (a warning is logged) — use `get_property()` in that case.
+
+`RemoteObject` equality compares the class name and contents only, **not the actor id**. Object actors are recreated on every resume, so comparing by actor would report every object as changed when diffing scope snapshots across a step.
+
+### Pause on exception
+
+Instead of guessing where the failure is and setting a breakpoint there, let the page run and stop at the throw site:
+
+```python
+page.debugger.pause_on_exceptions(True, ignore_caught=True)
+
+state = page.debugger.wait_paused(timeout=30)
+if state.is_exception:
+    print(state.exception)      # decoded TypeError etc., with message and stack
+```
+
+`ignore_caught=True` (the default) skips exceptions that a `catch` will handle; otherwise the page's normal try/catch flow keeps triggering pauses.
+
+`pause_on_debugger_statement()` controls whether JS `debugger` statements pause.
+
+### Event and XHR breakpoints
+
+Break on behaviour instead of having to know which file and line a handler lives in:
+
+```python
+# which events does the kernel support (group name -> event ids)
+print(page.debugger.available_event_breakpoints())
+
+# pause whenever any click handler runs
+page.debugger.set_event_breakpoints(['event.mouse.click'])
+
+state = page.debugger.wait_paused(timeout=30)
+if state.is_event_breakpoint:
+    print(state.event_breakpoint)      # 'event.mouse.click'
+    print(page.debugger.frames())      # shows exactly where the handler is
+
+page.debugger.set_event_breakpoints([])   # an empty list clears them
+```
+
+```python
+# pause when a request URL contains /api/
+page.debugger.set_xhr_breakpoint('/api/', method='GET')
+
+state = page.debugger.wait_paused(timeout=30)
+if state.is_xhr:
+    print(page.debugger.frames())      # who issued this request
+
+page.debugger.remove_xhr_breakpoint('/api/', method='GET')
+```
+
+An empty `path` with `method='ANY'` matches every request. Both kinds are effective for "the click does nothing" and "where does this request come from" investigations.
+
+### Blackboxing framework code
+
+Without blackboxing on a real page, `step_into` dives straight into React or jQuery internals and it is hard to get back to your own code:
+
+```python
+page.debugger.blackbox('https://cdn.example.com/react.min.js')
+page.debugger.blackbox('vendor.js', start_line=1, end_line=5000)   # or just a line range
+
+print(page.debugger.blackboxed())      # currently flagged sources
+page.debugger.unblackbox('vendor.js')
+```
+
+Several inline scripts in one HTML document share a URL and are all flagged together.
+
+### Other execution controls
+
+```python
+page.debugger.skip_breakpoints(True)    # ignore every breakpoint without deleting them
+page.debugger.restart_frame()           # re-run the current frame from its entry (side effects are not undone)
+page.debugger.include_async_frames()    # include async parent frames in the call stack
+```
+
+`include_async_frames()` matters on modern pages: with heavy async/await the synchronous stack is often a single frame and reveals nothing about the caller. Once enabled, each frame's `asyncCause` explains how it was chained.
+
+### ⚠️ Required reading
+
+**While JS is paused, every BiDi call that needs the JS thread blocks until timeout** (`run_js`, clicking, reading element text). The call that triggers a breakpoint must therefore run on a background thread:
+
+```python
+import threading
+
+page.debugger.set_breakpoint('app.js', 42)
+
+threading.Thread(
+    target=lambda: page.run_js('return window.doWork();', timeout=60),
+    daemon=True,
+).start()
+
+state = page.debugger.wait_paused(timeout=30)
+# ... inspect using page.debugger APIs only ...
+page.debugger.resume()
+```
+
+For unattended scripts, enable the watchdog so a missed `resume()` cannot wedge the page permanently:
+
+```python
+page.debugger.start(auto_resume_after=30)
+```
+
+`stop()` resumes a paused page before disconnecting, so it never leaves the page suspended.
+
+### Current limitations
+
+- **Arbitrary expressions cannot be evaluated while paused.** This is a protocol limitation rather than a gap: Firefox's `evaluateJSAsync` never delivers its result during a pause, and the `frame` actor has no eval method. Use `scope()` + `expand()` + `get_property()` to read state instead.
+- **Variable values cannot be modified.** The `environment` actor spec declares an empty `methods` map, so it is read-only.
+- **Script source cannot be hot-patched.** Firefox never implemented anything like CDP's `setScriptSource` live edit.
+- **Only the top-level tab is covered**; JS inside iframes and Workers is out of reach.
+- **No source map resolution** — the server only exposes `sourceMapURL` metadata, so minified line numbers must be mapped client-side.
+- RDP is a Firefox-private protocol with no cross-version compatibility guarantee.
+
+See `examples/50_js_debugger.py` and `examples/51_ai_autonomous_debug.py` (the latter shows the full loop where only the page URL is given and the program discovers the code and breakpoint location by itself).
+
+---
+
+## 16. Representative Examples
 
 The repository already includes many examples. It is recommended to learn them by number.
 
@@ -1702,6 +1938,8 @@ Suggested order:
 - `52_per_tab_socks5_proxy_browserscan.py` single browser, multiple container tabs, each tab using a different SOCKS5 password proxy
 - `53_duckai_eventstream_capture.py` opens Duck.ai with Firefox, submits a chat prompt, and captures the `POST /duckchat/v1/chat` EventStream response body
 - `54_bing_passive_capture.py` uses `page.capture` to start passive capture before opening Bing search, then prints auto-loaded request/response headers and bodies
+- `50_js_debugger.py` demonstrates `page.debugger`: reading source, setting breakpoints, reading the call stack and scope, stepping
+- `51_ai_autonomous_debug.py` autonomous debugging loop: given only the page URL, the program discovers the JS sources, reads the code, locates a breakpoint line, and inspects the paused state
 
 ---
 

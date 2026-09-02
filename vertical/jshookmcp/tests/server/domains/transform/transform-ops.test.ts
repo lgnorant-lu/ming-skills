@@ -148,6 +148,19 @@ describe('TransformToolHandlersOps', () => {
       const code = 'var x = 1; x++;';
       expect(ops.testTransformControlFlowFlatten(code)).toBe(code);
     });
+
+    it('declines flattening when a case body references the dispatcher (dangling ref)', async () => {
+      // `order[i] = "1"` in the case body would survive extraction while the
+      // `var order` declaration is removed — the linearized output would throw
+      // ReferenceError at runtime. Prefer leaving the loop untouched.
+      const code = `var order=["2","0","1"], i=0;while(!![]){switch(order[i++]){case "0":order[i]="1";console.log("a");continue;case "1":console.log("b");continue;case "2":console.log("c");continue;}break;}`;
+      expect(ops.testTransformControlFlowFlatten(code)).toBe(code);
+    });
+
+    it('declines flattening when a case body reads the cursor (dangling ref)', async () => {
+      const code = `var order=["2"], i=0;while(!![]){switch(order[i++]){case "0":console.log(i);continue;}break;}`;
+      expect(ops.testTransformControlFlowFlatten(code)).toBe(code);
+    });
   });
 
   describe('transformRenameVars', () => {

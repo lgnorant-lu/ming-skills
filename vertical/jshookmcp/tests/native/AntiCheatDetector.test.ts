@@ -112,6 +112,31 @@ vi.mock('@native/PEAnalyzer', () => ({
         },
       ];
     }
+    /**
+     * Mirrors PEAnalyzer.rvaToFileOffset (shared delegate) so the
+     * AntiCheatDetector delegation tests keep exercising real RVA mapping.
+     */
+    rvaToFileOffset(buffer: Buffer, rva: number): number {
+      try {
+        const e_lfanew = buffer.readUInt32LE(60);
+        const numSections = buffer.readUInt16LE(e_lfanew + 6);
+        const sizeOfOptionalHeader = buffer.readUInt16LE(e_lfanew + 20);
+        const secStart = e_lfanew + 24 + sizeOfOptionalHeader;
+        for (let i = 0; i < numSections; i++) {
+          const off = secStart + i * 40;
+          if (off + 40 > buffer.length) break;
+          const virtualAddr = buffer.readUInt32LE(off + 12);
+          const virtualSize = buffer.readUInt32LE(off + 8);
+          const rawOffset = buffer.readUInt32LE(off + 20);
+          if (rva >= virtualAddr && rva < virtualAddr + virtualSize) {
+            return rawOffset + (rva - virtualAddr);
+          }
+        }
+      } catch {
+        // fall through to -1
+      }
+      return -1;
+    }
   },
 }));
 

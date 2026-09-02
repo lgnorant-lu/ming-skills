@@ -20,6 +20,7 @@ class NavigationEvent(object):
             常见值：``'browsingContext.navigationStarted'``、
             ``'browsingContext.fragmentNavigated'``、
             ``'browsingContext.historyUpdated'``、
+            ``'browsingContext.navigationAborted'``、
             ``'browsingContext.navigationCommitted'``、
             ``'browsingContext.navigationFailed'``。
         params: 事件原始参数字典。
@@ -77,6 +78,7 @@ class NavigationTracker(object):
         "browsingContext.historyUpdated",
         "browsingContext.domContentLoaded",
         "browsingContext.load",
+        "browsingContext.navigationAborted",
         "browsingContext.navigationCommitted",
         "browsingContext.navigationFailed",
     ]

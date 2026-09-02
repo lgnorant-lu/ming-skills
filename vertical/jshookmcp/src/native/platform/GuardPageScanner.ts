@@ -73,7 +73,17 @@ export async function scanGuardPages(
         break;
       }
 
-      const region = api.queryRegion(handle, addr);
+      // Per-region try/catch: a single queryRegion failure (e.g. a region that
+      // disappears between /proc/pid/maps and the query) must not abort the
+      // whole scan — count it and continue from the next region.
+      let region: ReturnType<PlatformMemoryAPI['queryRegion']> | null;
+      try {
+        region = api.queryRegion(handle, addr);
+      } catch {
+        stats.queryFailures += 1;
+        addr += 0x1000n;
+        continue;
+      }
       if (!region) break;
 
       stats.scannedRegions += 1;
@@ -90,8 +100,6 @@ export async function scanGuardPages(
       if (next <= addr || next <= region.baseAddress) break;
       addr = next;
     }
-  } catch {
-    stats.queryFailures += 1;
   } finally {
     api.closeProcess(handle);
   }

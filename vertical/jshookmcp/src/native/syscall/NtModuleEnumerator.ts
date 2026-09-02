@@ -17,7 +17,7 @@
  * administrator-level processes; some other information classes additionally
  * require SeDebugPrivilege.
  */
-import koffi from 'koffi';
+import { requireKoffi, type KoffiLibraryHandle, type KoffiCallable } from '../koffi-loader';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -77,13 +77,13 @@ export interface KernelModule {
 
 // ── FFI lazy loaders (mirror DirectNtApi conventions) ────────────────────────
 
-let _ntdll: ReturnType<typeof koffi.load> | null = null;
-function ntdll(): ReturnType<typeof koffi.load> {
-  if (!_ntdll) _ntdll = koffi.load('ntdll.dll');
+let _ntdll: KoffiLibraryHandle | null = null;
+function ntdll(): KoffiLibraryHandle {
+  if (!_ntdll) _ntdll = requireKoffi().load('ntdll.dll');
   return _ntdll;
 }
 
-let _NtQuerySystemInformation: ReturnType<ReturnType<typeof koffi.load>['func']> | null = null;
+let _NtQuerySystemInformation: KoffiCallable | null = null;
 function getNtQSI() {
   if (!_NtQuerySystemInformation) {
     // NTSTATUS NtQuerySystemInformation(
@@ -165,9 +165,9 @@ export function enumerateKernelModules(): KernelModule[] {
   const returnLen = Buffer.alloc(4);
   let status = fn(
     SYSTEM_MODULE_INFORMATION,
-    koffi.address(probe),
+    requireKoffi().address(probe),
     probe.length,
-    koffi.address(returnLen),
+    requireKoffi().address(returnLen),
   ) as number;
 
   if (status >>> 0 !== STATUS_INFO_LENGTH_MISMATCH && status >>> 0 !== STATUS_SUCCESS) {
@@ -178,15 +178,21 @@ export function enumerateKernelModules(): KernelModule[] {
   if (required === 0) {
     return [];
   }
+  // Defensive cap: the kernel module list is ~100 KB on real systems; a
+  // corrupted returnLen must not trigger a giant allocation or an unbounded
+  // parse loop (parseModules is bounded by buffer length, but not by count).
+  if (required > 0x10000000) {
+    throw new Error(`NtQuerySystemInformation required length implausible: ${required}`);
+  }
 
   // Second call: allocate the required length and fetch the data.
   const data = Buffer.alloc(required);
   returnLen.writeUInt32LE(0, 0);
   status = fn(
     SYSTEM_MODULE_INFORMATION,
-    koffi.address(data),
+    requireKoffi().address(data),
     data.length,
-    koffi.address(returnLen),
+    requireKoffi().address(returnLen),
   ) as number;
 
   if (status >>> 0 !== STATUS_SUCCESS) {

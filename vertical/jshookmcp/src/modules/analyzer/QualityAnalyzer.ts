@@ -3,6 +3,35 @@ import traverse from '@babel/traverse';
 import * as t from '@babel/types';
 import type { CodeStructure, SecurityRisk } from '@internal-types/index';
 import { logger } from '@utils/logger';
+import {
+  QUALITY_AVG_COMPLEXITY_BAND_HIGH,
+  QUALITY_AVG_COMPLEXITY_BAND_LOW,
+  QUALITY_AVG_COMPLEXITY_PENALTY_HIGH,
+  QUALITY_AVG_COMPLEXITY_PENALTY_LOW,
+  QUALITY_COGNITIVE_BAND_HIGH,
+  QUALITY_COGNITIVE_BAND_LOW,
+  QUALITY_COGNITIVE_PENALTY_HIGH,
+  QUALITY_COGNITIVE_PENALTY_LOW,
+  QUALITY_COMPLEXITY_BAND_HIGH,
+  QUALITY_COMPLEXITY_BAND_LOW,
+  QUALITY_COMPLEXITY_BAND_MEDIUM,
+  QUALITY_COMPLEXITY_PENALTY_HIGH,
+  QUALITY_COMPLEXITY_PENALTY_LOW,
+  QUALITY_COMPLEXITY_PENALTY_MEDIUM,
+  QUALITY_DEFAULT_AI_SCORE,
+  QUALITY_DEFAULT_MAINTAINABILITY,
+  QUALITY_SECURITY_PENALTY_CRITICAL,
+  QUALITY_SECURITY_PENALTY_HIGH,
+  QUALITY_SECURITY_PENALTY_LOW,
+  QUALITY_SECURITY_PENALTY_MEDIUM,
+  QUALITY_SMELL_PENALTY_HIGH,
+  QUALITY_SMELL_PENALTY_LOW,
+  QUALITY_SMELL_PENALTY_MEDIUM,
+  QUALITY_WEIGHT_CODE_SMELL,
+  QUALITY_WEIGHT_COMPLEXITY,
+  QUALITY_WEIGHT_MAINTAINABILITY,
+  QUALITY_WEIGHT_SECURITY,
+} from '@src/constants';
 
 export function calculateQualityScore(
   structure: CodeStructure,
@@ -19,52 +48,63 @@ export function calculateQualityScore(
 
   let securityScore = 100;
   securityRisks.forEach((risk) => {
-    if (risk.severity === 'critical') securityScore -= 20;
-    else if (risk.severity === 'high') securityScore -= 10;
-    else if (risk.severity === 'medium') securityScore -= 5;
-    else securityScore -= 2;
+    if (risk.severity === 'critical') securityScore -= QUALITY_SECURITY_PENALTY_CRITICAL;
+    else if (risk.severity === 'high') securityScore -= QUALITY_SECURITY_PENALTY_HIGH;
+    else if (risk.severity === 'medium') securityScore -= QUALITY_SECURITY_PENALTY_MEDIUM;
+    else securityScore -= QUALITY_SECURITY_PENALTY_LOW;
   });
   securityScore = Math.max(0, securityScore);
 
   let complexityScore = 100;
   if (complexityMetrics) {
-    if (complexityMetrics.cyclomaticComplexity > 20) complexityScore -= 30;
-    else if (complexityMetrics.cyclomaticComplexity > 10) complexityScore -= 15;
-    else if (complexityMetrics.cyclomaticComplexity > 5) complexityScore -= 5;
+    if (complexityMetrics.cyclomaticComplexity > QUALITY_COMPLEXITY_BAND_HIGH) {
+      complexityScore -= QUALITY_COMPLEXITY_PENALTY_HIGH;
+    } else if (complexityMetrics.cyclomaticComplexity > QUALITY_COMPLEXITY_BAND_MEDIUM) {
+      complexityScore -= QUALITY_COMPLEXITY_PENALTY_MEDIUM;
+    } else if (complexityMetrics.cyclomaticComplexity > QUALITY_COMPLEXITY_BAND_LOW) {
+      complexityScore -= QUALITY_COMPLEXITY_PENALTY_LOW;
+    }
 
-    if (complexityMetrics.cognitiveComplexity > 15) complexityScore -= 20;
-    else if (complexityMetrics.cognitiveComplexity > 10) complexityScore -= 10;
+    if (complexityMetrics.cognitiveComplexity > QUALITY_COGNITIVE_BAND_HIGH) {
+      complexityScore -= QUALITY_COGNITIVE_PENALTY_HIGH;
+    } else if (complexityMetrics.cognitiveComplexity > QUALITY_COGNITIVE_BAND_LOW) {
+      complexityScore -= QUALITY_COGNITIVE_PENALTY_LOW;
+    }
   } else {
     const avgComplexity =
       structure.functions.reduce((sum, fn) => sum + fn.complexity, 0) /
       (structure.functions.length || 1);
-    if (avgComplexity > 10) complexityScore -= 20;
-    else if (avgComplexity > 5) complexityScore -= 10;
+    if (avgComplexity > QUALITY_AVG_COMPLEXITY_BAND_HIGH) {
+      complexityScore -= QUALITY_AVG_COMPLEXITY_PENALTY_HIGH;
+    } else if (avgComplexity > QUALITY_AVG_COMPLEXITY_BAND_LOW) {
+      complexityScore -= QUALITY_AVG_COMPLEXITY_PENALTY_LOW;
+    }
   }
   complexityScore = Math.max(0, complexityScore);
 
-  const maintainabilityScore = complexityMetrics?.maintainabilityIndex || 70;
+  const maintainabilityScore =
+    complexityMetrics?.maintainabilityIndex || QUALITY_DEFAULT_MAINTAINABILITY;
 
   let codeSmellScore = 100;
   if (antiPatterns) {
     antiPatterns.forEach((pattern) => {
-      if (pattern.severity === 'high') codeSmellScore -= 10;
-      else if (pattern.severity === 'medium') codeSmellScore -= 5;
-      else codeSmellScore -= 2;
+      if (pattern.severity === 'high') codeSmellScore -= QUALITY_SMELL_PENALTY_HIGH;
+      else if (pattern.severity === 'medium') codeSmellScore -= QUALITY_SMELL_PENALTY_MEDIUM;
+      else codeSmellScore -= QUALITY_SMELL_PENALTY_LOW;
     });
   }
   codeSmellScore = Math.max(0, codeSmellScore);
 
-  let aiScore = 70;
+  let aiScore = QUALITY_DEFAULT_AI_SCORE;
   if (typeof aiAnalysis.qualityScore === 'number') {
     aiScore = aiAnalysis.qualityScore;
   }
 
   score =
-    securityScore * 0.4 +
-    complexityScore * 0.25 +
-    maintainabilityScore * 0.2 +
-    codeSmellScore * 0.15;
+    securityScore * QUALITY_WEIGHT_SECURITY +
+    complexityScore * QUALITY_WEIGHT_COMPLEXITY +
+    maintainabilityScore * QUALITY_WEIGHT_MAINTAINABILITY +
+    codeSmellScore * QUALITY_WEIGHT_CODE_SMELL;
 
   if (typeof aiAnalysis.qualityScore === 'number') {
     score = (score + aiScore) / 2;

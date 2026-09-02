@@ -4,9 +4,15 @@ import type { CodeCache } from '@modules/collector/CodeCache';
 import type { CodeCompressor } from '@modules/collector/CodeCompressor';
 
 export class DetailedDataManagerAdapter implements CacheInstance {
+  private manager: DetailedDataManager;
   name = 'DetailedDataManager';
 
-  constructor(private manager: DetailedDataManager) {}
+  /** Rough per-entry byte estimate for in-memory entries (avg ~50KB each). */
+  private static readonly ESTIMATED_AVG_ENTRY_BYTES = 50 * 1024;
+
+  constructor(manager: DetailedDataManager) {
+    this.manager = manager;
+  }
 
   getStats(): CacheStats {
     const stats = this.manager.getStats();
@@ -25,14 +31,17 @@ export class DetailedDataManagerAdapter implements CacheInstance {
   }
 
   private estimateSize(entries: number): number {
-    return entries * 50 * 1024;
+    return entries * DetailedDataManagerAdapter.ESTIMATED_AVG_ENTRY_BYTES;
   }
 }
 
 export class CodeCacheAdapter implements CacheInstance {
+  private cache: CodeCache;
   name = 'CodeCache';
 
-  constructor(private cache: CodeCache) {}
+  constructor(cache: CodeCache) {
+    this.cache = cache;
+  }
 
   async getStats(): Promise<CacheStats> {
     const stats = await this.cache.getStats();
@@ -54,9 +63,12 @@ export class CodeCacheAdapter implements CacheInstance {
 }
 
 export class CodeCompressorAdapter implements CacheInstance {
+  private compressor: CodeCompressor;
   name = 'CodeCompressor';
 
-  constructor(private compressor: CodeCompressor) {}
+  constructor(compressor: CodeCompressor) {
+    this.compressor = compressor;
+  }
 
   getStats(): CacheStats {
     const stats = this.compressor.getStats();
@@ -85,14 +97,20 @@ export class CodeCompressorAdapter implements CacheInstance {
   }
 }
 
+/**
+ * Build adapters for the caches that are actually present. Callers that
+ * construct a collector lazily may not have a CodeCache/CodeCompressor yet;
+ * registering an adapter around null would make getStats() throw on every
+ * stats aggregation instead of simply being absent.
+ */
 export function createCacheAdapters(
-  detailedDataManager: DetailedDataManager,
-  codeCache: CodeCache,
-  codeCompressor: CodeCompressor,
+  detailedDataManager: DetailedDataManager | null | undefined,
+  codeCache: CodeCache | null | undefined,
+  codeCompressor: CodeCompressor | null | undefined,
 ): CacheInstance[] {
-  return [
-    new DetailedDataManagerAdapter(detailedDataManager),
-    new CodeCacheAdapter(codeCache),
-    new CodeCompressorAdapter(codeCompressor),
-  ];
+  const adapters: CacheInstance[] = [];
+  if (detailedDataManager) adapters.push(new DetailedDataManagerAdapter(detailedDataManager));
+  if (codeCache) adapters.push(new CodeCacheAdapter(codeCache));
+  if (codeCompressor) adapters.push(new CodeCompressorAdapter(codeCompressor));
+  return adapters;
 }

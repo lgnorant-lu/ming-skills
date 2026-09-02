@@ -6,16 +6,15 @@ const VECTOR_REGISTER_SLOT_SIZE = 16;
 
 /** Stateful reader for the AArch64 Procedure Call Standard va_list layout. */
 export class Aarch64VaListReader {
+  private readonly memory: GuestMemoryReader;
   private stack: number;
   private readonly generalTop: number;
   private readonly vectorTop: number;
   private generalOffset: number;
   private vectorOffset: number;
 
-  constructor(
-    private readonly memory: GuestMemoryReader,
-    address: number,
-  ) {
+  constructor(memory: GuestMemoryReader, address: number) {
+    this.memory = memory;
     const header = memory.read(address, VA_LIST_HEADER_SIZE);
     if (header.byteLength < VA_LIST_HEADER_SIZE) {
       throw new Error(`AArch64 va_list header is truncated at 0x${address.toString(16)}`);

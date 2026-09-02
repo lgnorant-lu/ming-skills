@@ -138,9 +138,10 @@ export class UnifiedCacheManager {
    * fits within `targetSize`.
    *
    * `options.namespaces` restricts every step to the listed cache names. An
-   * empty/undefined list means "all caches" (backwards compatible). This lets a
-   * caller say "evict the search cache but never touch instrumentation" without
-   * reaching for the destructive `clearAll`.
+   * empty list matches nothing (cleans nothing); only `undefined` means "all
+   * caches". Treating an empty list as "all" would make a caller that built
+   * the list from user selection wipe every cache on an empty selection —
+   * cleanup is destructive, so the default must be the safe no-op.
    */
   async smartCleanup(
     targetSize?: number,
@@ -152,8 +153,10 @@ export class UnifiedCacheManager {
     freedPercentage: number;
   }> {
     const namespaces = options?.namespaces;
+    // undefined = all caches; an empty (or any non-empty) array restricts to
+    // exactly the listed names, so an empty selection cleans nothing.
     const namespaceFilter = (name: string): boolean =>
-      !namespaces || namespaces.length === 0 || namespaces.includes(name);
+      namespaces === undefined || namespaces.includes(name);
 
     const target = targetSize || this.GLOBAL_MAX_SIZE * 0.7;
     const beforeStats = await this.getFilteredStats(namespaceFilter);

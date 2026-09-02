@@ -1,4 +1,4 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import { networkAuthorizationSchema } from '@server/domains/network/authorization-schema';
 import { tool } from '@server/registry/tool-builder';
 
@@ -14,7 +14,11 @@ const queryTypes = [
 export const instrumentationTools: Tool[] = [
   tool('instrumentation_session', (t) =>
     t
-      .desc('Start, stop, or query status of an instrumentation recording session.')
+      .desc(
+        'Start, stop, or query status of an instrumentation recording session. ' +
+          'Destroying a session archives it read-only (the last 8 destroyed sessions are ' +
+          'retained, oldest evicted) so export/diff/merge/status can still inspect it.',
+      )
       .enum('action', ['create', 'list', 'destroy', 'status'], 'Session operation')
       .string('name', 'Optional session name for create')
       .string('sessionId', 'Session ID (required for destroy/status)')
@@ -129,128 +133,10 @@ export const instrumentationTools: Tool[] = [
   ),
 ];
 
-export const aiHookTools: Tool[] = [
-  tool('ai_hook', (t) =>
-    t
-      .desc(
-        'Manage AI hooks. Actions: inject (inject code into page), get_data (retrieve captured hook data), list ' +
-          '(all active hooks), clear (remove hook data by id or all), toggle (enable/disable a hook), export ' +
-          '(export data as JSON/CSV).',
-      )
-      .enum(
-        'action',
-        ['inject', 'get_data', 'list', 'clear', 'toggle', 'export'],
-        'Operation to perform',
-      )
-      .string(
-        'hookId',
-        'Hook identifier (required for inject/get_data/toggle; optional for clear/export)',
-      )
-      .string('code', 'Hook code to inject (required for action=inject)')
-      .enum(
-        'method',
-        ['evaluateOnNewDocument', 'evaluate'],
-        'Injection method (for action=inject)',
-        {
-          default: 'evaluate',
-        },
-      )
-      .boolean('enabled', 'Enable or disable hook (required for action=toggle)')
-      .enum('format', ['json', 'csv'], 'Export format (for action=export)', { default: 'json' })
-      .required('action'),
-  ),
-];
-
-export const hookPresetTools: Tool[] = [
-  tool('hook_preset', (t) =>
-    t
-      .desc(
-        'Install a pre-built JavaScript hook from 20+ built-in presets (eval, atob/btoa, Proxy, Reflect, ' +
-          'Object.defineProperty, etc.), or provide customTemplate/customTemplates to install your own reusable ' +
-          'hook bodies. Use listPresets=true to see all available preset descriptions.',
-      )
-      .string(
-        'preset',
-        'Single preset name to install. Accepts built-in preset ids or ids provided by customTemplate/customTemplates.',
-      )
-      .array(
-        'presets',
-        { type: 'string' },
-        'List of preset names to install simultaneously. Accepts built-in ids and custom template ids.',
-      )
-      .prop('customTemplate', {
-        type: 'object',
-        properties: {
-          id: { type: 'string', description: 'Stable preset id, for example deobfuscation-sinks' },
-          description: {
-            type: 'string',
-            description: 'Human-readable description for listPresets output.',
-          },
-          body: {
-            type: 'string',
-            description: 'Hook body snippet inserted into the preset wrapper.',
-          },
-        },
-        required: ['id', 'body'],
-        description:
-          'Inline custom template. body should contain the hook body inserted into the standard buildHookCode ' +
-          'wrapper. Use {{STACK_CODE}} and {{LOG_FN}} placeholders when needed.',
-      })
-      .prop('customTemplates', {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            id: { type: 'string' },
-            description: { type: 'string' },
-            body: { type: 'string' },
-          },
-          required: ['id', 'body'],
-        },
-        description: 'List of inline custom templates to register for this invocation.',
-      })
-      .boolean('captureStack', 'Include call stack in captured data (has performance impact)', {
-        default: false,
-      })
-      .boolean('logToConsole', 'Log hook events to browser console', { default: true })
-      .enum(
-        'method',
-        ['evaluate', 'evaluateOnNewDocument'],
-        'Injection method: evaluate=current page, evaluateOnNewDocument=before page scripts',
-        { default: 'evaluate' },
-      )
-      .boolean(
-        'listPresets',
-        'Set to true to list all available presets with descriptions instead of installing.',
-        { default: false },
-      ),
-  ),
-];
-
-export const evidenceTools: Tool[] = [
-  tool('evidence_query', (t) =>
-    t
-      .desc(
-        'Query reverse evidence graph by URL, function name, or script ID to find associated nodes.',
-      )
-      .enum('by', ['url', 'function', 'script'], 'Query dimension')
-      .string('value', 'Search value: URL/fragment, function name, or script ID')
-      .required('by', 'value')
-      .query(),
-  ),
-  tool('evidence_export', (t) =>
-    t
-      .desc('Export the reverse evidence graph as JSON snapshot or Markdown report.')
-      .enum('format', ['json', 'markdown'], 'Export format')
-      .required('format')
-      .query(),
-  ),
-  tool('evidence_chain', (t) =>
-    t
-      .desc('Get full provenance chain from a node ID in specified direction.')
-      .string('nodeId', 'Evidence node ID to start from')
-      .enum('direction', ['forward', 'backward'], 'Traversal direction', { default: 'forward' })
-      .required('nodeId')
-      .query(),
-  ),
-];
+// Re-export the hooks/evidence tool definitions rather than duplicating them
+// here — the copies previously defined in this file were stale (ai_hook and
+// hook_preset drifted from the canonical hooks/definitions.ts schema, e.g.
+// missing the mutateReturn field), and same-name definitions with different
+// schemas resolve arbitrarily depending on registration order.
+export { aiHookTools, hookPresetTools } from './hooks/definitions';
+export { evidenceTools } from './evidence/definitions';

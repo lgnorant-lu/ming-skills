@@ -72,6 +72,8 @@ const registrations = defineMethodRegistrations<H, (typeof nativeEmulatorTools)[
     { tool: 'nemu_regs_restore', method: 'handleRegsRestore' },
     { tool: 'nemu_scan_memory', method: 'handleScanMemory' },
     { tool: 'nemu_xor_region', method: 'handleXorRegion' },
+    { tool: 'nemu_relay', method: 'handleRelay' },
+    { tool: 'nemu_gdbserver', method: 'handleGdbserver' },
   ],
 });
 
@@ -119,6 +121,7 @@ const manifest = {
       'nemu_vm_state_dump',
       'nemu_vm_state_load',
       'nemu_vm_state_compare',
+      'nemu_relay',
     ],
     hint: 'In-process ARM64 emulation: inspect imports → create a session → load a .so (or extract one from an APK) → alloc_memory → call_symbol/call_jni_export → read_memory, or mock Java → call JNI functions → trace. Destroy the session when done.',
   },

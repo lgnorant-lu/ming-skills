@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { join } from 'path';
+import { join } from 'node:path';
 import type { CodeFile, PuppeteerConfig } from '@internal-types/index';
 
 const mocks = vi.hoisted(() => ({
@@ -187,13 +187,7 @@ describe('CodeCollector extra coverage', () => {
       return 10;
     });
 
-    collector.cleanupCollectedUrls();
-
-    expect(Array.from(urls)).toEqual(['u5', 'u6']);
-    expect(collector.getCollectionStats()).toEqual({
-      totalCollected: 2,
-      uniqueUrls: 2,
-    });
+    // File-query helpers operate on the seeded files cache (3 entries).
     expect(collector.getCollectedFilesSummary()).toEqual([
       {
         url: withPath(TEST_URLS.root, 'a.js'),
@@ -237,6 +231,18 @@ describe('CodeCollector extra coverage', () => {
       withPath(TEST_URLS.root, 'c.json'),
       withPath(TEST_URLS.root, 'a.js'),
     ]);
+
+    // cleanupCollectedUrls prunes the URL set and the files cache in lockstep:
+    // the seeded file URLs are not in the retained {u5, u6} set, so they are
+    // evicted alongside the URLs (b1-05).
+    collector.cleanupCollectedUrls();
+    expect(Array.from(urls)).toEqual(['u5', 'u6']);
+    expect(collector.getCollectionStats()).toEqual({
+      totalCollected: 2,
+      uniqueUrls: 2,
+    });
+    expect(collector.getCollectedFilesSummary()).toEqual([]);
+    expect(collector.getFiles().size).toBe(0);
 
     collector.clearCache();
     expect(Array.from(urls)).toEqual([]);

@@ -449,4 +449,50 @@ describe('WorkflowHandlers', () => {
     expect(body.error).toContain('networkPolicy.allowInsecureHttp');
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('honors WORKFLOW_JS_BUNDLE_FETCH_TIMEOUT_MS on the non-cached fetch path', async () => {
+    // The workflow constants are evaluated at module load, so the env knob
+    // must be set before (re-)importing the handlers.
+    vi.useFakeTimers();
+    vi.resetModules();
+    const original = process.env.WORKFLOW_JS_BUNDLE_FETCH_TIMEOUT_MS;
+    process.env.WORKFLOW_JS_BUNDLE_FETCH_TIMEOUT_MS = '50';
+    try {
+      const { WorkflowHandlers: FreshWorkflowHandlers } =
+        await import('@server/domains/workflow/handlers');
+      const fresh = new FreshWorkflowHandlers(
+        deps as unknown as ConstructorParameters<typeof FreshWorkflowHandlers>[0],
+      );
+      mockLookup.mockResolvedValue({ address: buildReservedDocIpv4(), family: 4 });
+      let rejectFetch: (error: Error) => void = () => {};
+      fetchMock.mockReturnValue(
+        new Promise((_, reject) => {
+          rejectFetch = reject;
+        }),
+      );
+
+      const promise = fresh.handleJsBundleSearch({
+        url: withPath(TEST_URLS.root, 'assets/main.js'),
+        patterns: [{ name: 'auth', regex: 'token' }],
+        cacheBundle: false,
+      });
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const signal = (fetchMock.mock.calls[0]![1] as { signal: AbortSignal }).signal;
+      expect(signal.aborted).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(50);
+      expect(signal.aborted).toBe(true);
+
+      // A real fetch would reject on abort; emulate that so the handler's
+      // catch path resolves instead of hanging.
+      rejectFetch(new Error('The operation was aborted'));
+      const body = parseJson<BundleSearchResponse>(await promise);
+      expect(body.success).toBe(false);
+    } finally {
+      process.env.WORKFLOW_JS_BUNDLE_FETCH_TIMEOUT_MS = original;
+      vi.useRealTimers();
+    }
+  });
 });

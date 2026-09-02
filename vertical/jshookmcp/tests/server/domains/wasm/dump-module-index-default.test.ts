@@ -19,6 +19,7 @@ vi.mock('node:fs/promises', () => ({
   writeFile: (...args: unknown[]) => writeFileMock(...(args as never[])),
   stat: vi.fn(),
   mkdir: vi.fn(),
+  realpath: vi.fn((p) => Promise.resolve(p)),
 }));
 vi.mock('@src/utils/artifacts', () => ({ resolveArtifactPath: vi.fn() }));
 vi.mock('@src/modules/external/ToolRegistry', () => ({ ToolRegistry: vi.fn() }));

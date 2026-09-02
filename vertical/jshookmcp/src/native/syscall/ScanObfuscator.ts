@@ -98,7 +98,11 @@ export function createScanWalker(
       return USER_MODE_MAX;
     },
     get chunkSize(): number {
-      return prng.range(config.minChunkBytes, config.maxChunkBytes);
+      // Normalize reversed min/max: prng.range with a negative span would
+      // compute a huge modulus (>>> 0) and yield an absurd chunk size.
+      const lo = Math.min(config.minChunkBytes, config.maxChunkBytes);
+      const hi = Math.max(config.minChunkBytes, config.maxChunkBytes);
+      return prng.range(lo, hi);
     },
 
     next(): boolean {

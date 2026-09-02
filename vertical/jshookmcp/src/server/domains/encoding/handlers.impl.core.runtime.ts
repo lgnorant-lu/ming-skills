@@ -107,6 +107,14 @@ function summarizeUnknownProtobufFields(message: unknown, maxDepth: number) {
   });
 }
 
+/**
+ * Decompression-bomb guard: decompression syncs abort when the inflated output
+ * would exceed this many bytes (zlib/brotli `maxOutputLength`). A 64MB ceiling
+ * is generous for legitimate payloads while keeping a malicious stream from
+ * exhausting the event-loop heap in one call.
+ */
+const DECOMPRESS_MAX_OUTPUT_LENGTH = 64 * 1024 * 1024;
+
 function decodeDeclaredPayload(encoding: string, data: string): Buffer {
   switch (encoding) {
     case 'base64':
@@ -124,13 +132,21 @@ function decodeDeclaredPayload(encoding: string, data: string): Buffer {
     case 'hex':
       return decodeHexString(data);
     case 'gzip':
-      return gunzipSync(decodeBinaryAuto(data));
+      return gunzipSync(decodeBinaryAuto(data), {
+        maxOutputLength: DECOMPRESS_MAX_OUTPUT_LENGTH,
+      });
     case 'zlib':
-      return inflateSync(decodeBinaryAuto(data));
+      return inflateSync(decodeBinaryAuto(data), {
+        maxOutputLength: DECOMPRESS_MAX_OUTPUT_LENGTH,
+      });
     case 'deflate':
-      return inflateRawSync(decodeBinaryAuto(data));
+      return inflateRawSync(decodeBinaryAuto(data), {
+        maxOutputLength: DECOMPRESS_MAX_OUTPUT_LENGTH,
+      });
     case 'brotli':
-      return brotliDecompressSync(decodeBinaryAuto(data));
+      return brotliDecompressSync(decodeBinaryAuto(data), {
+        maxOutputLength: DECOMPRESS_MAX_OUTPUT_LENGTH,
+      });
     default:
       return decodeBinaryAuto(data);
   }

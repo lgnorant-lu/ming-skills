@@ -21,7 +21,7 @@
 - browser + instrumentation
 - browser + workflow
 
-## 工具清单（76）
+## 工具清单（80）
 
 | 工具 | 说明 |
 | --- | --- |
@@ -90,6 +90,10 @@
 | `tab_workflow` | 多标签页协同操作，支持跨标签页传递数据。 |
 | `browser_codegen_start` | 开始录制浏览器操作，将页面交互转化为可回放的步骤序列。 |
 | `browser_codegen_stop` | 停止录制浏览器操作，返回经过清洗和合并的可回放步骤列表。 |
+| `browser_performance_observer` | 原子原语：在活跃页面订阅 PerformanceObserver 条目类型，返回采集窗口期间的缓冲及实时条目。条目类型原样透传给 PerformanceObserver.observe({ type })（如 largest-contentful-paint、layout-shift、longtask、event、long-animation-frame）；不支持的条目类型会被静默跳过。每种类型对应一个 observer——该 API 不接受在单次 observe() 调用中传入多个类型。 |
+| `browser_resource_timing` | 原子原语：读取活跃页面的 Resource Timing API 条目，将每个资源拆解为 dns / connect / tls / ttfb / download 各阶段耗时，以及传输和响应体大小。可选包含 Server-Timing 响应头并按 URL 子串过滤。只读快照——不安装任何 observer 或监听器。 |
+| `browser_cdp_performance_metrics` | 原子原语：通过 CDP Performance.getMetrics() 获取活跃页面的浏览器运行时指标。返回原始 CDP 级计数器（LayoutCount、RecalcStyleCount、ScriptDuration、TaskDuration、JSHeapUsedSize、Nodes、Documents、Frames 等）——不是 Web Vitals（需要 Web Vitals 请用 network 域的 performance_get_metrics）。 |
+| `v8_type_profile` | 原子原语：通过 CDP Profiler.startTypeProfile() / takeTypeProfile() / stopTypeProfile() 启动或停止 V8 类型剖析。类型剖析记录流经每个函数入口的运行时类型（type:Array、type:Object、type:number 等）——是反混淆 VM 分发器或多态调用点的原始素材。action="stop" 返回按脚本分类的条目，并可选地将原始剖析数据持久化为 JSON 产物（artifacts/profiles/）。 |
 | `human_mouse` | 模拟真人移动鼠标，带随机轨迹和抖动。 |
 | `human_scroll` | 模拟真人滚动页面，带变速和停顿。 |
 | `human_typing` | 模拟真人打字，带变速和偶尔打错再修正。 |

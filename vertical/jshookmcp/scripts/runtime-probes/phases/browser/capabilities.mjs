@@ -12,7 +12,7 @@ export async function runBrowserCapabilitiesPhase(ctx) {
     isRecord,
   } = helpers;
   const { BODY_MARKER, HEAP_MARKER, HOOK_PRESET_MARKER } = constants;
-  const { cpuProfilePath, heapSamplingPath } = state.browserContext;
+  const { cpuProfilePath } = state.browserContext;
 
   report.analysis.antidebugBypass = await callToolCaptureError(
     client,
@@ -252,12 +252,7 @@ export async function runBrowserCapabilitiesPhase(ctx) {
     30000,
   );
   report.performance.metrics = await callTool(client, 'performance_get_metrics', {}, 30000);
-  report.performance.coverageStart = await callTool(
-    client,
-    'performance_coverage',
-    { action: 'start' },
-    30000,
-  );
+  report.performance.coverageStart = await callTool(client, 'page_coverage_start', {}, 30000);
   report.performance.coverageExercise = await callTool(
     client,
     'page_evaluate',
@@ -271,18 +266,8 @@ export async function runBrowserCapabilitiesPhase(ctx) {
     },
     15000,
   );
-  report.performance.coverageStop = await callTool(
-    client,
-    'performance_coverage',
-    { action: 'stop' },
-    30000,
-  );
-  report.performance.heapSnapshot = await callTool(
-    client,
-    'performance_take_heap_snapshot',
-    {},
-    90000,
-  );
+  report.performance.coverageStop = await callTool(client, 'page_coverage_stop', {}, 30000);
+  report.performance.heapSnapshot = await callTool(client, 'v8_heap_snapshot_capture', {}, 90000);
   report.performance.cpuStart = await callTool(client, 'profiler_cpu', { action: 'start' }, 30000);
   report.performance.cpuExercise = await callTool(
     client,
@@ -307,8 +292,8 @@ export async function runBrowserCapabilitiesPhase(ctx) {
   );
   report.performance.heapSamplingStart = await callTool(
     client,
-    'profiler_heap_sampling',
-    { action: 'start' },
+    'v8_heap_sampling',
+    { durationMs: 2000, topN: 10 },
     30000,
   );
   report.performance.heapSamplingExercise = await callTool(
@@ -327,8 +312,8 @@ export async function runBrowserCapabilitiesPhase(ctx) {
   );
   report.performance.heapSamplingStop = await callTool(
     client,
-    'profiler_heap_sampling',
-    { action: 'stop', artifactPath: heapSamplingPath, topN: 10 },
+    'v8_heap_sampling',
+    { durationMs: 2000, topN: 10 },
     60000,
   );
   report.browser.listTabs = await callTool(client, 'browser_list_tabs', {}, 30000);

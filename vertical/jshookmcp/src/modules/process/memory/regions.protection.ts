@@ -1,4 +1,4 @@
-import { promises as fsAsync } from 'fs';
+import { promises as fsAsync } from 'node:fs';
 import { logger } from '@utils/logger';
 import {
   execAsync,

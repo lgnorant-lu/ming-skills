@@ -41,6 +41,9 @@ import { JSVMPDeobfuscator } from '@modules/deobfuscator/JSVMPDeobfuscator';
 import { JScramberDeobfuscator } from '@modules/deobfuscator/JScramblerDeobfuscator';
 import { UniversalUnpacker } from '@modules/deobfuscator/PackerDeobfuscator';
 import { VMDeobfuscator } from '@modules/deobfuscator/VMDeobfuscator';
+import type { WebcrackPool } from '@modules/deobfuscator/webcrack-worker';
+import type { JscramblerPool } from '@modules/deobfuscator/jscrambler-worker';
+import type { DecodeStringArrayPool } from '@modules/deobfuscator/decode-string-array-worker';
 import type { LLMSamplingBridge } from '@server/LLMSamplingBridge';
 
 interface CoreAnalysisHandlerDeps {
@@ -56,6 +59,9 @@ interface CoreAnalysisHandlerDeps {
   jscramblerDeobfuscator: JScramberDeobfuscator;
   packerDeobfuscator: UniversalUnpacker;
   vmDeobfuscator: VMDeobfuscator;
+  webcrackPool?: WebcrackPool;
+  jscramblerPool?: JscramblerPool;
+  decodeStringArrayPool?: DecodeStringArrayPool;
 }
 
 export class CoreAnalysisHandlers {
@@ -72,6 +78,9 @@ export class CoreAnalysisHandlers {
   private readonly jscramblerDeobfuscator: JScramberDeobfuscator;
   private readonly packerDeobfuscator: UniversalUnpacker;
   private readonly vmDeobfuscator: VMDeobfuscator;
+  private readonly webcrackPool?: WebcrackPool;
+  private readonly jscramblerPool?: JscramblerPool;
+  private readonly decodeStringArrayPool?: DecodeStringArrayPool;
   private readonly collectionHandlers: CollectionHandlers;
   private readonly dataManagementHandlers: DataManagementHandlers;
 
@@ -89,6 +98,9 @@ export class CoreAnalysisHandlers {
     this.jscramblerDeobfuscator = deps.jscramblerDeobfuscator;
     this.packerDeobfuscator = deps.packerDeobfuscator;
     this.vmDeobfuscator = deps.vmDeobfuscator;
+    this.webcrackPool = deps.webcrackPool;
+    this.jscramblerPool = deps.jscramblerPool;
+    this.decodeStringArrayPool = deps.decodeStringArrayPool;
     this.collectionHandlers = new CollectionHandlers({
       collector: this.collector,
       scriptManager: this.scriptManager,
@@ -121,15 +133,17 @@ export class CoreAnalysisHandlers {
       this.jscramblerDeobfuscator,
       this.packerDeobfuscator,
       this.vmDeobfuscator,
+      this.webcrackPool,
+      this.jscramblerPool,
     );
   }
 
   async handleWebcrackUnpack(args: ToolArgs): Promise<ToolResponse> {
-    return handleWebcrackUnpack(args);
+    return handleWebcrackUnpack(args, this.webcrackPool);
   }
 
   async handleAnalysisDecodeStringArray(args: ToolArgs): Promise<ToolResponse> {
-    return handleAnalysisDecodeStringArray(args);
+    return handleAnalysisDecodeStringArray(args, this.decodeStringArrayPool);
   }
 
   // Code understanding

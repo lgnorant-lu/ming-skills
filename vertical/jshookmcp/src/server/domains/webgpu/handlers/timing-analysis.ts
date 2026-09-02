@@ -15,12 +15,12 @@ import type { WebGPUDomainDependencies } from '../types';
  * the timing loop runs entirely within a single evaluate closure.
  */
 export class TimingAnalysisHandler {
+  private deps: WebGPUDomainDependencies;
   private pageLockManager = getPageLockManager();
 
-  constructor(
-    _ctx: MCPServerContext,
-    private deps: WebGPUDomainDependencies,
-  ) {}
+  constructor(_ctx: MCPServerContext, deps: WebGPUDomainDependencies) {
+    this.deps = deps;
+  }
 
   async handle(args: Record<string, unknown>): Promise<ToolResponse> {
     return handleSafe(async () => {

@@ -125,8 +125,8 @@ def test_capture_global_fallback_collects_bodies(monkeypatch):
         def __init__(self):
             self.calls = []
 
-        def add_data_collector(self, events, **kwargs):
-            self.calls.append(("context", events, kwargs))
+        def add_data_collector(self, **kwargs):
+            self.calls.append(("context", kwargs))
             raise BiDiError(
                 "unsupported operation",
                 (
@@ -135,8 +135,8 @@ def test_capture_global_fallback_collects_bodies(monkeypatch):
                 ),
             )
 
-        def _add_data_collector(self, events, **kwargs):
-            self.calls.append(("global", events, kwargs))
+        def _add_data_collector(self, **kwargs):
+            self.calls.append(("global", kwargs))
             assert kwargs["contexts"] is None
             return collector
 

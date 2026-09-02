@@ -201,41 +201,41 @@ describe('StructureAnalyzer coverage: analyzeStructure() — field classificatio
     vi.clearAllMocks();
   });
 
-  it('classifies all-zeros as padding', () => {
+  it('classifies all-zeros as padding', async () => {
     const buf = Buffer.alloc(16, 0);
-    const result = (analyzer as any).classifyValue(buf, { pid: 1234 } as any, 0n, 0, 16);
+    const result = await (analyzer as any).classifyValue(buf, { pid: 1234 } as any, 0n, 0, 16);
     expect(result.type).toBe('padding');
   });
 
-  it('classifies val32u===0 but not 8-byte zero as int32', () => {
+  it('classifies val32u===0 but not 8-byte zero as int32', async () => {
     const buf = Buffer.alloc(8);
     buf.fill(0);
     buf[4] = 0x01; // break 8-byte zero condition
-    const result = (analyzer as any).classifyValue(buf, { pid: 1234 } as any, 0n, 0, 8);
+    const result = await (analyzer as any).classifyValue(buf, { pid: 1234 } as any, 0n, 0, 8);
     expect(result.type).toBe('int32');
     expect(result.value).toBe('0');
   });
 
-  it('classifies val32u===1 as bool', () => {
+  it('classifies val32u===1 as bool', async () => {
     const buf = Buffer.alloc(8);
     buf.writeUInt32LE(1, 0);
     buf.writeUInt32LE(0, 4);
-    const result = (analyzer as any).classifyValue(buf, { pid: 1234 } as any, 0n, 0, 8);
+    const result = await (analyzer as any).classifyValue(buf, { pid: 1234 } as any, 0n, 0, 8);
     expect(result.type).toBe('bool');
     expect(result.value).toBe('true');
   });
 
-  it('classifies uint32 value >= 0x80000000 as uint32', () => {
+  it('classifies uint32 value >= 0x80000000 as uint32', async () => {
     const buf = Buffer.alloc(8);
     buf.writeUInt32LE(0x80000001, 0);
-    const result = (analyzer as any).classifyValue(buf, { pid: 1234 } as any, 0n, 0, 4);
+    const result = await (analyzer as any).classifyValue(buf, { pid: 1234 } as any, 0n, 0, 4);
     expect(result.type).toBe('uint32');
   });
 
-  it('classifies 2-byte value as uint16', () => {
+  it('classifies 2-byte value as uint16', async () => {
     const buf = Buffer.alloc(4);
     buf.writeUInt16LE(0x1234, 0);
-    const result = (analyzer as any).classifyValue(buf, { pid: 1234 } as any, 0n, 0, 2);
+    const result = await (analyzer as any).classifyValue(buf, { pid: 1234 } as any, 0n, 0, 2);
     expect(result.type).toBe('uint16');
     expect(result.value).toBe('4660');
   });

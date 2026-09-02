@@ -1,5 +1,12 @@
 import { logger } from '@utils/logger';
 import { PrerequisiteError } from '@errors/PrerequisiteError';
+import { ToolError } from '@errors/ToolError';
+
+// functionName/objectPath/propertyName are interpolated into page-evaluate
+// code — reject anything that is not a plain identifier (or dotted path)
+// so untrusted input cannot execute arbitrary JS in the page context.
+const IDENTIFIER_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+const DOT_PATH_RE = /^[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*$/;
 
 interface RuntimeEvaluateResult<T = unknown> {
   result?: {
@@ -54,7 +61,6 @@ export async function enableDynamicScriptMonitoringCore(
           console.log('[ScriptMonitor] Already installed');
           return;
         }
-        window.__dynamicScriptMonitorInstalled = true;
 
         const maxRecords = ${coreCtx.MAX_INJECTED_DYNAMIC_SCRIPTS};
         if (!window.__dynamicScripts) {
@@ -111,6 +117,8 @@ export async function enableDynamicScriptMonitoringCore(
               }
               return originalSetAttribute.call(element, name, value);
             };
+            element.__jshookOriginalSetAttribute = originalSetAttribute;
+            (state.patchedScriptElements || (state.patchedScriptElements = [])).push(element);
           }
 
           return element;
@@ -133,6 +141,10 @@ export async function enableDynamicScriptMonitoringCore(
           return dynamicScripts;
         };
 
+        // Only mark as installed after every step above succeeded — a partial
+        // failure must leave the flag clear so the next call retries instead of
+        // skipping a half-broken monitor.
+        window.__dynamicScriptMonitorInstalled = true;
         console.log('[ScriptMonitor] Dynamic script monitoring enabled');
       })();
     `;
@@ -237,6 +249,17 @@ export async function resetDynamicScriptMonitoringCore(
               }
             } catch (_) {}
 
+            const patched = state && state.patchedScriptElements;
+            if (Array.isArray(patched)) {
+              for (let i = 0; i < patched.length; i++) {
+                const el = patched[i];
+                if (el && el.__jshookOriginalSetAttribute) {
+                  el.setAttribute = el.__jshookOriginalSetAttribute;
+                }
+              }
+              state.patchedScriptElements = [];
+            }
+
             if (Array.isArray(window.__dynamicScripts)) {
               window.__dynamicScripts.length = 0;
             }
@@ -294,6 +317,9 @@ export async function injectFunctionTracerCore(
   if (!coreCtx.cdpSession) {
     throw new PrerequisiteError('CDP session not initialized');
   }
+  if (!IDENTIFIER_RE.test(functionName)) {
+    throw new ToolError('VALIDATION', `Invalid function name: ${functionName}`);
+  }
 
   const tracerCode = `
       (function() {
@@ -346,6 +372,12 @@ export async function injectPropertyWatcherCore(
   const coreCtx = asDynamicCoreContext(ctx);
   if (!coreCtx.cdpSession) {
     throw new PrerequisiteError('CDP session not initialized');
+  }
+  if (!DOT_PATH_RE.test(objectPath) || !IDENTIFIER_RE.test(propertyName)) {
+    throw new ToolError(
+      'VALIDATION',
+      `Invalid object path or property name: ${objectPath}.${propertyName}`,
+    );
   }
 
   const watcherCode = `

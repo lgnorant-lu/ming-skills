@@ -36,11 +36,10 @@ export interface VarDecl {
 }
 
 export class AstBridgeError extends Error {
-  constructor(
-    message: string,
-    readonly nodeType: string,
-  ) {
+  readonly nodeType: string;
+  constructor(message: string, nodeType: string) {
     super(message);
+    this.nodeType = nodeType;
     this.name = 'AstBridgeError';
   }
 }

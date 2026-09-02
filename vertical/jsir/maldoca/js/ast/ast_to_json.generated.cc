@@ -161,9 +161,9 @@ void JsCommentLine::Serialize(std::ostream& os) const {
 void JsSymbolId::SerializeFields(std::ostream& os, bool &needs_comma) const {
   MaybeAddComma(os, needs_comma);
   os << "\"name\":" << (nlohmann::json(name_)).dump();
-  if (def_scope_uid_.has_value()) {
+  if (binding_uid_.has_value()) {
     MaybeAddComma(os, needs_comma);
-    os << "\"defScopeUid\":" << (nlohmann::json(def_scope_uid_.value())).dump();
+    os << "\"bindingUid\":" << (nlohmann::json(binding_uid_.value())).dump();
   }
 }
 
@@ -2747,6 +2747,35 @@ void JsClassPrivateProperty::Serialize(std::ostream& os) const {
 }
 
 // =============================================================================
+// JsStaticBlock
+// =============================================================================
+
+void JsStaticBlock::SerializeFields(std::ostream& os, bool &needs_comma) const {
+  MaybeAddComma(os, needs_comma);
+  os << "\"body\":" << "[";
+  {
+    bool needs_comma = false;
+    for (const auto& element : body_) {
+      MaybeAddComma(os, needs_comma);
+      element->Serialize(os);
+    }
+  }
+  os << "]";
+}
+
+void JsStaticBlock::Serialize(std::ostream& os) const {
+  os << "{";
+  {
+    bool needs_comma = false;
+    MaybeAddComma(os, needs_comma);
+    os << "\"type\":\"StaticBlock\"";
+    JsNode::SerializeFields(os, needs_comma);
+    JsStaticBlock::SerializeFields(os, needs_comma);
+  }
+  os << "}";
+}
+
+// =============================================================================
 // JsClassBody
 // =============================================================================
 
@@ -2772,6 +2801,10 @@ void JsClassBody::SerializeFields(std::ostream& os, bool &needs_comma) const {
         }
         case 3: {
           std::get<3>(element)->Serialize(os);
+          break;
+        }
+        case 4: {
+          std::get<4>(element)->Serialize(os);
           break;
         }
         default:

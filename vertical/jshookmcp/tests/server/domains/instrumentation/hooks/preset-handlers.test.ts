@@ -149,6 +149,35 @@ describe('HookPresetToolHandlers', () => {
       expect(res.content[0].text).toContain('conflicts with built-in preset');
     });
 
+    it('errors on duplicate custom template ids within the same call', async () => {
+      const res = await handlers.handleHookPreset({
+        presets: ['dup-id'],
+        customTemplates: [
+          { id: 'dup-id', body: 'first' },
+          { id: 'dup-id', body: 'second' },
+        ],
+      });
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"success": false');
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('Duplicate custom template id');
+      // The later template must not silently overwrite the earlier one.
+      expect(pageMock.evaluate).not.toHaveBeenCalled();
+    });
+
+    it('accepts distinct custom template ids in the same batch', async () => {
+      const res = await handlers.handleHookPreset({
+        presets: ['dup-1', 'dup-2'],
+        customTemplates: [
+          { id: 'dup-1', body: 'first' },
+          { id: 'dup-2', body: 'second' },
+        ],
+      });
+      // @ts-expect-error
+      expect(res.content[0].text).toContain('"success": true');
+      expect(pageMock.evaluate).toHaveBeenCalledTimes(2);
+    });
+
     it('threads customTemplate.mutateReturn into the generated hook code', async () => {
       const res = await handlers.handleHookPreset({
         preset: 'mut-custom',

@@ -4,7 +4,7 @@
  * Every domain under domains/STAR/manifest.ts exports a default DomainManifest.
  * The registry discovers and aggregates them at startup - no manual imports needed.
  */
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import type { ToolArgs } from '@server/types';
 import type { MCPServerContext } from '@server/MCPServer.context';
 
@@ -97,7 +97,8 @@ export interface DomainManifest<
 
   /**
    * Cross-domain tool dependency declarations.
-   * Used by AffinityGraph to add explicit edges beyond prefix-group affinity.
+   * Consumed by ToolRouter.intent (dynamic cross-domain workflow detection) and
+   * available for affinity-graph explicit edges beyond prefix-group affinity.
    */
   readonly toolDependencies?: ReadonlyArray<{
     /** Source tool in this domain. */

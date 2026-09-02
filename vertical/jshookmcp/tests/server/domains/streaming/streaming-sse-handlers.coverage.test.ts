@@ -282,16 +282,19 @@ describe('SseHandlers', () => {
 
     it('captures SSE events when the injected function is serialized into page context', async () => {
       class MockEventSource {
+        readonly sourceUrl: string | URL;
+        readonly _eventSourceInitDict?: EventSourceInit;
         static CONNECTING = 0;
         static OPEN = 1;
         static CLOSED = 2;
 
         readonly listeners = new Map<string, EventListener[]>();
 
-        constructor(
-          readonly sourceUrl: string | URL,
-          readonly _eventSourceInitDict?: EventSourceInit,
-        ) {}
+        constructor(sourceUrl: string | URL, _eventSourceInitDict?: EventSourceInit) {
+          this.sourceUrl = sourceUrl;
+          // eslint-disable-next-line no-underscore-dangle
+          this._eventSourceInitDict = _eventSourceInitDict;
+        }
 
         addEventListener(type: string, listener: EventListener) {
           const existing = this.listeners.get(type) ?? [];
@@ -661,6 +664,8 @@ describe('SseHandlers', () => {
         maxEvents: 500,
         urlFilterRaw: 'api\\.example',
         previewLimit: expect.any(Number),
+        dataMaxBytes: expect.any(Number),
+        evictBatchSize: expect.any(Number),
       });
     });
 
@@ -671,6 +676,8 @@ describe('SseHandlers', () => {
         maxEvents: 1000,
         urlFilterRaw: undefined,
         previewLimit: expect.any(Number),
+        dataMaxBytes: expect.any(Number),
+        evictBatchSize: expect.any(Number),
       });
     });
 
@@ -693,6 +700,127 @@ describe('SseHandlers', () => {
 
       expect(body.success).toBe(true);
       expect(body.config.urlFilter).toBe('ws://.*');
+    });
+  });
+
+  // ── sseInjectionFn data cap + batch eviction (b2-7 / b2-8) ──
+
+  describe('sseInjectionFn data cap + batch eviction (b2-7 / b2-8)', () => {
+    class MockEventSource {
+      readonly sourceUrl: string | URL;
+      readonly _eventSourceInitDict?: EventSourceInit;
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 2;
+      readonly listeners = new Map<string, EventListener[]>();
+      constructor(sourceUrl: string | URL, _eventSourceInitDict?: EventSourceInit) {
+        this.sourceUrl = sourceUrl;
+        // eslint-disable-next-line no-underscore-dangle
+        this._eventSourceInitDict = _eventSourceInitDict;
+      }
+      addEventListener(type: string, listener: EventListener) {
+        const existing = this.listeners.get(type) ?? [];
+        existing.push(listener);
+        this.listeners.set(type, existing);
+      }
+      dispatch(type: string, event: Event) {
+        for (const listener of this.listeners.get(type) ?? []) {
+          listener.call(this, event);
+        }
+      }
+    }
+
+    async function runInjection(config: Record<string, unknown>): Promise<{
+      wrappedSource: MockEventSource;
+      monitorState: { events: Array<Record<string, unknown>>; maxEvents: number };
+    }> {
+      let capturedFn: (input: Record<string, unknown>) => unknown = () => ({ success: false });
+      mockPage.evaluate.mockImplementation(async (fn: unknown) => {
+        capturedFn = fn as (input: Record<string, unknown>) => unknown;
+        return {
+          success: true,
+          message: 'SSE monitor enabled',
+          patched: true,
+          maxEvents: 2000,
+          existingEvents: 0,
+        };
+      });
+      await handlers.handleSseMonitorEnable({});
+
+      const browserWindow = { EventSource: MockEventSource } as {
+        EventSource: typeof MockEventSource;
+        __jshookSSEMonitor?: Record<string, unknown>;
+      };
+      const serialized = `(${String(capturedFn)})`;
+      const fn = runInNewContext(serialized, { window: browserWindow }) as (
+        input: Record<string, unknown>,
+      ) => unknown;
+
+      const result = fn(config) as { success: boolean };
+      expect(result.success).toBe(true);
+
+      const wrappedSource = new browserWindow.EventSource(
+        buildTestUrl('api', { scheme: 'http', suffix: 'test', path: 'stream' }),
+      );
+      const monitorState = browserWindow.__jshookSSEMonitor as unknown as {
+        events: Array<Record<string, unknown>>;
+        maxEvents: number;
+      };
+      return { wrappedSource, monitorState };
+    }
+
+    it('truncates oversized event data and flags it (b2-8)', async () => {
+      const { wrappedSource, monitorState } = await runInjection({
+        maxEvents: 100,
+        dataMaxBytes: 100,
+      });
+
+      wrappedSource.dispatch('message', {
+        type: 'message',
+        data: 'x'.repeat(250),
+        lastEventId: 'evt-1',
+      } as unknown as Event);
+
+      expect(monitorState.events).toHaveLength(1);
+      expect(monitorState.events[0]!.data).toHaveLength(100);
+      expect(monitorState.events[0]!.dataTruncated).toBe(true);
+      expect(monitorState.events[0]!.dataLength).toBe(250);
+      expect(monitorState.events[0]!.dataPreview).toHaveLength(201);
+    });
+
+    it('evicts events in batches via splice instead of per-event shift (b2-7)', async () => {
+      const { wrappedSource, monitorState } = await runInjection({
+        maxEvents: 2,
+        evictBatchSize: 2,
+      });
+
+      wrappedSource.dispatch('message', {
+        type: 'message',
+        data: 'a',
+        lastEventId: null,
+      } as unknown as Event);
+      wrappedSource.dispatch('message', {
+        type: 'message',
+        data: 'b',
+        lastEventId: null,
+      } as unknown as Event);
+      wrappedSource.dispatch('message', {
+        type: 'message',
+        data: 'c',
+        lastEventId: null,
+      } as unknown as Event);
+      // overflow (1) is below evictBatchSize (2): retained, proving no per-event shift
+      expect(monitorState.events).toHaveLength(3);
+
+      wrappedSource.dispatch('message', {
+        type: 'message',
+        data: 'd',
+        lastEventId: null,
+      } as unknown as Event);
+      // overflow (2) reaches the batch threshold: the two oldest are dropped at once
+      expect(monitorState.events).toHaveLength(2);
+      expect(monitorState.events[0]!.dataPreview).toBe('c');
+      expect(monitorState.events[1]!.dataPreview).toBe('d');
     });
   });
 });

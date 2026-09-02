@@ -47,6 +47,10 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
   const { JScramberDeobfuscator } = await import('@modules/deobfuscator/JScramblerDeobfuscator');
   const { UniversalUnpacker } = await import('@modules/deobfuscator/PackerDeobfuscator');
   const { VMDeobfuscator } = await import('@modules/deobfuscator/VMDeobfuscator');
+  const { getWebcrackPool } = await import('@modules/deobfuscator/webcrack-worker');
+  const { getJscramblerPool } = await import('@modules/deobfuscator/jscrambler-worker');
+  const { getDecodeStringArrayPool } =
+    await import('@modules/deobfuscator/decode-string-array-worker');
   globalContext = ctx;
   await ensureBrowserCore(ctx);
 
@@ -82,6 +86,9 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
         jscramblerDeobfuscator: new JScramberDeobfuscator(),
         packerDeobfuscator: new UniversalUnpacker(),
         vmDeobfuscator: new VMDeobfuscator(),
+        webcrackPool: getWebcrackPool(),
+        jscramblerPool: getJscramblerPool(),
+        decodeStringArrayPool: getDecodeStringArrayPool(),
       });
     }
   }

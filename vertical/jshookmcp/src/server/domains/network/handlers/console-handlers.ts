@@ -16,7 +16,10 @@ export interface ConsoleHandlerDeps {
 }
 
 export class ConsoleHandlers {
-  constructor(private deps: ConsoleHandlerDeps) {}
+  private deps: ConsoleHandlerDeps;
+  constructor(deps: ConsoleHandlerDeps) {
+    this.deps = deps;
+  }
 
   async handleConsoleGetExceptions(args: Record<string, unknown>): Promise<ToolResponse> {
     return handleSafe(async () => {

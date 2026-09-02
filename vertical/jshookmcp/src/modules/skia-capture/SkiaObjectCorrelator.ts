@@ -6,6 +6,38 @@
  */
 import type { SkiaSceneTree, CorrelationResult, SkiaJSCorrelation } from './types';
 
+// ── Correlation scoring constants ──────────────────────────────────────────────
+// Confidence values rate how strongly a matched heuristic implies the same JS
+// object; the acceptance threshold filters out weak noise matches. Tolerances
+// are pixel slack for dimension/position comparisons.
+
+/** Minimum confidence for a correlation to be kept in the result. */
+const MIN_ACCEPTED_CONFIDENCE = 0.3;
+/** Confidence for exact/embedded text-string matches. */
+const TEXT_MATCH_CONFIDENCE = 0.85;
+/** Minimum text length before an embedded string counts as a text match. */
+const MIN_TEXT_MATCH_CHARS = 3;
+/** Explanation message preview length. */
+const EXPLANATION_TRUNCATE_CHARS = 50;
+/** Confidence for identical color matches. */
+const COLOR_MATCH_CONFIDENCE = 0.7;
+/** Confidence for drawImage URL matches. */
+const URL_MATCH_CONFIDENCE = 0.8;
+/** Confidence for object-name equality matches. */
+const NAME_MATCH_CONFIDENCE = 0.75;
+/** Confidence for layer-name-to-string-property matches. */
+const NAME_STRING_MATCH_CONFIDENCE = 0.6;
+/** Confidence for full width+height dimension matches. */
+const DIMENSION_MATCH_CONFIDENCE = 0.75;
+/** Confidence for partial (single-axis) dimension matches. */
+const PARTIAL_DIMENSION_MATCH_CONFIDENCE = 0.45;
+/** Pixel tolerance for dimension equality. */
+const DIMENSION_TOLERANCE_PX = 2;
+/** Confidence for x/y position matches. */
+const GEOMETRY_MATCH_CONFIDENCE = 0.5;
+/** Pixel tolerance for position equality. */
+const GEOMETRY_TOLERANCE_PX = 5;
+
 /**
  * Minimal JS object info from v8-inspector heap snapshot.
  */
@@ -50,7 +82,7 @@ export function correlateToJS(
       }
     }
 
-    if (bestMatch && bestMatch.confidence >= 0.3) {
+    if (bestMatch && bestMatch.confidence >= MIN_ACCEPTED_CONFIDENCE) {
       correlations.push(bestMatch);
       matchedSkiaIds.add(bestMatch.skiaObjectId);
       matchedJSIds.add(bestMatch.jsObjectId);
@@ -94,14 +126,17 @@ function tryMatch(
   // Text match
   if (skiaObj.text) {
     for (const str of jsObj.stringProps) {
-      if (str === skiaObj.text || (str.includes(skiaObj.text) && skiaObj.text.length > 3)) {
+      if (
+        str === skiaObj.text ||
+        (str.includes(skiaObj.text) && skiaObj.text.length > MIN_TEXT_MATCH_CHARS)
+      ) {
         return {
           skiaObjectId: skiaObj.id,
           jsObjectId: jsObj.objectId,
           jsObjectName: jsObj.name || jsObj.className,
-          confidence: 0.85,
+          confidence: TEXT_MATCH_CONFIDENCE,
           matchType: 'text',
-          explanation: `Draw text "${skiaObj.text.slice(0, 50)}" matches JS string property`,
+          explanation: `Draw text "${skiaObj.text.slice(0, EXPLANATION_TRUNCATE_CHARS)}" matches JS string property`,
         };
       }
     }
@@ -128,7 +163,7 @@ function tryMatch(
           skiaObjectId: skiaObj.id,
           jsObjectId: jsObj.objectId,
           jsObjectName: jsObj.name || jsObj.className,
-          confidence: 0.7,
+          confidence: COLOR_MATCH_CONFIDENCE,
           matchType: 'color',
           explanation: `Color ${skiaObj.color} matches JS color property "${color}"`,
         };
@@ -146,7 +181,7 @@ function tryMatch(
             skiaObjectId: skiaObj.id,
             jsObjectId: jsObj.objectId,
             jsObjectName: jsObj.name || jsObj.className,
-            confidence: 0.8,
+            confidence: URL_MATCH_CONFIDENCE,
             matchType: 'url',
             explanation: `Image URL matches JS property`,
           };
@@ -162,7 +197,7 @@ function tryMatch(
         skiaObjectId: skiaObj.id,
         jsObjectId: jsObj.objectId,
         jsObjectName: jsObj.name,
-        confidence: 0.75,
+        confidence: NAME_MATCH_CONFIDENCE,
         matchType: 'name',
         explanation: `Object name "${skiaObj.name}" matches JS object "${jsObj.name}"`,
       };
@@ -173,7 +208,7 @@ function tryMatch(
           skiaObjectId: skiaObj.id,
           jsObjectId: jsObj.objectId,
           jsObjectName: jsObj.name || jsObj.className,
-          confidence: 0.6,
+          confidence: NAME_STRING_MATCH_CONFIDENCE,
           matchType: 'name',
           explanation: `Skia layer name matches JS string property`,
         };
@@ -270,28 +305,27 @@ function matchDimensions(
   const dimKeys = ['width', 'height', 'w', 'h', 'sizeX', 'sizeY', 'sw', 'sh'];
   let matchedWidth = false;
   let matchedHeight = false;
-  const tolerance = 2; // pixel tolerance
 
   for (const key of dimKeys) {
     const val = props[key];
     if (val === undefined) continue;
     if (key === 'width' || key === 'w' || key === 'sizeX' || key === 'sw') {
-      if (Math.abs(val - bounds.width) <= tolerance) matchedWidth = true;
+      if (Math.abs(val - bounds.width) <= DIMENSION_TOLERANCE_PX) matchedWidth = true;
     }
     if (key === 'height' || key === 'h' || key === 'sizeY' || key === 'sh') {
-      if (Math.abs(val - bounds.height) <= tolerance) matchedHeight = true;
+      if (Math.abs(val - bounds.height) <= DIMENSION_TOLERANCE_PX) matchedHeight = true;
     }
   }
 
   if (matchedWidth && matchedHeight) {
     return {
-      confidence: 0.75,
+      confidence: DIMENSION_MATCH_CONFIDENCE,
       explanation: `Dimensions ${bounds.width}x${bounds.height} match JS numeric properties`,
     };
   }
   if (matchedWidth || matchedHeight) {
     return {
-      confidence: 0.45,
+      confidence: PARTIAL_DIMENSION_MATCH_CONFIDENCE,
       explanation: `Partial dimension match for ${bounds.width}x${bounds.height}`,
     };
   }
@@ -308,20 +342,19 @@ function matchGeometry(
 ): { confidence: number; explanation: string } | null {
   let matchedX = false;
   let matchedY = false;
-  const tolerance = 5;
 
   for (const [key, val] of Object.entries(props)) {
     if (key === 'x' || key === 'posX' || key === 'left') {
-      if (Math.abs(val - bounds.x) <= tolerance) matchedX = true;
+      if (Math.abs(val - bounds.x) <= GEOMETRY_TOLERANCE_PX) matchedX = true;
     }
     if (key === 'y' || key === 'posY' || key === 'top') {
-      if (Math.abs(val - bounds.y) <= tolerance) matchedY = true;
+      if (Math.abs(val - bounds.y) <= GEOMETRY_TOLERANCE_PX) matchedY = true;
     }
   }
 
   if (matchedX && matchedY) {
     return {
-      confidence: 0.5,
+      confidence: GEOMETRY_MATCH_CONFIDENCE,
       explanation: `Position (${bounds.x}, ${bounds.y}) matches JS numeric properties`,
     };
   }

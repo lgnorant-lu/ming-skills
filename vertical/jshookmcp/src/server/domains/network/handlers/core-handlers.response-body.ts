@@ -3,6 +3,7 @@ import type { ToolResponse } from '@server/types';
 import type { NetworkHandlerDeps } from './shared';
 import { parseBooleanArg, parseNumberArg } from './shared';
 import { asOptionalString } from '../handlers.base.types';
+import { ToolError } from '@errors/ToolError';
 
 export async function handleNetworkGetResponseBody(
   deps: NetworkHandlerDeps,
@@ -60,16 +61,39 @@ export async function handleNetworkGetResponseBody(
     }
 
     let body: { body: string; base64Encoded: boolean } | null = null;
+    let skippedReason: string | null = null;
     let attemptsMade = 0;
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       attemptsMade = attempt + 1;
-      body = await deps.consoleMonitor.getResponseBody(requestId);
+      try {
+        body = await deps.consoleMonitor.getResponseBody(requestId);
+      } catch (error) {
+        const skipped = getSkippedBodyReason(error);
+        if (skipped !== null) {
+          skippedReason = skipped;
+          break;
+        }
+        throw error;
+      }
       if (body) {
         break;
       }
       if (attempt < retries) {
         await new Promise((resolve) => setTimeout(resolve, retryIntervalMs));
       }
+    }
+
+    if (skippedReason !== null) {
+      return R.fail(`Response body skipped for requestId: ${requestId}`)
+        .merge({
+          skipped: true,
+          reason: skippedReason,
+          attempts: attemptsMade,
+          hint:
+            'The response body was not captured because its size exceeds the single-body cap. ' +
+            'The request metadata is still available via network_get_requests.',
+        })
+        .json();
     }
 
     if (!body) {
@@ -87,6 +111,19 @@ export async function handleNetworkGetResponseBody(
   } catch (error) {
     return R.fail(error).json();
   }
+}
+
+/**
+ * Extracts the skip reason when a body fetch threw a `ToolError` carrying a
+ * `details.skipped` marker (set by `NetworkMonitor.getResponseBody` when the
+ * content-length exceeded the single-body cap). Returns `null` for any other
+ * error so callers rethrow it unchanged.
+ */
+function getSkippedBodyReason(error: unknown): string | null {
+  if (!(error instanceof ToolError)) return null;
+  const details = error.details;
+  if (!details || details.skipped !== true) return null;
+  return typeof details.reason === 'string' ? details.reason : error.message;
 }
 
 function buildResponseBodyResult(

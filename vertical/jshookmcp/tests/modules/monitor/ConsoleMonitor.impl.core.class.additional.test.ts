@@ -427,6 +427,23 @@ describe('ConsoleMonitor.impl.core.class – additional coverage', () => {
       await monitor.ensureSession();
       expect(monitor.isSessionActive()).toBe(true);
     });
+
+    it('does not let a stale session disconnected event clobber a newer session', async () => {
+      const oldSession = createCdpSession();
+      const collectorMock = createCollectorMock(oldSession);
+      const monitor = new ConsoleMonitor(collectorMock);
+      await monitor.enable();
+
+      // Simulate zombie reinitialization: a newer session is installed while
+      // the old one is still registered. Its late 'disconnected' event must
+      // not clear the current session reference.
+      const newSession = createCdpSession();
+      (monitor as any).cdpSession = newSession;
+      oldSession.emit('disconnected');
+
+      expect((monitor as any).cdpSession).toBe(newSession);
+      expect(monitor.isSessionActive()).toBe(true);
+    });
   });
 
   // ── execute ───────────────────────────────────────────────────────

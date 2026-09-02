@@ -96,6 +96,10 @@ export async function scanIntegrity(
             ? parseMachoSections(mod.name)
             : [];
 
+      // Read the module file once per module — re-reading on every section is
+      // a TOCTOU window (file swapped mid-scan) and O(modules × sections) I/O.
+      let diskData: Buffer | null = null;
+
       for (const sec of diskSections) {
         if (stats.scannedSections >= MAX_SECTIONS) {
           stats.truncated = true;
@@ -112,8 +116,14 @@ export async function scanIntegrity(
         }
 
         try {
-          const memResult = api.readMemory(handle, mod.baseAddress + sec.addr, sec.size);
-          const diskData = readFileSync(mod.name);
+          if (diskData === null) diskData = readFileSync(mod.name);
+          // Bounds-check before subarray: an out-of-range offset silently
+          // clamps to the buffer end, hashing a short slice → false "modified".
+          if (sec.fileOffset < 0 || sec.fileOffset + sec.size > diskData.length) {
+            stats.skippedSections += 1;
+            continue;
+          }
+          const memResult = await api.readMemory(handle, mod.baseAddress + sec.addr, sec.size);
           const diskSlice = diskData.subarray(sec.fileOffset, sec.fileOffset + sec.size);
 
           const memHash = createHash('sha256').update(memResult.data).digest('hex');

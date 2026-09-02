@@ -48,6 +48,27 @@ export const DEFAULT_NETWORK_CAPTURE: Required<TraceNetworkCaptureOptions> = {
 
 const MAX_INLINE_EVENT_FIELD_BYTES = 16 * 1024;
 
+export const truncateUtf8 = (value: string, maxBytes: number): string => {
+  if (Buffer.byteLength(value, 'utf8') <= maxBytes) {
+    return value;
+  }
+  // Binary search the longest prefix whose UTF-8 encoding fits the budget.
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(value.slice(0, mid), 'utf8') <= maxBytes) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  // Never cut a surrogate pair in half — drop the dangling high surrogate.
+  const lastCodeUnit = value.charCodeAt(low - 1);
+  const endsOnHighSurrogate = lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff;
+  return value.slice(0, endsOnHighSurrogate ? low - 1 : low);
+};
+
 export const isObjectRecord = (value: unknown): value is UnknownRecord =>
   typeof value === 'object' && value !== null;
 
@@ -99,8 +120,8 @@ export const extractScriptLocation = (
     return { scriptId, lineNumber };
   }
 
-  if ('scriptId' in params) scriptId = String(params['scriptId']);
-  if ('lineNumber' in params) lineNumber = Number(params['lineNumber']) || null;
+  scriptId = asString(params['scriptId']);
+  lineNumber = asFiniteNumber(params['lineNumber']);
 
   const topStackLocation = extractStackTraceLocation(params['stackTrace']);
   if (topStackLocation.scriptId !== null) scriptId = topStackLocation.scriptId;
@@ -108,8 +129,12 @@ export const extractScriptLocation = (
 
   if (eventName === 'Runtime.exceptionThrown' && isObjectRecord(params['exceptionDetails'])) {
     const details = params['exceptionDetails'];
-    if ('scriptId' in details) scriptId = String(details['scriptId']);
-    if ('lineNumber' in details) lineNumber = Number(details['lineNumber']) || null;
+    if (details['scriptId'] !== undefined && details['scriptId'] !== null) {
+      scriptId = asString(details['scriptId']);
+    }
+    if (details['lineNumber'] !== undefined && details['lineNumber'] !== null) {
+      lineNumber = asFiniteNumber(details['lineNumber']);
+    }
 
     const exceptionStackLocation = extractStackTraceLocation(details['stackTrace']);
     if (scriptId === null && exceptionStackLocation.scriptId !== null) {
@@ -125,8 +150,8 @@ export const extractScriptLocation = (
     if (frame) {
       const location = frame['location'] as Record<string, unknown> | undefined;
       if (location) {
-        scriptId = String(location['scriptId'] ?? scriptId);
-        lineNumber = Number(location['lineNumber'] ?? lineNumber) || null;
+        scriptId = asString(location['scriptId']) ?? scriptId;
+        lineNumber = asFiniteNumber(location['lineNumber']) ?? lineNumber;
       }
     }
   }
@@ -172,7 +197,7 @@ export const sanitizeTracePayload = (eventName: string, params: unknown): unknow
     Buffer.byteLength(cloned['data'], 'utf8') > MAX_INLINE_EVENT_FIELD_BYTES
   ) {
     const message = cloned['data'] as string;
-    cloned['data'] = `${message.slice(0, MAX_INLINE_EVENT_FIELD_BYTES)}...[truncated]`;
+    cloned['data'] = `${truncateUtf8(message, MAX_INLINE_EVENT_FIELD_BYTES)}...[truncated]`;
     cloned['truncatedData'] = true;
   }
 
@@ -185,7 +210,8 @@ export const sanitizeTracePayload = (eventName: string, params: unknown): unknow
     const response = { ...(cloned['response'] as UnknownRecord) };
     const payload = response['payloadData'] as string;
     if (Buffer.byteLength(payload, 'utf8') > MAX_INLINE_EVENT_FIELD_BYTES) {
-      response['payloadData'] = `${payload.slice(0, MAX_INLINE_EVENT_FIELD_BYTES)}...[truncated]`;
+      response['payloadData'] =
+        `${truncateUtf8(payload, MAX_INLINE_EVENT_FIELD_BYTES)}...[truncated]`;
       response['truncatedPayloadData'] = true;
       cloned['response'] = response;
     }

@@ -24,11 +24,8 @@ const registrations = defineMethodRegistrations<H, (typeof advancedTools)[number
     { tool: 'network_get_response_body', method: 'handleNetworkGetResponseBody' },
     { tool: 'network_get_stats', method: 'handleNetworkGetStats' },
     { tool: 'performance_get_metrics', method: 'handlePerformanceGetMetrics' },
-    { tool: 'performance_coverage', method: 'handlePerformanceCoverage' },
-    { tool: 'performance_take_heap_snapshot', method: 'handlePerformanceTakeHeapSnapshot' },
     { tool: 'performance_trace', method: 'handlePerformanceTraceDispatch' },
     { tool: 'profiler_cpu', method: 'handleProfilerCpuDispatch' },
-    { tool: 'profiler_heap_sampling', method: 'handleProfilerHeapSamplingDispatch' },
     { tool: 'console_get_exceptions', method: 'handleConsoleGetExceptions' },
     { tool: 'console_inject', method: 'handleConsoleInjectDispatch' },
     {
@@ -102,12 +99,7 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
 
   if (!ctx.advancedHandlers) {
     const createHandlers = () =>
-      new AdvancedToolHandlers(
-        ctx.collector!,
-        ctx.consoleMonitor!,
-        ctx.eventBus,
-        () => ctx.traceRecorder ?? null,
-      );
+      new AdvancedToolHandlers(ctx.collector!, ctx.consoleMonitor!, ctx.eventBus);
     if (typeof ctx.setDomainInstance === 'function') {
       const pool = new SessionScopedResourcePool(
         createHandlers,

@@ -277,6 +277,40 @@ describe('SkiaSceneExtractor', () => {
       expect(result.isSkiaBacked).toBe(true);
       expect(mockPC.evaluate).toHaveBeenCalled();
     });
+
+    it('should send a real WebGL probe script instead of the placeholder', async () => {
+      const mockPC = createMockPageController({});
+
+      await detectSkiaRenderer(mockPC);
+
+      const evaluateMock = mockPC.evaluate as unknown as { mock: { calls: unknown[][] } };
+      const scripts = evaluateMock.mock.calls.map((call) => String(call[0]));
+      const webglScript = scripts.find((script) => script.includes('UNMASKED_RENDERER_WEBGL'));
+      expect(webglScript).toBeDefined();
+      // Real detection: acquire a WebGL context, read RENDERER parameters and
+      // classify — not the old `return []` placeholder that always reported
+      // confidence 0.1 on real browsers.
+      expect(webglScript).toContain("canvas.getContext('webgl')");
+      expect(webglScript).toContain('getParameter');
+      expect(webglScript).toContain('hasSkiaBackend');
+      // The old placeholder unconditionally returned [] right after its comment;
+      // the real probe only returns [] when no WebGL context is available.
+      expect(webglScript).not.toContain('*/ return [];');
+      expect(webglScript).toContain('if (!gl)');
+    });
+
+    it('should embed canvasId into the probe script when provided', async () => {
+      const mockPC = createMockPageController({});
+
+      await detectSkiaRenderer(mockPC, '#game-canvas');
+
+      const evaluateMock = mockPC.evaluate as unknown as { mock: { calls: unknown[][] } };
+      const scripts = evaluateMock.mock.calls.map((call) => String(call[0]));
+      const webglScript = scripts.find((script) => script.includes('UNMASKED_RENDERER_WEBGL'));
+      expect(webglScript).toBeDefined();
+      expect(webglScript).toContain('querySelector');
+      expect(webglScript).toContain('#game-canvas');
+    });
   });
 
   describe('extractSceneTree', () => {
@@ -395,6 +429,48 @@ describe('SkiaSceneExtractor', () => {
       expect(result.drawCommands).toEqual([]);
       expect(result.totalLayers).toBe(0);
       expect(result.totalDrawCommands).toBe(0);
+    });
+
+    it('flags the browser-path empty result as unsupported instead of silently empty', async () => {
+      // In a browser context the injected probe is a stub that cannot actually
+      // extract a Skia scene; an empty result must be marked `unsupported` so
+      // callers surface an honest error rather than a silent empty scene.
+      const mockPC = createMockPageController({});
+
+      const result = await extractSceneTree(mockPC);
+
+      expect(result.unsupported).toBe(true);
+      expect(result.layers).toEqual([]);
+      expect(result.drawCommands).toEqual([]);
+    });
+
+    it('does not flag a non-empty scene as unsupported', async () => {
+      const mockPC = createMockPageController({
+        scene: {
+          canvas: { width: 800, height: 600, dpr: 1, contextType: 'webgl' },
+          layers: [
+            {
+              id: 'layer_root',
+              name: 'root',
+              bounds: { x: 0, y: 0, width: 800, height: 600 },
+              transform: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+              opacity: 1,
+              visible: true,
+              parentId: null,
+              customData: {},
+            },
+          ],
+          drawCommands: [],
+        },
+        webgl: [],
+        font: { hasSkiaFontSignatures: false, textMetrics: null },
+        engine: { engines: [], isSkiaEngine: false },
+      });
+
+      const result = await extractSceneTree(mockPC);
+
+      expect(result.unsupported).toBeUndefined();
+      expect(result.layers.length).toBe(1);
     });
 
     it('should build parent-child relationships based on bounds containment', async () => {

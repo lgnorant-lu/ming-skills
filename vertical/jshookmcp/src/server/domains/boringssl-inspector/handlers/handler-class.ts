@@ -15,6 +15,9 @@ export class BoringsslInspectorHandlers extends BoringsslInspectorRawSocketHandl
   handleTlsKeylogDisableTool(args: Record<string, unknown>): Promise<ToolResponse> {
     return handleSafe(async () => await this.handleTlsKeylogDisable(args));
   }
+  handleTlsKeylogSealTool(args: Record<string, unknown>): Promise<ToolResponse> {
+    return handleSafe(async () => await this.handleTlsKeylogSeal(args));
+  }
   handleTlsDecryptPayloadTool(args: Record<string, unknown>): Promise<ToolResponse> {
     return handleSafe(async () => await this.handleTlsDecryptPayload(args));
   }

@@ -2,16 +2,18 @@ import type { DomainManifest, MCPServerContext } from '@server/domains/shared/re
 import { defineMethodRegistrations, toolLookup } from '@server/domains/shared/registry';
 import { processToolDefinitions } from '@server/domains/process/definitions';
 import type { ProcessToolHandlers } from '@server/domains/process/index';
+import { readEnvString } from '@src/config/environment';
 
 const DOMAIN = 'process' as const;
 const DEP_KEY = 'processHandlers' as const;
 type H = ProcessToolHandlers;
 const t = toolLookup(processToolDefinitions);
+const configuredPlatform = readEnvString('JSHOOK_REGISTRY_PLATFORM', '', { trim: true });
 const EFFECTIVE_PLATFORM =
-  process.env.JSHOOK_REGISTRY_PLATFORM === 'win32' ||
-  process.env.JSHOOK_REGISTRY_PLATFORM === 'linux' ||
-  process.env.JSHOOK_REGISTRY_PLATFORM === 'darwin'
-    ? process.env.JSHOOK_REGISTRY_PLATFORM
+  configuredPlatform === 'win32' ||
+  configuredPlatform === 'linux' ||
+  configuredPlatform === 'darwin'
+    ? configuredPlatform
     : process.platform;
 
 async function ensure(ctx: MCPServerContext): Promise<H> {

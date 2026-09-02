@@ -19,7 +19,7 @@
 3. **数据采集** — 创建 DataCollector 收集请求体/响应体::
 
        collector = page.network.add_data_collector(
-           ["responseCompleted"], data_types=["response"]
+           data_types=["response"]
        )
        # ... 触发请求 ...
        data = collector.get(request_id, data_type="response")
@@ -32,6 +32,8 @@
     配合 ``req.response_body`` 一步读取响应体，无需手动管理 DataCollector。
     DataCollector 适合需要精细控制或批量采集的高级场景。
 """
+
+import warnings
 
 from .._bidi import network as bidi_network
 
@@ -93,7 +95,7 @@ class DataCollector(object):
 
         # 1. 创建
         collector = page.network.add_data_collector(
-            ["responseCompleted"], data_types=["response"]
+            data_types=["response"]
         )
 
         # 2. 触发网络请求...
@@ -141,7 +143,7 @@ class DataCollector(object):
 
             # 典型用法：拦截 + 采集响应体
             collector = page.network.add_data_collector(
-                ["responseCompleted"], data_types=["response"]
+                data_types=["response"]
             )
             # ... 拦截请求获取 request_id ...
             data = collector.get(req.request_id, data_type="response")
@@ -200,7 +202,7 @@ class NetworkManager(object):
 
         # 数据采集
         collector = page.network.add_data_collector(
-            ["responseCompleted"], data_types=["response"]
+            data_types=["response"]
         )
     """
 
@@ -300,7 +302,7 @@ class NetworkManager(object):
         return self._owner
 
     def add_data_collector(
-        self, events, *, data_types=None, max_encoded_data_size=10485760
+        self, events=None, *, data_types=None, max_encoded_data_size=10485760
     ):
         """创建网络数据收集器。
 
@@ -308,11 +310,7 @@ class NetworkManager(object):
         随后可通过 ``collector.get(request_id)`` 按需读取。
 
         Args:
-            events: 收集阶段列表。决定在哪个时间点采集数据。
-
-                - ``['beforeRequestSent']`` — 请求发出阶段采集（适合读取请求体）。
-                - ``['responseCompleted']`` — 响应完成阶段采集（适合读取响应体）。
-                - ``['beforeRequestSent', 'responseCompleted']`` — 两者都采集。
+            events: 旧版兼容参数；当前 W3C 协议由 ``data_types`` 决定数据类型。
 
             data_types: 数据类型列表。决定保留哪些数据。
 
@@ -331,7 +329,6 @@ class NetworkManager(object):
 
             # 采集响应体
             collector = page.network.add_data_collector(
-                ["responseCompleted"],
                 data_types=["response"],
             )
             # ... 触发请求，获取 request_id ...
@@ -342,12 +339,17 @@ class NetworkManager(object):
 
             # 同时采集请求体和响应体
             collector = page.network.add_data_collector(
-                ["beforeRequestSent", "responseCompleted"],
                 data_types=["request", "response"],
             )
         """
+        if events is not None:
+            warnings.warn(
+                "events is deprecated by the current WebDriver BiDi schema; "
+                "use data_types instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return self._add_data_collector(
-            events,
             data_types=data_types,
             max_encoded_data_size=max_encoded_data_size,
             contexts=self._ctx(),
@@ -355,7 +357,6 @@ class NetworkManager(object):
 
     def _add_data_collector(
         self,
-        events,
         *,
         data_types=None,
         max_encoded_data_size=10485760,
@@ -364,7 +365,6 @@ class NetworkManager(object):
         """Create a collector with an explicit scope for internal fallbacks."""
         result = bidi_network.add_data_collector(
             self._owner._driver,
-            events=events,
             contexts=contexts,
             max_encoded_data_size=max_encoded_data_size,
             data_types=data_types,

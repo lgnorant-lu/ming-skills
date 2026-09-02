@@ -67,6 +67,8 @@ export interface HeapAnalysisResult {
     snapshotId: string;
     parseTimeMs: number;
     version: string;
+    /** Set when dominator computation was requested but failed — lets callers distinguish "not requested" from "failed". */
+    dominatorTreeError?: string;
   };
 }
 
@@ -273,12 +275,15 @@ function parseSnapshotMeta(meta: SnapshotMetaLike): {
 }
 
 export class HeapSnapshotParser {
+  private snapshotData: string;
   private parsed = false;
   private nodesCache: ParsedNode[] = [];
   private edgesCache: ParsedEdge[] = [];
   private chunkBuffer: string[] = [];
 
-  constructor(private snapshotData = '') {}
+  constructor(snapshotData = '') {
+    this.snapshotData = snapshotData;
+  }
 
   feedChunk(chunks: string[]): void {
     if (this.parsed) {
@@ -503,12 +508,30 @@ export class HeapSnapshotParser {
     // Build dominator tree if requested
     let dominatorTree: HeapAnalysisResult['dominatorTree'];
     let suspectedLeaks: HeapAnalysisResult['suspectedLeaks'];
+    let dominatorTreeError: string | undefined;
 
     if (includeDominatorTree || includeLeakDetection) {
       try {
         const builder = new DominatorTreeBuilder();
 
         const fullTree = builder.buildDominatorTree(this.nodesCache, this.edgesCache);
+
+        // Propagate true retained sizes (computed from the dominator tree)
+        // back into the histogram, which was accumulated from selfSize above.
+        // Reset first, then sum each tree node's retained size per class.
+        for (const entry of histogramMap.values()) {
+          entry.retainedSize = 0;
+        }
+        const pending: DominatorNode[] = [fullTree];
+        while (pending.length > 0) {
+          const node = pending.pop();
+          if (!node) continue;
+          const entry = histogramMap.get(node.name);
+          if (entry) {
+            entry.retainedSize += node.retainedSize;
+          }
+          pending.push(...node.children);
+        }
 
         if (includeDominatorTree) {
           // Truncate tree to specified depth
@@ -528,9 +551,13 @@ export class HeapSnapshotParser {
           }));
         }
       } catch (error) {
-        // Gracefully degrade if dominator tree computation fails
+        // Gracefully degrade if dominator tree computation fails, but surface
+        // the failure in metadata so callers can distinguish it from "not requested".
+        dominatorTreeError = error instanceof Error ? error.message : String(error);
         console.warn('Failed to compute dominator tree:', error);
       }
+      // Histogram retained sizes were just rewritten from the tree — re-sort.
+      classHistogram.sort((a, b) => b.retainedSize - a.retainedSize);
     }
 
     // Compute statistics
@@ -553,6 +580,7 @@ export class HeapSnapshotParser {
         snapshotId,
         parseTimeMs,
         version: includeDominatorTree || includeLeakDetection ? '2.0.0-phase2' : '1.0.0-phase1',
+        ...(dominatorTreeError !== undefined ? { dominatorTreeError } : {}),
       },
     };
 
@@ -601,6 +629,13 @@ export class HeapSnapshotParser {
   private countDetachedDOMNodes(): number {
     let count = 0;
 
+    // Precompute incoming edge counts once — filtering all edges per candidate
+    // node was O(N×E) on every call.
+    const incomingCounts = new Map<number, number>();
+    for (const edge of this.edgesCache) {
+      incomingCounts.set(edge.toId, (incomingCounts.get(edge.toId) ?? 0) + 1);
+    }
+
     for (const node of this.nodesCache) {
       const nameLower = node.name.toLowerCase();
 
@@ -617,11 +652,8 @@ export class HeapSnapshotParser {
         (nameLower.includes('node') && !nameLower.includes('function'));
 
       if (isDOMNodeType) {
-        // Count incoming edges
-        const incomingCount = this.edgesCache.filter((edge) => edge.toId === node.id).length;
-
         // Heuristic: DOM nodes with very few incoming edges are likely detached
-        if (incomingCount < 2) {
+        if ((incomingCounts.get(node.id) ?? 0) < 2) {
           count += 1;
         }
       }

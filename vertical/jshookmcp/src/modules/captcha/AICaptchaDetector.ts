@@ -1,6 +1,6 @@
 import { type Page } from 'rebrowser-puppeteer-core';
-import { writeFile, mkdir } from 'fs/promises';
-import { join } from 'path';
+import { writeFile, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { logger } from '@utils/logger';
 import {
   FALLBACK_CAPTCHA_KEYWORDS,

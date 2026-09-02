@@ -77,9 +77,10 @@ export async function enumerateThreadsMacos(pid: number): Promise<number[]> {
   for (const rawLine of stdout.split('\n')) {
     const line = rawLine.trim();
     if (!line) continue;
-    // Thread rows are the ones beginning with a hex TID (0x...). The process
-    // row and header have decimal/non-hex first fields, so they won't match.
-    const match = line.match(/^(0x[0-9a-fA-F]+)\b/);
+    // Thread rows are the ones beginning with a hex TID (0x...), indented in
+    // `ps -M` output. The process row and header have decimal/non-hex first
+    // fields, so they won't match.
+    const match = line.match(/^\s*(0x[0-9a-fA-F]+)\b/);
     if (match?.[1]) {
       const tid = parseInt(match[1], 16);
       if (Number.isFinite(tid) && tid > 0) tids.push(tid);

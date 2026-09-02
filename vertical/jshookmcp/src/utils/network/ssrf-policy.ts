@@ -1,5 +1,7 @@
 import { lookup } from 'node:dns/promises';
+import type { LookupAddress } from 'node:dns';
 import { BlockList, isIP } from 'node:net';
+import { readEnvBoolean } from '@src/config/environment';
 
 const RESTRICTED_IPV4_BLOCKLIST = new BlockList();
 const RESTRICTED_IPV6_BLOCKLIST = new BlockList();
@@ -21,6 +23,7 @@ const RESTRICTED_IPV6_SUBNETS = [
   ['::ffff:0:0:0', 96],
   ['64:ff9b::', 96],
   ['100::', 64],
+  ['2001::', 32],
   ['fc00::', 7],
   ['fe80::', 10],
 ] as const;
@@ -73,6 +76,13 @@ export interface ResolvedNetworkTarget {
   hostname: string;
   resolvedAddress: string | null;
   isIpLiteral: boolean;
+}
+
+export interface ResolvedNetworkTargets {
+  parsedUrl: URL;
+  hostname: string;
+  isIpLiteral: boolean;
+  addresses: string[];
 }
 
 function parsePolicyExpiry(expiresAt?: string): {
@@ -163,7 +173,7 @@ function isAddressAuthorized(
 }
 
 export function isLocalSsrfBypassEnabled(): boolean {
-  return process.env.ALLOW_LOCAL_SSRF === 'true';
+  return readEnvBoolean('ALLOW_LOCAL_SSRF', false);
 }
 
 export function isLoopbackHost(host: string): boolean {
@@ -241,35 +251,44 @@ export function isNetworkAuthorizationExpired(
   return now > policy.expiresAtMs;
 }
 
-export async function resolveNetworkTarget(url: string): Promise<ResolvedNetworkTarget> {
+/**
+ * Resolve EVERY address a hostname answers with in a single lookup. DNS
+ * rebinding relies on a hostname that flips between public and private
+ * addresses, so the full answer set must be inspected — a single-address
+ * lookup can miss the private record and let the request through.
+ */
+export async function resolveNetworkTargets(url: string): Promise<ResolvedNetworkTargets> {
   const parsedUrl = new URL(url);
   const hostname = normalizeHost(parsedUrl.hostname);
   const isIpLiteral = getHostAddressFamily(hostname) !== null;
 
   if (isIpLiteral) {
-    return {
-      parsedUrl,
-      hostname,
-      resolvedAddress: hostname,
-      isIpLiteral,
-    };
+    return { parsedUrl, hostname, isIpLiteral, addresses: [hostname] };
   }
 
   if (hostname === 'localhost') {
-    return {
-      parsedUrl,
-      hostname,
-      resolvedAddress: '127.0.0.1',
-      isIpLiteral,
-    };
+    return { parsedUrl, hostname, isIpLiteral, addresses: ['127.0.0.1'] };
   }
 
-  const { address } = await lookup(hostname);
+  const records = (await lookup(hostname, { all: true })) as unknown as
+    | LookupAddress
+    | LookupAddress[];
+  const addressList = Array.isArray(records) ? records : [records];
   return {
     parsedUrl,
     hostname,
-    resolvedAddress: normalizeHost(address),
     isIpLiteral,
+    addresses: addressList.map((record) => normalizeHost(record.address)).filter(Boolean),
+  };
+}
+
+export async function resolveNetworkTarget(url: string): Promise<ResolvedNetworkTarget> {
+  const targets = await resolveNetworkTargets(url);
+  return {
+    parsedUrl: targets.parsedUrl,
+    hostname: targets.hostname,
+    resolvedAddress: targets.addresses[0] ?? null,
+    isIpLiteral: targets.isIpLiteral,
   };
 }
 
@@ -295,11 +314,20 @@ export async function isSsrfTarget(
     const policy = createNetworkAuthorizationPolicy(authorization);
     if (isNetworkAuthorizationExpired(policy)) return true;
     const parsed = new URL(url);
+
+    // The env bypass is intentionally checked before DNS resolution: without
+    // an authorization policy the operator has opted out of SSRF guarding
+    // entirely. It never applies to DNS failures once a policy exists —
+    // those fail closed below.
     if (!policy && isLocalSsrfBypassEnabled()) return false;
 
-    const target = await resolveNetworkTarget(parsed.toString());
+    // Resolve-once-then-pin: check the full DNS answer set, not a single
+    // lookup result — a hostname answering with both public and private
+    // addresses is a DNS-rebinding vector.
+    const target = await resolveNetworkTargets(parsed.toString());
+
     const targetIsPrivate =
-      isPrivateHost(target.hostname) || isPrivateHost(target.resolvedAddress ?? '');
+      isPrivateHost(target.hostname) || target.addresses.some((address) => isPrivateHost(address));
 
     if (!targetIsPrivate) {
       return false;
@@ -309,7 +337,19 @@ export async function isSsrfTarget(
       return true;
     }
 
-    return !isAuthorizedNetworkTarget(policy, target);
+    // Loopback hostnames resolve deterministically — no DNS rebinding is
+    // possible, so authorizing the hostname is sufficient.
+    if (isLoopbackHost(target.hostname)) {
+      return !isAddressAuthorized(policy, target.hostname);
+    }
+
+    // Any other hostname: every resolved address must be individually
+    // authorized. A single unauthorized address in a mixed public/private
+    // answer set keeps the rebinding vector open.
+    const allAddressesAuthorized = target.addresses.every((address) =>
+      isAddressAuthorized(policy, address),
+    );
+    return !allAddressesAuthorized;
   } catch {
     return true;
   }

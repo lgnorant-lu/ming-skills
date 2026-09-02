@@ -3,6 +3,13 @@ const networkMonitorHarness = vi.hoisted(() => {
   const instances: any[] = [];
 
   class MockNetworkMonitor {
+    public readonly session: unknown;
+    public readonly options: {
+      sessionId: string;
+      targetId: string;
+      targetType: string;
+      requestIdPrefix: string;
+    };
     enabled = false;
     enableCalls = 0;
     disableCalls = 0;
@@ -27,14 +34,16 @@ const networkMonitorHarness = vi.hoisted(() => {
     listenerCount = 2;
 
     constructor(
-      public readonly session: unknown,
-      public readonly options: {
+      session: unknown,
+      options: {
         sessionId: string;
         targetId: string;
         targetType: string;
         requestIdPrefix: string;
       },
     ) {
+      this.session = session;
+      this.options = options;
       instances.push(this);
     }
 
@@ -143,7 +152,10 @@ class FakeAttachedSession {
 }
 
 class FakeManagedSession {
-  constructor(private readonly sessionId: string) {}
+  private readonly sessionId: string;
+  constructor(sessionId: string) {
+    this.sessionId = sessionId;
+  }
 
   send = vi.fn(async (method: string) => {
     if (method === 'Page.addScriptToEvaluateOnNewDocument') {

@@ -7,19 +7,27 @@ import {
   extractFunctionTreeCore,
   type ExtractFunctionTreeResult,
 } from '@modules/debugger/ScriptManager.impl.extract-function-tree';
+import {
+  SCRIPT_SEARCH_RESULT_LIMIT,
+  SCRIPT_CONTEXT_TRUNCATE_LINES_LARGE,
+  SCRIPT_CONTEXT_SNIPPET_HALF_LINES_LARGE,
+  SCRIPT_CONTEXT_TRUNCATE_LINES_SMALL,
+  SCRIPT_CONTEXT_SNIPPET_HALF_LINES_SMALL,
+  SCRIPT_CONTEXT_HALF_LINES_SMALL,
+} from '@src/constants';
 
 /** Cap on the number of scripts scanned by searchInScripts. */
-const SEARCH_RESULT_LIMIT = 500;
+const SEARCH_RESULT_LIMIT = SCRIPT_SEARCH_RESULT_LIMIT;
 /** Context truncation trigger for the searchInScripts path (chars). */
-const CONTEXT_TRUNCATE_LINES_LARGE = 2000;
+const CONTEXT_TRUNCATE_LINES_LARGE = SCRIPT_CONTEXT_TRUNCATE_LINES_LARGE;
 /** Match-window half-width used when truncating the searchInScripts path. */
-const CONTEXT_SNIPPET_HALF_LINES_LARGE = 100;
+const CONTEXT_SNIPPET_HALF_LINES_LARGE = SCRIPT_CONTEXT_SNIPPET_HALF_LINES_LARGE;
 /** Context truncation trigger for the keyword-index path (chars). */
-const CONTEXT_TRUNCATE_LINES_SMALL = 1000;
+const CONTEXT_TRUNCATE_LINES_SMALL = SCRIPT_CONTEXT_TRUNCATE_LINES_SMALL;
 /** Match-window half-width used when truncating the keyword-index path. */
-const CONTEXT_SNIPPET_HALF_LINES_SMALL = 50;
+const CONTEXT_SNIPPET_HALF_LINES_SMALL = SCRIPT_CONTEXT_SNIPPET_HALF_LINES_SMALL;
 /** Match-window half-width for the keyword-index path (lines). */
-const CONTEXT_HALF_LINES_SMALL = 3;
+const CONTEXT_HALF_LINES_SMALL = SCRIPT_CONTEXT_HALF_LINES_SMALL;
 
 /**
  * Build the match-window context for a keyword hit. Joins `halfWidth` lines
@@ -90,6 +98,7 @@ interface DebuggerScriptParsedEvent {
 }
 
 export class ScriptManager {
+  private collector: CodeCollector;
   private static readonly SOURCE_LOAD_BATCH_SIZE = 8;
   private static readonly SEARCH_LINE_YIELD_INTERVAL = 250;
   private static readonly SEARCH_SCRIPT_YIELD_INTERVAL = 10;
@@ -109,7 +118,9 @@ export class ScriptManager {
   /** Serializes the zombie-detection → reinit path across concurrent callers. */
   private ensureSessionPromise?: Promise<void>;
 
-  constructor(private collector: CodeCollector) {}
+  constructor(collector: CodeCollector) {
+    this.collector = collector;
+  }
 
   async init(): Promise<void> {
     if (this.initialized) {
@@ -212,6 +223,9 @@ export class ScriptManager {
       await this.ensureSessionPromise;
       return;
     }
+    // Capture the session under probe — the failure path must not wipe a
+    // replacement a concurrent caller built while this probe was in flight.
+    const probed = this.cdpSession;
 
     this.ensureSessionPromise = (async () => {
       try {
@@ -220,7 +234,7 @@ export class ScriptManager {
         // the 3s timeout fires on an already-healthy session.
         let probeTimer: ReturnType<typeof setTimeout> | undefined;
         await Promise.race([
-          this.cdpSession!.send('Runtime.evaluate', { expression: '1', returnByValue: true }),
+          probed.send('Runtime.evaluate', { expression: '1', returnByValue: true }),
           new Promise<never>((_, reject) => {
             probeTimer = setTimeout(() => reject(new Error('session_unreachable')), 3000);
           }),
@@ -230,8 +244,9 @@ export class ScriptManager {
         this.lastHealthProbeAt = Date.now();
       } catch {
         logger.warn('ScriptManager CDP session unresponsive (zombie), reinitializing...');
-        // Re-check before wiping: another caller may have already rebuilt.
-        if (!this.cdpSession || !this.initialized) {
+        // Re-check before wiping: another caller may have already rebuilt or
+        // replaced the session we probed.
+        if (this.cdpSession !== probed || !this.initialized) {
           return;
         }
         this.cdpSession = null;

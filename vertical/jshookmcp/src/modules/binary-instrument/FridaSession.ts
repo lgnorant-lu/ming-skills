@@ -48,6 +48,14 @@ export interface MemoryScanOptions {
   address?: string;
   size?: number;
   max?: number;
+  /**
+   * Per-invocation CLI timeout in milliseconds. Defaults to FRIDA_TIMEOUT_MS
+   * (15s). Task-mode callers pass a larger value so broad memory scans
+   * survive past the interactive timeout (MCP 2.0 Tasks retrofit).
+   */
+  timeoutMs?: number;
+  /** Aborted by task cancellation — kills the frida CLI child mid-scan. */
+  signal?: AbortSignal;
 }
 
 export type FridaSessionMode = 'attach' | 'spawn';
@@ -144,9 +152,17 @@ export class FridaSession {
     this.activeSessionId = undefined;
   }
 
-  async executeScript(script: string): Promise<FridaScriptResult> {
+  async executeScript(
+    script: string,
+    options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<FridaScriptResult> {
     const session = this.requireActiveSession();
-    const result = await this.runFridaCommandForSession(session, script);
+    const result = await this.runFridaCommandForSession(
+      session,
+      script,
+      options.timeoutMs,
+      options.signal,
+    );
 
     if (result.error) {
       session.status = 'error';
@@ -313,6 +329,8 @@ export class FridaSession {
         '}',
         'console.log(JSON.stringify(results));',
       ].join('\n'),
+      options.timeoutMs,
+      options.signal,
     );
     const parsed = this.parseMemoryMatchList(result.output);
 
@@ -451,18 +469,22 @@ export class FridaSession {
   private async runFridaCommandForSession(
     session: FridaSessionRecord,
     script: string,
+    timeoutMs?: number,
+    signal?: AbortSignal,
   ): Promise<FridaScriptResult> {
     const targetArgs =
       session.mode === 'spawn' && session.resumed !== true
         ? this.buildSpawnTargetArgs(session.target)
         : this.buildTargetArgs(session.target);
-    return this.runFridaCommandWithArgs(session.target, targetArgs, script);
+    return this.runFridaCommandWithArgs(session.target, targetArgs, script, timeoutMs, signal);
   }
 
   private async runFridaCommandWithArgs(
     target: string,
     targetArgs: string[],
     script: string,
+    timeoutMs?: number,
+    signal?: AbortSignal,
   ): Promise<FridaScriptResult> {
     const availability = await this.getAvailability();
     if (!availability.available) {
@@ -476,7 +498,7 @@ export class FridaSession {
     const args = [...targetArgs, '--runtime=v8', '-q', '-e', script];
 
     try {
-      const result = await this.execFileUtf8(command, args, FRIDA_TIMEOUT_MS);
+      const result = await this.execFileUtf8(command, args, timeoutMs ?? FRIDA_TIMEOUT_MS, signal);
       const output = result.stdout.trim();
       const error = result.stderr.trim();
       return error ? { output, error } : { output };
@@ -675,9 +697,14 @@ export class FridaSession {
     return typeof value === 'object' && value !== null;
   }
 
-  private execFileUtf8(file: string, args: string[], timeoutMs: number): Promise<CommandResult> {
+  private execFileUtf8(
+    file: string,
+    args: string[],
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<CommandResult> {
     return new Promise((resolve, reject) => {
-      execFile(
+      const child = execFile(
         file,
         args,
         {
@@ -687,6 +714,7 @@ export class FridaSession {
           encoding: 'utf8',
         },
         (error, stdout, stderr) => {
+          signal?.removeEventListener('abort', onAbort);
           if (error) {
             reject(error);
             return;
@@ -698,6 +726,13 @@ export class FridaSession {
           });
         },
       );
+
+      // Task cancellation must actually stop the CLI child — otherwise a
+      // cancelled frida scan keeps burning CPU on the target for minutes.
+      function onAbort() {
+        child.kill();
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 }

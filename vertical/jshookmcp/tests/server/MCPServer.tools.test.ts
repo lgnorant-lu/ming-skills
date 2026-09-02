@@ -36,7 +36,7 @@ vi.mock('@errors/ToolError', () => ({
   ToolError: mocks.MockToolError,
 }));
 
-import { registerSingleTool } from '@server/MCPServer.tools';
+import { registerSingleTool, installCachedToolListHandler } from '@server/MCPServer.tools';
 import { TEST_URLS } from '@tests/shared/test-urls';
 
 function createCtx(overrides: Record<string, unknown> = {}) {
@@ -146,6 +146,37 @@ describe('MCPServer.tools', () => {
     expect(ctx.executeToolWithTracking).toHaveBeenCalledWith('extensions_reload', {});
   });
 
+  it('forwards MCP annotations and output schema metadata to the SDK', () => {
+    mocks.buildZodShape.mockReturnValue({});
+    const ctx = createCtx();
+
+    registerSingleTool(ctx, {
+      name: 'structured_query',
+      description: 'Structured query',
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      outputSchema: {
+        type: 'object',
+        properties: { count: { type: 'number' } },
+        required: ['count'],
+      },
+      inputSchema: { type: 'object', properties: {} },
+    } as any);
+
+    const config = ctx.registrationsForTest[0].config;
+    expect(config.annotations).toEqual({
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
+    expect(config.outputSchema).toBeDefined();
+  });
+
   it('throws McpError on ToolError failures', async () => {
     mocks.buildZodShape.mockReturnValue({});
     const ctx = createCtx({
@@ -180,5 +211,70 @@ describe('MCPServer.tools', () => {
       'Tool execution failed: page_navigate',
       expect.any(Error),
     );
+  });
+});
+
+describe('installCachedToolListHandler', () => {
+  /** A fake McpServer exposing just the SDK surface the installer touches. */
+  function createFakeMcpServer() {
+    const originalHandler = vi.fn(async () => ({
+      tools: [{ name: 'page_navigate', inputSchema: { type: 'object' } }],
+    }));
+
+    let installedHandler: ((request: unknown, extra?: unknown) => unknown) | null = null;
+    const innerServer = {
+      _requestHandlers: new Map([['tools/list', originalHandler]]),
+      setRequestHandler: vi.fn(
+        (_schema: unknown, handler: (request: unknown, extra?: unknown) => unknown) => {
+          installedHandler = handler;
+        },
+      ),
+    };
+
+    const server = {
+      server: innerServer,
+      sendToolListChanged: vi.fn(),
+    } as any;
+
+    return { server, innerServer, originalHandler, getInstalledHandler: () => installedHandler };
+  }
+
+  it('reuses the serialized tool list until the tool set mutates', async () => {
+    const { server, innerServer, originalHandler, getInstalledHandler } = createFakeMcpServer();
+
+    installCachedToolListHandler(server);
+
+    expect(innerServer.setRequestHandler).toHaveBeenCalledWith('tools/list', expect.any(Function));
+
+    const handler = getInstalledHandler()!;
+    const first = await handler({ method: 'tools/list', params: {} });
+    const second = await handler({ method: 'tools/list', params: {} });
+
+    expect(first).toEqual(second);
+    expect(originalHandler).toHaveBeenCalledTimes(1); // second call hit the cache
+
+    // A tool-set mutation (register/update/remove) invalidates the cache.
+    server.sendToolListChanged();
+    await handler({ method: 'tools/list', params: {} });
+    expect(originalHandler).toHaveBeenCalledTimes(2);
+  });
+
+  it('installs at most once per server', () => {
+    const { server, innerServer } = createFakeMcpServer();
+
+    installCachedToolListHandler(server);
+    installCachedToolListHandler(server);
+
+    expect(innerServer.setRequestHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the default handler when the SDK handler is not yet registered', () => {
+    const innerServer = { _requestHandlers: new Map(), setRequestHandler: vi.fn() };
+    const server = { server: innerServer, sendToolListChanged: vi.fn() } as any;
+
+    installCachedToolListHandler(server);
+
+    expect(innerServer.setRequestHandler).not.toHaveBeenCalled();
+    expect(server.sendToolListChanged).not.toHaveBeenCalled();
   });
 });

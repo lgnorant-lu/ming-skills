@@ -21,9 +21,12 @@ import { handleNetworkGetRequests } from './core-handlers.requests';
 import { ensureNetworkEnabled, buildNotEnabledResponse } from './core-handlers.helpers';
 
 export class CoreHandlers {
+  private deps: NetworkHandlerDeps;
   private detailedDataManager = getDetailedDataManager();
 
-  constructor(private deps: NetworkHandlerDeps) {}
+  constructor(deps: NetworkHandlerDeps) {
+    this.deps = deps;
+  }
 
   // ── Network enable/disable/status ──
 

@@ -7,12 +7,14 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import koffi, { type LibraryHandle } from 'koffi';
+import type { LibraryHandle } from 'koffi';
+import { requireKoffi } from './koffi-loader';
 import { logger } from '@utils/logger';
 import {
   ICMP_PROBE_TIMEOUT_MS,
   ICMP_TRACEROUTE_MAX_HOPS,
   ICMP_DEFAULT_PACKET_SIZE,
+  ICMP_DEFAULT_TTL,
 } from '@src/constants';
 import {
   BaseIcmpProvider,
@@ -64,7 +66,7 @@ let posixFns: PosixFns | null = null;
 
 function getPosixLib(): LibraryHandle {
   if (!posixLib) {
-    posixLib = koffi.load(POSIX_LIB);
+    posixLib = requireKoffi().load(POSIX_LIB);
     logger.debug(`Loaded ${POSIX_LIB} via koffi for ICMP`);
   }
   return posixLib;
@@ -236,7 +238,7 @@ export class PosixIcmpProvider extends BaseIcmpProvider {
   async probe(params: IcmpProbeParams): Promise<IcmpProbeResult> {
     const {
       target,
-      ttl = 128,
+      ttl = ICMP_DEFAULT_TTL,
       packetSize = ICMP_DEFAULT_PACKET_SIZE,
       timeout = ICMP_PROBE_TIMEOUT_MS,
     } = params;

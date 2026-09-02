@@ -59,15 +59,99 @@ export interface CpuProfileCallFramePayload {
 }
 
 export interface CpuProfileNodePayload {
+  id?: number;
   hitCount?: number;
   callFrame?: CpuProfileCallFramePayload;
+  children?: number[];
 }
 
 export interface CpuProfilePayload {
   nodes: CpuProfileNodePayload[];
-  samples?: unknown[];
+  samples?: number[];
   startTime: number;
   endTime: number;
+}
+
+export interface HotFunctionSummary {
+  functionName: string;
+  url?: string;
+  line?: number;
+  hitCount: number;
+}
+
+export interface HotFunctionsResult {
+  hotFunctions: HotFunctionSummary[];
+  /** Present when no hot data could be derived (samples absent + hitCount all zero). */
+  message?: string;
+}
+
+/**
+ * Aggregate the hottest functions of a CDP CPU profile.
+ *
+ * Modern Chrome profiles are samples + timeDeltas shaped — `hitCount` is
+ * deprecated and always 0/undefined, so hot functions are derived by counting
+ * how often each node id appears in `samples`, walking bottom-up so every
+ * ancestor accumulates its descendants' samples. Falls back to `hitCount`
+ * when `samples` is unavailable or yields no nodes.
+ */
+export function buildHotFunctions(profile: CpuProfilePayload): HotFunctionsResult {
+  const samples = profile.samples;
+  if (samples && samples.length > 0) {
+    const nodeById = new Map<number, CpuProfileNodePayload>();
+    const parentByChildId = new Map<number, number>();
+    for (const node of profile.nodes) {
+      if (node.id === undefined) continue;
+      nodeById.set(node.id, node);
+      for (const childId of node.children ?? []) {
+        if (childId !== undefined) parentByChildId.set(childId, node.id);
+      }
+    }
+
+    const counts = new Map<number, number>();
+    for (const sampleId of samples) {
+      let nodeId: number | undefined = sampleId;
+      while (nodeId !== undefined && nodeById.has(nodeId)) {
+        counts.set(nodeId, (counts.get(nodeId) ?? 0) + 1);
+        nodeId = parentByChildId.get(nodeId);
+      }
+    }
+
+    if (counts.size > 0) {
+      return {
+        hotFunctions: [...counts.entries()]
+          .toSorted((a, b) => b[1] - a[1])
+          .slice(0, 20)
+          .map(([nodeId, count]) => {
+            const node = nodeById.get(nodeId);
+            return {
+              functionName: node?.callFrame?.functionName || '(anonymous)',
+              url: node?.callFrame?.url,
+              line: node?.callFrame?.lineNumber,
+              hitCount: count,
+            };
+          }),
+      };
+    }
+  }
+
+  const hotFunctions = profile.nodes
+    .filter((n) => (n.hitCount || 0) > 0)
+    .toSorted((a, b) => (b.hitCount || 0) - (a.hitCount || 0))
+    .slice(0, 20)
+    .map((n) => ({
+      functionName: n.callFrame?.functionName || '(anonymous)',
+      url: n.callFrame?.url,
+      line: n.callFrame?.lineNumber,
+      hitCount: n.hitCount || 0,
+    }));
+
+  if (hotFunctions.length === 0) {
+    return {
+      hotFunctions,
+      message: 'CPU profile uses samples-based format; no hitCount available',
+    };
+  }
+  return { hotFunctions };
 }
 
 // ── Type Guards ──
@@ -86,7 +170,7 @@ export const isNetworkResponsePayload = (value: unknown): value is NetworkRespon
   if (!isObjectRecord(value)) {
     return false;
   }
-  return typeof value.status === 'number';
+  return isFiniteNumber(value.status);
 };
 
 export const isFiniteNumber = (value: unknown): value is number =>
@@ -157,7 +241,9 @@ export const toCpuProfilePayload = (value: unknown): CpuProfilePayload | null =>
 
   return {
     nodes: value.nodes,
-    samples: Array.isArray(value.samples) ? value.samples : undefined,
+    samples: Array.isArray(value.samples)
+      ? (value.samples as unknown[]).filter((s): s is number => typeof s === 'number')
+      : undefined,
     startTime: value.startTime,
     endTime: value.endTime,
   };

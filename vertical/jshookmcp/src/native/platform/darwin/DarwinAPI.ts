@@ -12,7 +12,8 @@
  * @module platform/darwin/DarwinAPI
  */
 
-import koffi, { type LibraryHandle } from 'koffi';
+import type { LibraryHandle } from 'koffi';
+import { requireKoffi } from '../../koffi-loader';
 import { logger } from '@utils/logger';
 
 // ── Mach Kernel Constants ──
@@ -165,7 +166,7 @@ export function isKoffiAvailableOnDarwin(): boolean {
   if (koffiAvailableDarwin !== null) return koffiAvailableDarwin;
 
   try {
-    const testLib = koffi.load('/usr/lib/libSystem.B.dylib');
+    const testLib = requireKoffi().load('/usr/lib/libSystem.B.dylib');
     testLib.unload();
     koffiAvailableDarwin = true;
     return true;
@@ -180,7 +181,7 @@ export function isKoffiAvailableOnDarwin(): boolean {
  */
 function getLibSystem(): LibraryHandle {
   if (!libSystem) {
-    libSystem = koffi.load('/usr/lib/libSystem.B.dylib');
+    libSystem = requireKoffi().load('/usr/lib/libSystem.B.dylib');
     logger.debug('Loaded libSystem.B.dylib via koffi');
   }
   return libSystem;
@@ -573,9 +574,9 @@ export function hostPageSize(): number {
     'int32 sysctlbyname(_In_ const char *, _Out_ void *, _Inout_ size_t *, _In_ const void *, size_t)',
   );
   const kr = fn(
-    koffi.address(nameBuf),
-    koffi.address(valBuf),
-    koffi.address(lenBuf),
+    requireKoffi().address(nameBuf),
+    requireKoffi().address(valBuf),
+    requireKoffi().address(lenBuf),
     0,
     0,
   ) as number;
@@ -642,7 +643,15 @@ export function machMsg(
   const fn = getLibSystem().func(
     'int32 mach_msg(void *, uint32, uint32, uint32, uint32, uint32, uint32)',
   );
-  return fn(koffi.address(msg), option, sendSize, rcvSize, rcvName, timeout, notify) as number;
+  return fn(
+    requireKoffi().address(msg),
+    option,
+    sendSize,
+    rcvSize,
+    rcvName,
+    timeout,
+    notify,
+  ) as number;
 }
 
 /** mach_port_allocate(self, MACH_PORT_RIGHT_RECEIVE, &name) → receive right name.
@@ -653,7 +662,7 @@ export function machPortAllocateReceive(): number {
   const MACH_PORT_RIGHT_RECEIVE = 1;
   const nameBuf = Buffer.alloc(4);
   const fn = getLibSystem().func('int32 mach_port_allocate(uint32, uint32, _Out_ uint32 *)');
-  const kr = fn(machTaskSelf(), MACH_PORT_RIGHT_RECEIVE, koffi.address(nameBuf)) as number;
+  const kr = fn(machTaskSelf(), MACH_PORT_RIGHT_RECEIVE, requireKoffi().address(nameBuf)) as number;
   if (kr !== KERN.SUCCESS) {
     throw new Error(`mach_port_allocate(MACH_PORT_RIGHT_RECEIVE) failed: kern_return_t=${kr}`);
   }
@@ -699,7 +708,12 @@ export function threadGetState(thread: number, flavor: number, state: Buffer): n
   const fn = getLibSystem().func(
     'int32 thread_get_state(uint32, uint32, _Out_ uint8_t *, _Inout_ uint32 *)',
   );
-  return fn(thread, flavor, koffi.address(state), koffi.address(countBuf)) as number;
+  return fn(
+    thread,
+    flavor,
+    requireKoffi().address(state),
+    requireKoffi().address(countBuf),
+  ) as number;
 }
 
 /**

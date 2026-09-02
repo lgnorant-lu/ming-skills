@@ -36,7 +36,10 @@ function toolCapability(
 }
 
 export class CapabilityHandlers {
-  constructor(private readonly state: WasmSharedState) {}
+  private readonly state: WasmSharedState;
+  constructor(state: WasmSharedState) {
+    this.state = state;
+  }
 
   async handleWasmCapabilities(): Promise<ToolResponse> {
     const probes = await this.state.runner.probeAll();

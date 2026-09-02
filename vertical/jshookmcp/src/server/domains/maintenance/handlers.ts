@@ -6,6 +6,7 @@ import { cleanupArtifacts } from '@utils/artifactRetention';
 import type { ArtifactCategory } from '@utils/artifacts';
 import { runEnvironmentDoctor } from '@utils/environmentDoctor';
 import { classifyGpuInputs } from '@server/domains/maintenance/gpu-detect';
+import { TOKEN_BUDGET_MAX_TOKENS } from '@src/constants/server';
 
 interface CoreMaintenanceHandlerDeps {
   tokenBudget: TokenBudgetManager;
@@ -58,7 +59,7 @@ export class CoreMaintenanceHandlers {
       return {
         message: 'Token budget reset successfully',
         currentUsage: 0,
-        maxTokens: 200000,
+        maxTokens: TOKEN_BUDGET_MAX_TOKENS,
         usagePercentage: 0,
       };
     });
@@ -75,7 +76,9 @@ export class CoreMaintenanceHandlers {
     return handleSafe(async () =>
       this.unifiedCache.smartCleanup(
         targetSize,
-        namespaces && namespaces.length > 0 ? { namespaces } : undefined,
+        // Omitted = all caches; pass even an empty list through so an empty
+        // selection cleans nothing rather than wiping every cache.
+        namespaces === undefined ? undefined : { namespaces },
       ),
     );
   }

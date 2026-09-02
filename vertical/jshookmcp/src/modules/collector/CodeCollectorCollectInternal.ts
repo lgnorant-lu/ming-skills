@@ -11,16 +11,23 @@ import {
   analyzeDependencies,
   setupWebWorkerTracking,
 } from '@modules/collector/PageScriptCollectors';
+import {
+  COLLECTOR_DEFAULT_TIMEOUT_MS,
+  COLLECTOR_DYNAMIC_SCRIPT_WAIT_MS,
+  COLLECTOR_COMPRESS_MAX_RETRIES,
+  COLLECTOR_COMPRESS_CONCURRENCY,
+  COLLECTOR_COMPRESS_PROGRESS_LOG_INTERVAL,
+} from '@src/constants/browser';
 
 /** Fallback navigation/collection timeout when neither options nor config supply one. */
-const DEFAULT_COLLECTION_TIMEOUT_MS = 30_000;
+const DEFAULT_COLLECTION_TIMEOUT_MS = COLLECTOR_DEFAULT_TIMEOUT_MS;
 /** How long to wait after navigation for late-loading dynamic scripts. */
-const DYNAMIC_SCRIPT_WAIT_MS = 3_000;
+const DYNAMIC_SCRIPT_WAIT_MS = COLLECTOR_DYNAMIC_SCRIPT_WAIT_MS;
 /** Compression batch tuning (retries per file, parallel files). */
-const COMPRESS_MAX_RETRIES = 3;
-const COMPRESS_CONCURRENCY = 5;
+const COMPRESS_MAX_RETRIES = COLLECTOR_COMPRESS_MAX_RETRIES;
+const COMPRESS_CONCURRENCY = COLLECTOR_COMPRESS_CONCURRENCY;
 /** Log compression progress every N percent. */
-const COMPRESS_PROGRESS_LOG_INTERVAL = 25;
+const COMPRESS_PROGRESS_LOG_INTERVAL = COLLECTOR_COMPRESS_PROGRESS_LOG_INTERVAL;
 
 interface CDPResponseReceivedParams {
   response: {

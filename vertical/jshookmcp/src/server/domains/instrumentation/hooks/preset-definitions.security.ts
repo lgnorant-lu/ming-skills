@@ -80,7 +80,16 @@ export const SECURITY_PRESETS: Record<string, PresetEntry> = {
         .map(function(b) { return b.toString(16).padStart(2,'0'); }).join('');
     };
     const tryExport = async function(key) {
-      try { return await _exportKey('jwk', key); } catch(e) { return null; }
+      try { return await _exportKey('jwk', key); }
+      catch(e) {
+        window.__aiHooks['preset-crypto-key-capture'].push({
+          fn:'export-failed',
+          reason: String(e && e.message || e),
+          stack: '',
+          ts: Date.now(),
+        });
+        return null;
+      }
     };
     _subtle.importKey = async function(format, keyData, algorithm, extractable, usages) {
       {{STACK_CODE}}

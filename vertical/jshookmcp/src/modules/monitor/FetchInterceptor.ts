@@ -55,12 +55,15 @@ interface FetchRequestPausedEvent {
 // ── FetchInterceptor ──
 
 export class FetchInterceptor {
+  private cdpSession: CDPSessionLike;
   private rules: Map<string, FetchInterceptRule> = new Map();
   private enabled = false;
   private eventHandler: ((params: FetchRequestPausedEvent) => void) | null = null;
   private compiledPatterns: Map<string, RegExp> = new Map();
 
-  constructor(private cdpSession: CDPSessionLike) {}
+  constructor(cdpSession: CDPSessionLike) {
+    this.cdpSession = cdpSession;
+  }
 
   /**
    * Enable Fetch domain interception with the given rules.

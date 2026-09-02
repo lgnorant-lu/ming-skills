@@ -54,7 +54,10 @@ function createDnsClient(server: string | undefined): DnsClient {
 }
 
 export class RawDnsHttpHandlers {
-  constructor(private readonly eventBus?: EventBus<ServerEventMap>) {}
+  private readonly eventBus?: EventBus<ServerEventMap>;
+  constructor(eventBus?: EventBus<ServerEventMap>) {
+    this.eventBus = eventBus;
+  }
 
   async handleDnsResolve(args: Record<string, unknown>) {
     try {

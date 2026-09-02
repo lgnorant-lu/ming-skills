@@ -370,7 +370,9 @@ export async function writeHarToSafePath(outputPath: string, har: unknown): Prom
     allowedRoots,
     allowedRootsDescription: 'project root or system temp directory',
   });
-  await writeTextFileAtomically(absolutePath, JSON.stringify(har, null, 2), {
+  // Compact serialization (no pretty-print) so a large HAR does not inflate to
+  // 2-3x its size as one resident string before the atomic write.
+  await writeTextFileAtomically(absolutePath, JSON.stringify(har), {
     allowedRoots,
   });
   return absolutePath;

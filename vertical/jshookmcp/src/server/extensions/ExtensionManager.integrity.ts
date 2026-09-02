@@ -4,6 +4,7 @@
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import type { ExtensionBuilder } from '@server/plugins/PluginContract';
+import { readEnvBoolean, readEnvString } from '@src/config/environment';
 import { isCompatibleVersion } from './ExtensionManager.version';
 
 export async function sha256Hex(filePath: string): Promise<string> {
@@ -15,24 +16,14 @@ export function normalizeHex(value: string): string {
   return value.trim().toLowerCase().replace(/^0x/, '');
 }
 
-function isTruthyEnv(value: string): boolean {
-  return ['1', 'true'].includes(value.toLowerCase());
-}
-
 export function isPluginSignatureRequired(): boolean {
-  const raw = process.env.MCP_PLUGIN_SIGNATURE_REQUIRED;
-  if (raw === undefined || raw.trim() === '') {
-    return process.env.NODE_ENV === 'production';
-  }
-  return isTruthyEnv(raw);
+  const productionDefault = readEnvString('NODE_ENV', '', { trim: true }) === 'production';
+  return readEnvBoolean('MCP_PLUGIN_SIGNATURE_REQUIRED', productionDefault);
 }
 
 export function isPluginStrictLoad(): boolean {
-  const raw = process.env.MCP_PLUGIN_STRICT_LOAD;
-  if (raw === undefined || raw.trim() === '') {
-    return isPluginSignatureRequired();
-  }
-  return isTruthyEnv(raw) || isPluginSignatureRequired();
+  const signatureRequired = isPluginSignatureRequired();
+  return readEnvBoolean('MCP_PLUGIN_STRICT_LOAD', signatureRequired) || signatureRequired;
 }
 
 export function parseDigestAllowlist(raw: string | undefined): Set<string> {

@@ -156,4 +156,17 @@ describe('ProcessVmIo', () => {
     expect(() => readRemote(1, 0x1000n, 16)).toThrow('ESRCH');
     expect(() => readRemote(1, 0x1000n, 16)).toThrow('EPERM');
   });
+
+  it('readRemote throws on a short read instead of returning garbage tail bytes', () => {
+    // Arrange — the remote region is only 4 bytes mapped of the 16 requested.
+    const pid = 4242;
+    const remoteAddr = 0x7fffdeadbeefn;
+    const size = 16;
+    const fill = Buffer.from([0xaa, 0xbb, 0xcc, 0xdd]);
+    mockState.readvFill = fill;
+    mockState.readvReturn = BigInt(fill.length);
+
+    // Act / Assert — a partial copy must not silently pass as a full read.
+    expect(() => readRemote(pid, remoteAddr, size)).toThrow(/short read: 4\/16 bytes/);
+  });
 });

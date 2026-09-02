@@ -61,12 +61,6 @@ vi.mock('@server/registry/ensure-browser-core', () => ({
   }),
 }));
 
-vi.mock('@services/LLMService', () => ({
-  LLMService: function () {
-    return { _mock: 'LLMService' };
-  },
-}));
-
 // Handler class mocks — each returns a unique instance
 vi.mock('@server/domains/analysis/index', () => ({
   CoreAnalysisHandlers: function () {

@@ -2,6 +2,7 @@ import type { CDPSession, Page } from 'rebrowser-puppeteer-core';
 import type { CodeCollector } from '@modules/collector/CodeCollector';
 import { logger } from '@utils/logger';
 import { CDP_SESSION_TIMEOUT_MS } from '@src/constants';
+import { createCDPSessionWithTimeout } from '@modules/monitor/cdp-utils';
 import type {
   PerformanceMetrics,
   PerformanceTimelineEntry,
@@ -19,6 +20,10 @@ import {
 import { startTracing, stopTracing } from './PerformanceMonitor.tracing';
 import { takeHeapSnapshot } from './PerformanceMonitor.snapshot';
 
+// Per-step cap for close() cleanup so a hung CDP call (e.g. on a zombie
+// session) cannot block shutdown of the remaining collectors or the detach.
+const CLEANUP_STEP_TIMEOUT_MS = 5_000;
+
 async function PING(cdp: CDPSession): Promise<void> {
   await Promise.race([
     cdp.send('Runtime.evaluate', { expression: '1', returnByValue: true }),
@@ -29,6 +34,7 @@ async function PING(cdp: CDPSession): Promise<void> {
 }
 
 export class PerformanceMonitor {
+  private collector: CodeCollector;
   private cdpSession: CDPSession | null = null;
   private coverageEnabled = false;
   private profilerEnabled = false;
@@ -37,18 +43,14 @@ export class PerformanceMonitor {
   private coveragePage: Page | null = null;
   private tracingPage: Page | null = null;
 
-  constructor(private collector: CodeCollector) {}
+  constructor(collector: CodeCollector) {
+    this.collector = collector;
+  }
 
   private async ensureCDPSession(): Promise<CDPSession> {
     if (!this.cdpSession) {
       const page = await this.collector.getActivePage();
-      // Wrap session creation so a hanging createCDPSession() cannot block.
-      this.cdpSession = await Promise.race([
-        page.createCDPSession() as Promise<CDPSession>,
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('cdp_session_timeout')), CDP_SESSION_TIMEOUT_MS),
-        ),
-      ]);
+      this.cdpSession = await createCDPSessionWithTimeout(page);
       return this.cdpSession;
     }
 
@@ -69,12 +71,7 @@ export class PerformanceMonitor {
       }
       this.cdpSession = null;
       const page = await this.collector.getActivePage();
-      this.cdpSession = await Promise.race([
-        page.createCDPSession() as Promise<CDPSession>,
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('cdp_session_timeout')), CDP_SESSION_TIMEOUT_MS),
-        ),
-      ]);
+      this.cdpSession = await createCDPSessionWithTimeout(page);
       return this.cdpSession;
     }
   }
@@ -83,14 +80,17 @@ export class PerformanceMonitor {
     return getPerformanceMetrics(this.collector);
   }
 
-  async getPerformanceTimeline(): Promise<PerformanceTimelineEntry[]> {
-    return getPerformanceTimeline(this.collector);
+  async getPerformanceTimeline(maxEntries = 500): Promise<PerformanceTimelineEntry[]> {
+    return getPerformanceTimeline(this.collector, maxEntries);
   }
 
   async startCoverage(options?: {
     resetOnNavigation?: boolean;
     reportAnonymousScripts?: boolean;
   }): Promise<void> {
+    if (this.coverageEnabled) {
+      throw new Error('Coverage already in progress');
+    }
     const result = await startCoverage(this.collector, options);
     this.coverageEnabled = result.coverageEnabled;
     this.coveragePage = result.coveragePage;
@@ -103,17 +103,25 @@ export class PerformanceMonitor {
     return result;
   }
 
-  async startCPUProfiling(): Promise<void> {
+  async startCPUProfiling(options?: { samplingInterval?: number }): Promise<void> {
+    if (this.profilerEnabled) {
+      throw new Error('CPU profiling already in progress');
+    }
     const cdp = await this.ensureCDPSession();
-    const result = await startCPUProfiling(cdp);
+    const result = await startCPUProfiling(cdp, options);
     this.profilerEnabled = result.profilerEnabled;
   }
 
   async stopCPUProfiling(): Promise<CPUProfile> {
-    const cdp = await this.ensureCDPSession();
-    const result = await stopCPUProfiling(cdp, this.profilerEnabled);
-    this.profilerEnabled = false;
-    return result;
+    try {
+      const cdp = await this.ensureCDPSession();
+      return await stopCPUProfiling(cdp, this.profilerEnabled);
+    } finally {
+      // Always reset state — a failed Profiler.stop must not leave
+      // profilerEnabled=true forever, which would leak state and reject all
+      // future startCPUProfiling calls.
+      this.profilerEnabled = false;
+    }
   }
 
   async takeHeapSnapshot(): Promise<number> {
@@ -122,26 +130,36 @@ export class PerformanceMonitor {
   }
 
   async startTracing(options?: { categories?: string[]; screenshots?: boolean }): Promise<void> {
+    if (this.tracingEnabled) {
+      throw new Error('Tracing already in progress');
+    }
     const result = await startTracing(this.collector, this.tracingEnabled, options);
     this.tracingEnabled = result.tracingEnabled;
     this.tracingPage = result.tracingPage;
   }
 
-  async stopTracing(options?: {
+  async stopTracing(options?: { artifactPath?: string; maxSizeMB?: number }): Promise<{
     artifactPath?: string;
-  }): Promise<{ artifactPath?: string; eventCount: number; sizeBytes: number }> {
-    const result = await stopTracing(
-      this.collector,
-      this.tracingPage,
-      this.tracingEnabled,
-      options,
-    );
-    this.tracingEnabled = false;
-    this.tracingPage = null;
-    return result;
+    eventCount: number;
+    sizeBytes: number;
+    truncated?: boolean;
+    originalSizeBytes?: number;
+  }> {
+    try {
+      return await stopTracing(this.collector, this.tracingPage, this.tracingEnabled, options);
+    } finally {
+      // Always reset state — a failed stop (e.g. page.tracing.stop() rejecting)
+      // must not leave tracingEnabled=true forever, which would deadlock all
+      // future startTracing calls with "already in progress".
+      this.tracingEnabled = false;
+      this.tracingPage = null;
+    }
   }
 
   async startHeapSampling(options?: { samplingInterval?: number }): Promise<void> {
+    if (this.heapSamplingEnabled) {
+      throw new Error('Heap sampling already in progress');
+    }
     const cdp = await this.ensureCDPSession();
     const result = await startHeapSampling(cdp, this.heapSamplingEnabled, options);
     this.heapSamplingEnabled = result.heapSamplingEnabled;
@@ -152,27 +170,41 @@ export class PerformanceMonitor {
     sampleCount: number;
     topAllocations: Array<{ functionName: string; url: string; selfSize: number }>;
   }> {
-    const cdp = await this.ensureCDPSession();
-    const result = await stopHeapSampling(cdp, this.heapSamplingEnabled, options);
-    this.heapSamplingEnabled = false;
-    return result;
+    try {
+      const cdp = await this.ensureCDPSession();
+      const result = await stopHeapSampling(cdp, this.heapSamplingEnabled, options);
+      return result;
+    } finally {
+      this.heapSamplingEnabled = false;
+    }
   }
 
   async close(): Promise<void> {
     if (this.cdpSession) {
-      if (this.coverageEnabled) {
-        await this.stopCoverage().catch(() => {});
+      // LIFO cleanup — stop in reverse acquisition order (detach last, as the
+      // features depend on the session). Each step is capped by a timeout so a
+      // hung CDP call cannot block the remaining steps; failures are logged,
+      // not swallowed.
+      const steps: Array<[boolean, string, () => Promise<unknown>]> = [
+        [this.heapSamplingEnabled, 'Stop heap sampling', () => this.stopHeapSampling()],
+        [this.tracingEnabled, 'Stop tracing', () => this.stopTracing()],
+        [this.profilerEnabled, 'Stop CPU profiling', () => this.stopCPUProfiling()],
+        [this.coverageEnabled, 'Stop coverage', () => this.stopCoverage()],
+      ];
+      for (const [enabled, label, stop] of steps) {
+        if (!enabled) continue;
+        try {
+          await Promise.race([
+            stop(),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error(`${label} timed out`)), CLEANUP_STEP_TIMEOUT_MS),
+            ),
+          ]);
+        } catch (err) {
+          logger.warn(`${label} failed:`, err);
+        }
       }
-      if (this.profilerEnabled) {
-        await this.stopCPUProfiling().catch(() => {});
-      }
-      if (this.tracingEnabled) {
-        await this.stopTracing().catch(() => {});
-      }
-      if (this.heapSamplingEnabled) {
-        await this.stopHeapSampling().catch(() => {});
-      }
-      await this.cdpSession.detach();
+      await this.cdpSession.detach().catch((err) => logger.warn('Detach CDP session failed:', err));
       this.cdpSession = null;
     }
     logger.info('PerformanceMonitor closed');

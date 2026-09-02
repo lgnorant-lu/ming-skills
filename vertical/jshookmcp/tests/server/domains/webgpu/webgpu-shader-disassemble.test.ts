@@ -78,7 +78,34 @@ describe('webgpu_shader_disassemble', () => {
         // Direct result
         expect(result).toHaveProperty('ast');
         expect(result).toHaveProperty('disassembly');
+        expect(result.costEstimate).toMatchObject({
+          basis: 'wgsl-estimate',
+          textureSamples: 0,
+        });
+        expect(typeof result.costEstimate.costScore).toBe('number');
       }
+    }
+  });
+
+  it('should include texture sample counts in the WGSL costEstimate', async () => {
+    const shader = `
+      @fragment
+      fn fs(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+        let t = textureSample(tex, samp, uv) + textureSampleLevel(tex, samp, uv, 0.0);
+        return t;
+      }
+    `;
+
+    const response = await handlers.webgpu_shader_disassemble({
+      shaderCode: shader,
+      format: 'wgsl',
+    });
+    const result = ResponseBuilder.parse(response);
+
+    if (result.success === true) {
+      const cost = result.summary?.costEstimate ?? result.costEstimate;
+      expect(cost.textureSamples).toBe(2);
+      expect(cost.basis).toBe('wgsl-estimate');
     }
   });
 
@@ -165,6 +192,22 @@ describe('webgpu_shader_disassemble', () => {
       expect(result.disassembly).toContain('SPIR-V');
       expect(result.disassembly).toContain('vs_main');
       expect(result.disassembly).toContain('Entry Points');
+    });
+
+    it('should include a costEstimate for SPIR-V', async () => {
+      const response = await handlers.webgpu_shader_disassemble({
+        shaderCode: minimalSpirvHex(),
+        format: 'spirv',
+      });
+      const result = ResponseBuilder.parse(response);
+
+      expect(result.success).toBe(true);
+      expect(result.costEstimate).toMatchObject({
+        basis: 'spirv-opcode',
+        totalInstructions: 1,
+        textureSamples: 0,
+      });
+      expect(typeof result.costEstimate.costScore).toBe('number');
     });
 
     it('should reject invalid SPIR-V input', async () => {

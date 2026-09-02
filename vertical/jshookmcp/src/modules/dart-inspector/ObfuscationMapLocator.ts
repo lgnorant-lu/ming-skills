@@ -20,11 +20,16 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Readable } from 'node:stream';
 import { ToolError } from '@errors/ToolError';
+import {
+  DART_MAX_MAP_BYTES,
+  DART_OBFUSCATION_MAP_MAX_DIR_DEPTH,
+  DART_OBFUSCATION_MAP_MAX_CANDIDATES,
+} from '@src/constants';
 
 /** Guard against a zip bomb / pathological tree. */
-const MAX_MAP_BYTES = 16 * 1024 * 1024;
-const MAX_DIR_DEPTH = 5;
-const MAX_CANDIDATES = 20;
+const MAX_MAP_BYTES = DART_MAX_MAP_BYTES;
+const MAX_DIR_DEPTH = DART_OBFUSCATION_MAP_MAX_DIR_DEPTH;
+const MAX_CANDIDATES = DART_OBFUSCATION_MAP_MAX_CANDIDATES;
 
 export interface LocateResult {
   /** Usable path (extracted temp file for APK hits; source file for dir hits). */

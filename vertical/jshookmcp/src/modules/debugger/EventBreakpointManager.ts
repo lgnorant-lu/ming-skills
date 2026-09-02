@@ -11,6 +11,7 @@ export interface EventBreakpoint {
 }
 
 export class EventBreakpointManager {
+  private cdpSession: CDPSession;
   private eventBreakpoints: Map<string, EventBreakpoint> = new Map();
   private breakpointCounter = 0;
 
@@ -27,7 +28,8 @@ export class EventBreakpointManager {
   static readonly TIMER_EVENTS = ['setTimeout', 'setInterval', 'requestAnimationFrame'];
   static readonly WEBSOCKET_EVENTS = ['message', 'open', 'close', 'error'];
 
-  constructor(private cdpSession: CDPSession) {
+  constructor(cdpSession: CDPSession) {
+    this.cdpSession = cdpSession;
     logger.info('EventBreakpointManager initialized with shared CDP session');
   }
 

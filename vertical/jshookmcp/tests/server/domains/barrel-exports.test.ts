@@ -144,7 +144,6 @@ vi.mock('@utils/UnifiedCacheManager', () => ({
 }));
 vi.mock('@utils/artifactRetention', () => ({ cleanupArtifacts: vi.fn() }));
 vi.mock('@utils/environmentDoctor', () => ({ runEnvironmentDoctor: vi.fn() }));
-vi.mock('@services/LLMService', () => ({ LLMService: vi.fn().mockImplementation(() => ({})) }));
 vi.mock('@utils/DetailedDataManager', () => ({
   DetailedDataManager: vi.fn().mockImplementation(() => ({})),
 }));
@@ -249,9 +248,7 @@ vi.mock('@server/domains/encoding/handlers.impl.core.runtime', () => ({
 vi.mock('@server/domains/graphql/handlers.impl.core.runtime', () => ({
   GraphQLToolHandlers: vi.fn().mockImplementation(() => ({})),
 }));
-vi.mock('@server/domains/network/handlers.impl.core.runtime', () => ({
-  AdvancedToolHandlers: vi.fn().mockImplementation(() => ({})),
-}));
+// network handlers.impl.core.runtime deleted (dead code cleanup 2026-08-09)
 vi.mock('@server/domains/process/handlers.impl.core.runtime', () => ({
   ProcessToolHandlers: vi.fn().mockImplementation(() => ({})),
 }));

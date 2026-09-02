@@ -1,6 +1,7 @@
 import { logger } from '@utils/logger';
 import type { TabRegistry } from '@modules/browser/TabRegistry';
 import { R, type ToolResponse } from '@server/domains/shared/ResponseBuilder';
+import { validateCodeSafety } from '@server/domains/browser/handlers/safe-code-transform';
 
 interface TabPageLike {
   goto(url: string, options?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
@@ -113,7 +114,10 @@ function readTimeout(value: unknown, fallback: number): number {
 }
 
 export class TabWorkflowHandlers {
-  constructor(private deps: TabWorkflowDeps) {}
+  private deps: TabWorkflowDeps;
+  constructor(deps: TabWorkflowDeps) {
+    this.deps = deps;
+  }
 
   private get registry(): TabRegistry {
     return this.deps.getTabRegistry();
@@ -316,6 +320,15 @@ export class TabWorkflowHandlers {
     if (!fromAlias) return R.fail('fromAlias is required').build();
     if (!key) return R.fail('key is required').build();
     if (!expression) return R.fail('expression is required').build();
+
+    // Input validation gate: reject Node-API patterns before they reach
+    // page.evaluate() (same safety check as page_evaluate).
+    const validation = validateCodeSafety(expression);
+    if (!validation.safe) {
+      return R.fail(
+        validation.reason ?? 'expression contains potentially dangerous pattern',
+      ).build();
+    }
 
     const page = await this.getPageByAlias(fromAlias);
     if (!page) return R.fail(`No tab found for alias "${fromAlias}"`).build();

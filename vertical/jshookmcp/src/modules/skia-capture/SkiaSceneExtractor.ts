@@ -5,6 +5,25 @@ import type {
   SkiaSceneTree as LegacySkiaSceneTree,
 } from './types';
 
+// ── Scene extraction limits ────────────────────────────────────────────────────
+
+/** Maximum DOM children expanded per scene node (guards deep DOM trees). */
+const MAX_SCENE_CHILD_NODES = 12;
+/** Maximum sibling nodes attached to the root canvas node. */
+const MAX_SCENE_SIBLING_NODES = 8;
+
+// ── Renderer-detection confidence weights ──────────────────────────────────────
+// Accumulated evidence weights; final confidence is clamped to ≤ 1.
+
+/** Baseline confidence when no probe evidence is present. */
+const BASE_SKIA_CONFIDENCE = 0.1;
+/** Weight added when a WebGL probe reports a Skia backend. */
+const WEBGL_PROBE_CONFIDENCE_WEIGHT = 0.5;
+/** Weight added when a known Skia-adjacent engine is detected. */
+const ENGINE_PROBE_CONFIDENCE_WEIGHT = 0.3;
+/** Weight added when font-bounding-box signatures are present. */
+const FONT_PROBE_CONFIDENCE_WEIGHT = 0.1;
+
 export interface Rect {
   x: number;
   y: number;
@@ -196,7 +215,7 @@ function elementVisible(element: Element): boolean | undefined {
 
 function sceneNodeFromElement(element: Element, fallbackId: string): SceneNode {
   const children = Array.from(element.children)
-    .slice(0, 12)
+    .slice(0, MAX_SCENE_CHILD_NODES)
     .map((child, index) => sceneNodeFromElement(child, `${fallbackId}-${index}`));
 
   return {
@@ -457,15 +476,15 @@ function buildLegacyRendererFromProbes(
     engineProbe.isSkiaEngine ||
     fontProbe.hasSkiaFontSignatures;
 
-  let confidence = 0.1;
+  let confidence = BASE_SKIA_CONFIDENCE;
   if (webglResults.some((probe) => probe.hasSkiaBackend)) {
-    confidence += 0.5;
+    confidence += WEBGL_PROBE_CONFIDENCE_WEIGHT;
   }
   if (engineProbe.isSkiaEngine) {
-    confidence += 0.3;
+    confidence += ENGINE_PROBE_CONFIDENCE_WEIGHT;
   }
   if (fontProbe.hasSkiaFontSignatures) {
-    confidence += 0.1;
+    confidence += FONT_PROBE_CONFIDENCE_WEIGHT;
   }
 
   const gpuBackend = isSkiaBacked ? legacyGpuBackend(rendererStrings) : 'software';
@@ -560,7 +579,7 @@ export class SkiaSceneExtractor {
     if (selected.parentElement) {
       const siblingNodes = Array.from(selected.parentElement.children)
         .filter((child) => child !== selected)
-        .slice(0, 8)
+        .slice(0, MAX_SCENE_SIBLING_NODES)
         .map((child, index) => sceneNodeFromElement(child, `skia-sibling-${index}`));
       root.children.push(...siblingNodes);
     }
@@ -580,7 +599,29 @@ export async function detectSkiaRenderer(
 ): Promise<LegacySkiaRendererInfo> {
   if (hasEvaluate(pageController)) {
     const webglResults = await pageController.evaluate<LegacyWebGlProbe[]>(
-      `(() => { /* UNMASKED_RENDERER_WEBGL ${canvasId ?? ''} */ return []; })()`,
+      `(() => {
+        /* UNMASKED_RENDERER_WEBGL probe ${canvasId ?? ''} */
+        const target = ${
+          canvasId
+            ? `(function () { try { return document.querySelector(${JSON.stringify(canvasId)}); } catch (err) { return null; } })()`
+            : 'null'
+        };
+        const canvas = target && typeof target.getContext === 'function' ? target : document.createElement('canvas');
+        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+        if (!gl) { return []; }
+        const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+        const renderer = String(gl.getParameter(gl.RENDERER) || '');
+        const vendor = String(gl.getParameter(gl.VENDOR) || '');
+        const unmaskedRenderer = debugInfo ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || '') : renderer;
+        const unmaskedVendor = debugInfo ? String(gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) || '') : vendor;
+        const joined = (renderer + ' ' + unmaskedRenderer).toLowerCase();
+        const hasSkiaBackend = joined.includes('swiftshader') || joined.includes('skia') ||
+          joined.includes('angle') || joined.includes('mesa') || joined.includes('vulkan') ||
+          joined.includes('metal');
+        const backend = joined.includes('swiftshader') ? 'swiftshader' :
+          joined.includes('angle') ? 'angle' : renderer ? 'native' : 'unknown';
+        return [{ vendor, renderer, unmaskedRenderer, unmaskedVendor, hasSkiaBackend, backend }];
+      })()`,
     );
     const fontProbe = await pageController.evaluate<LegacyFontProbe>(
       '(() => { /* fontBoundingBoxAscent */ return { hasSkiaFontSignatures: false, textMetrics: null }; })()',
@@ -604,7 +645,14 @@ export async function extractSceneTree(
       `(() => { /* drawCommands canvasMeta ${canvasId ?? ''} */ return { canvas: {}, layers: [], drawCommands: [] }; ` +
         `})()`,
     );
-    return normalizeLegacyScene(scene);
+    const normalized = normalizeLegacyScene(scene);
+    // The browser-page probe cannot actually extract a Skia scene graph (it is
+    // a stub), so an empty result means "unsupported" for the active engine —
+    // not a legitimately empty scene. Flag it so callers error honestly.
+    if (normalized.layers.length === 0 && normalized.drawCommands.length === 0) {
+      return { ...normalized, unsupported: true };
+    }
+    return normalized;
   }
 
   return modernSceneToLegacyScene(new SkiaSceneExtractor().extractSceneTree(canvasId));

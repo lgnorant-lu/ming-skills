@@ -1,4 +1,4 @@
-export { MojoMonitor, deriveDirectionFromPayload } from './MojoMonitor';
+export { MojoMonitor, deriveDirectionFromPayload, MOJO_MAX_MESSAGES } from './MojoMonitor';
 export type {
   MojoMessage,
   MojoMessageFilter,

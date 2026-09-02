@@ -54,6 +54,7 @@ import { AdvancedToolHandlers } from '@server/domains/network/handlers';
 import { TEST_HOSTS } from '@tests/shared/test-urls';
 
 class MockPlainSocket extends EventEmitter {
+  private readonly responseBuffer: Buffer;
   public readonly end = vi.fn((data?: string | Buffer) => {
     this.written = Buffer.isBuffer(data) ? data : Buffer.from(data ?? '', 'utf8');
     queueMicrotask(() => {
@@ -68,8 +69,9 @@ class MockPlainSocket extends EventEmitter {
 
   public written: Buffer = Buffer.alloc(0);
 
-  constructor(private readonly responseBuffer: Buffer) {
+  constructor(responseBuffer: Buffer) {
     super();
+    this.responseBuffer = responseBuffer;
   }
 }
 

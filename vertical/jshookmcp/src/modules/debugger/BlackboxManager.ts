@@ -2,6 +2,7 @@ import type { CDPSession } from 'rebrowser-puppeteer-core';
 import { logger } from '@utils/logger';
 
 export class BlackboxManager {
+  private cdpSession: CDPSession;
   private blackboxedPatterns: Set<string> = new Set();
 
   static readonly COMMON_LIBRARY_PATTERNS = [
@@ -20,7 +21,8 @@ export class BlackboxManager {
     '*vendor*.js',
   ];
 
-  constructor(private cdpSession: CDPSession) {
+  constructor(cdpSession: CDPSession) {
+    this.cdpSession = cdpSession;
     logger.info('BlackboxManager initialized with shared CDP session');
   }
 
@@ -85,6 +87,7 @@ export class BlackboxManager {
   }
 
   async blackboxCommonLibraries(): Promise<void> {
+    const previous = new Set(this.blackboxedPatterns);
     for (const pattern of BlackboxManager.COMMON_LIBRARY_PATTERNS) {
       this.blackboxedPatterns.add(this.normalizePattern(pattern));
     }
@@ -99,6 +102,7 @@ export class BlackboxManager {
       );
     } catch (error) {
       logger.error('Failed to blackbox common libraries:', error);
+      this.blackboxedPatterns = previous;
       throw error;
     }
   }
@@ -132,6 +136,7 @@ export class BlackboxManager {
   }
 
   async clearAllBlackboxedPatterns(): Promise<void> {
+    const previous = new Set(this.blackboxedPatterns);
     this.blackboxedPatterns.clear();
 
     try {
@@ -142,6 +147,7 @@ export class BlackboxManager {
       logger.info('All blackbox patterns cleared');
     } catch (error) {
       logger.error('Failed to clear blackbox patterns:', error);
+      this.blackboxedPatterns = previous;
       throw error;
     }
   }

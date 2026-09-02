@@ -11,11 +11,15 @@
  * Java-mock registration is declarative (a constant int/string/bytes) — no
  * caller-supplied code is ever evaluated.
  */
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 
-import { SessionManager, type EmulatorSession } from '@modules/native-emulator/SessionManager';
+import {
+  SessionManager,
+  type EmulatorSession,
+  type SessionManagerOptions,
+} from '@modules/native-emulator/SessionManager';
 import type { BionicOptions } from '@modules/native-emulator/bionic';
-import { extractArm64Libs } from '@modules/native-emulator/apk';
+import { extractArm64LibsDetailed } from '@modules/native-emulator/apk';
 import { inspectElfImports } from '@modules/native-emulator/import-inspector';
 import { dumpGot } from '@modules/native-emulator/got-inspector';
 import { UnsupportedOpcodeError } from '@modules/native-emulator/CpuEngine';
@@ -37,15 +41,101 @@ import {
 } from '@server/domains/shared/parse-args';
 import type { ToolArgs, ToolResponse } from '@server/types';
 import { getReverseEngineeringConfig } from '@utils/reverseEngineeringConfig';
+import {
+  NEMU_APK_MAX_TOTAL_SO_BYTES,
+  NEMU_CALL_MAX_STEPS,
+  NEMU_PROFILE_MAX_STEPS,
+  NEMU_MAX_SO_BYTES,
+  NEMU_VFS_MAX_FILE_BYTES,
+  NEMU_VFS_MAX_TOTAL_BYTES,
+} from '@src/constants';
 import { nativeCallFailure, nativeDiagnostics } from './handler-call';
 import { formatOpcodeInput, parseOpcodeInput, parseProgramCounter } from './handler-disasm';
 import { buildJavaFieldValue, buildJavaMockImpl } from './handler-java';
+import { decodeLiteVmWord, LITEVM_KNOWN_DATA } from './handler-litevm';
 import { ensureRawMemorySize, rawMemoryLimit, toUint8 } from './handler-memory';
-import { persistTraceArtifact, traceFilterMatch, traceRow, type TraceMode } from './handler-trace';
+import {
+  createTraceRowContext,
+  persistTraceArtifact,
+  traceFilterMatch,
+  traceRow,
+  type TraceMode,
+} from './handler-trace';
+import {
+  getOrCreateGdbServer,
+  removeGdbServer,
+  getGdbServer,
+  listGdbServers,
+} from '@native/GdbRspServer';
 
 /** Cap on instruction-trace events returned, regardless of requested maxSteps. */
 const TRACE_HARD_CAP = 100_000;
 const DISASM_ARCHITECTURES = new Set(SUPPORTED_DISASSEMBLY_ARCHITECTURES);
+
+/**
+ * Clamp a caller-supplied native-call step budget to the server ceiling
+ * (`NEMU_CALL_MAX_STEPS`). Values at or under the ceiling pass through
+ * untouched; oversized values are capped and flagged so the response can carry
+ * a `clamped: true` marker. `0` and negative values would otherwise reach the
+ * engine as an unbounded "no limit" (freezing the server on an infinite loop),
+ * so they are clamped to the ceiling too — there is no unlimited escape hatch.
+ */
+function clampNativeMaxSteps(raw: number | undefined): {
+  maxSteps: number | undefined;
+  clamped: boolean;
+} {
+  if (raw === undefined) return { maxSteps: undefined, clamped: false };
+  if (raw <= 0 || raw > NEMU_CALL_MAX_STEPS) {
+    return { maxSteps: NEMU_CALL_MAX_STEPS, clamped: true };
+  }
+  return { maxSteps: raw, clamped: false };
+}
+
+/**
+ * Stat a `.so` path and reject when its on-disk size exceeds `cap`, returning
+ * the size. Sizing happens before any `readFile`, so an oversized library is
+ * refused without first buffering it into memory (a malicious path can point at
+ * an arbitrarily large file).
+ */
+async function ensureSoWithinCap(path: string, cap: number): Promise<number> {
+  const info = await stat(path);
+  if (info.size > cap) {
+    throw new Error(`.so file "${path}" is ${info.size} bytes, which exceeds the ${cap}-byte cap`);
+  }
+  return info.size;
+}
+
+/** One node of the profile-mode call tree (BL/BLR targets aggregated). */
+interface ProfileCallNode {
+  address: string;
+  count: number;
+  symbolName?: string;
+  callees: ProfileCallNode[];
+}
+
+/**
+ * SessionManager subclass wired to handler-level cleanup: whenever a session
+ * is released — explicit destroy, idle-TTL sweep, or dispose — the handler is
+ * notified so per-session state (register snapshots, GDB RSP server) is
+ * dropped along with the emulator instead of leaking past its lifetime.
+ */
+class ReleaseNotifyingSessionManager extends SessionManager {
+  private readonly onRelease: (sessionId: string) => void;
+  constructor(onRelease: (sessionId: string) => void, options?: SessionManagerOptions) {
+    super(options);
+    this.onRelease = onRelease;
+  }
+
+  protected override release(session: EmulatorSession): void {
+    try {
+      this.onRelease(session.id);
+    } catch {
+      // A faulty cleanup must not break session teardown — the sweep runs on
+      // an unref'd timer, so an uncaught throw would crash the whole process.
+    }
+    super.release(session);
+  }
+}
 
 export class NativeEmulatorHandlers {
   private readonly sessions: SessionManager;
@@ -53,7 +143,9 @@ export class NativeEmulatorHandlers {
   private readonly regSnapshots = new Map<string, Map<string, Record<string, bigint>>>();
 
   constructor(sessions?: SessionManager) {
-    this.sessions = sessions ?? new SessionManager();
+    this.sessions =
+      sessions ??
+      new ReleaseNotifyingSessionManager((sessionId) => this.cleanupSessionResources(sessionId));
   }
 
   handleCapabilities(_args: ToolArgs): Promise<ToolResponse> {
@@ -148,6 +240,10 @@ export class NativeEmulatorHandlers {
   handleDestroySession(args: ToolArgs): Promise<ToolResponse> {
     return handleSafe(async () => {
       const sessionId = argStringRequired(args, 'sessionId');
+      // Drop handler-owned per-session state (register snapshots, GDB RSP
+      // server) before the emulator itself — the GDB server is stopped even
+      // when the session id is unknown, clearing orphaned registry entries.
+      this.cleanupSessionResources(sessionId);
       const destroyed = this.sessions.destroySession(sessionId);
       return {
         sessionId,
@@ -184,8 +280,9 @@ export class NativeEmulatorHandlers {
     return handleSafe(async () => {
       const session = this.requireSession(args);
       const soPath = argStringRequired(args, 'soPath');
-      const bytes = await readFile(soPath);
-      const loaded = session.emulator.loadLibrary(toUint8(bytes));
+      await ensureSoWithinCap(soPath, NEMU_MAX_SO_BYTES);
+      const bytes = toUint8(await readFile(soPath));
+      const loaded = session.emulator.loadLibrary(bytes);
       return {
         sessionId: session.id,
         soPath,
@@ -207,12 +304,24 @@ export class NativeEmulatorHandlers {
         throw new Error('dependencyPaths must contain at least one dependency .so path');
       }
 
-      // Read all dependency bytes
-      const depBytes: Uint8Array[] = [];
+      // Size-check every file before reading: each dependency must fit within
+      // the per-file cap, and their summed size must stay within the same
+      // budget so a chain of many .so files cannot exhaust memory.
+      let totalDependencyBytes = 0;
       for (const depPath of dependencyPaths) {
-        const bytes = await readFile(depPath);
-        depBytes.push(toUint8(bytes));
+        totalDependencyBytes += await ensureSoWithinCap(depPath, NEMU_MAX_SO_BYTES);
+        if (totalDependencyBytes > NEMU_MAX_SO_BYTES) {
+          throw new Error(
+            `dependency .so chain total ${totalDependencyBytes} bytes exceeds the ${NEMU_MAX_SO_BYTES}-byte cap`,
+          );
+        }
       }
+      await ensureSoWithinCap(primaryPath, NEMU_MAX_SO_BYTES);
+
+      // Read all dependency bytes
+      const depBytes = await Promise.all(
+        dependencyPaths.map(async (depPath) => toUint8(await readFile(depPath))),
+      );
 
       // Read primary bytes
       const primaryBytes = toUint8(await readFile(primaryPath));
@@ -235,12 +344,14 @@ export class NativeEmulatorHandlers {
   handleExtractApkLibs(args: ToolArgs): Promise<ToolResponse> {
     return handleSafe(async () => {
       const apkPath = argStringRequired(args, 'apkPath');
-      const libs = await extractArm64Libs(apkPath);
+      const { libs, truncated, totalBytes } = await extractArm64LibsDetailed(apkPath);
       return {
         apkPath,
         abi: 'arm64-v8a',
         libs: libs.map((l) => ({ name: l.name, bytes: l.bytes.length })),
         count: libs.length,
+        truncated,
+        totalBytes,
       };
     });
   }
@@ -825,7 +936,12 @@ export class NativeEmulatorHandlers {
       const session = this.requireSession(args);
       const apkPath = argStringRequired(args, 'apkPath');
       const libName = argStringRequired(args, 'libName');
-      const libs = await extractArm64Libs(apkPath);
+      const { libs, truncated, totalBytes } = await extractArm64LibsDetailed(apkPath);
+      if (truncated) {
+        throw new Error(
+          `APK extraction truncated at ${Math.round(NEMU_APK_MAX_TOTAL_SO_BYTES / (1024 * 1024))} MB cap (${totalBytes} bytes read, ${libs.length} lib(s) returned) — library "${libName}" may be incomplete or missing; re-extract with a higher cap`,
+        );
+      }
       const lib = libs.find((l) => l.name === libName);
       if (!lib) {
         throw new Error(
@@ -854,28 +970,39 @@ export class NativeEmulatorHandlers {
   }
 
   handleCallSymbol(args: ToolArgs): Promise<ToolResponse> {
-    return this.handleNativeCall(args, 'call_symbol', (session, symbol) => {
-      const callArgs = argNumberArray(args, 'args');
-      const injectJni = argBool(args, 'injectJni'); // undefined → auto-detect
-      const maxSteps = argNumber(args, 'maxSteps');
-      const initRegsRaw = args.initRegisters as Record<string, number> | undefined;
-      const initRegs = initRegsRaw
-        ? Object.fromEntries(Object.entries(initRegsRaw).map(([k, v]) => [Number(k), BigInt(v)]))
-        : undefined;
-      return session.emulator.call(symbol, callArgs, {
-        injectJni,
-        initRegisters: initRegs,
-        maxSteps,
-      });
-    });
+    const { maxSteps, clamped } = clampNativeMaxSteps(argNumber(args, 'maxSteps'));
+    return this.handleNativeCall(
+      args,
+      'call_symbol',
+      (session, symbol) => {
+        const callArgs = argNumberArray(args, 'args');
+        const injectJni = argBool(args, 'injectJni'); // undefined → auto-detect
+        const initRegsRaw = args.initRegisters as Record<string, number> | undefined;
+        const initRegs = initRegsRaw
+          ? Object.fromEntries(Object.entries(initRegsRaw).map(([k, v]) => [Number(k), BigInt(v)]))
+          : undefined;
+        return session.emulator.call(symbol, callArgs, {
+          injectJni,
+          initRegisters: initRegs,
+          maxSteps,
+        });
+      },
+      clamped,
+    );
   }
 
   handleCallJniExport(args: ToolArgs): Promise<ToolResponse> {
-    return this.handleNativeCall(args, 'call_jni_export', (session, symbol) => {
-      const javaArgs = argNumberArray(args, 'javaArgs');
-      const thiz = argNumber(args, 'thiz', 0);
-      return session.emulator.callJniExport(symbol, javaArgs, thiz);
-    });
+    const { maxSteps, clamped } = clampNativeMaxSteps(argNumber(args, 'maxSteps'));
+    return this.handleNativeCall(
+      args,
+      'call_jni_export',
+      (session, symbol) => {
+        const javaArgs = argNumberArray(args, 'javaArgs');
+        const thiz = argNumber(args, 'thiz', 0);
+        return session.emulator.callJniExport(symbol, javaArgs, thiz, undefined, maxSteps);
+      },
+      clamped,
+    );
   }
 
   handleCallAddress(args: ToolArgs): Promise<ToolResponse> {
@@ -885,14 +1012,19 @@ export class NativeEmulatorHandlers {
       if (address === undefined) throw new Error('Missing required number argument: "address"');
       const callArgs = argNumberArray(args, 'args');
       const injectJni = argBool(args, 'injectJni');
-      const maxSteps = argNumber(args, 'maxSteps');
+      const { maxSteps, clamped } = clampNativeMaxSteps(argNumber(args, 'maxSteps'));
       // When injectJni is set, prepend JNI env + 0 to args (standard JNI method convention).
       const effectiveArgs = injectJni
         ? [session.emulator.jni.envPointer(), 0, ...callArgs]
         : callArgs;
       const result = session.emulator.callAddress(address, effectiveArgs, maxSteps);
       return R.ok()
-        .merge({ sessionId: session.id, address: `0x${address.toString(16)}`, result })
+        .merge({
+          sessionId: session.id,
+          address: `0x${address.toString(16)}`,
+          result,
+          ...(clamped ? { clamped: true } : {}),
+        })
         .json();
     });
   }
@@ -901,6 +1033,7 @@ export class NativeEmulatorHandlers {
     args: ToolArgs,
     phase: 'call_symbol' | 'call_jni_export',
     invoke: (session: EmulatorSession, symbol: string) => number,
+    clamped = false,
   ): Promise<ToolResponse> {
     let session: EmulatorSession | undefined;
     let symbol = '';
@@ -922,6 +1055,7 @@ export class NativeEmulatorHandlers {
           symbol,
           result,
           diagnostics: nativeDiagnostics(session),
+          ...(clamped ? { clamped: true } : {}),
         })
         .json();
     } catch (error) {
@@ -1044,7 +1178,6 @@ export class NativeEmulatorHandlers {
       }
       const callArgs = argNumberArray(args, 'args');
       const captureRegisters = argStringArray(args, 'captureRegisters');
-      const maxSteps = Math.min(argNumber(args, 'maxSteps', 1000), TRACE_HARD_CAP);
       const persistArtifact = argBool(args, 'persistArtifact', false);
       const inlineLimitArg = argNumber(args, 'traceInlineLimit');
       const injectJni = argBool(args, 'injectJni'); // undefined → auto-detect (matches call_symbol)
@@ -1052,9 +1185,16 @@ export class NativeEmulatorHandlers {
         (argEnum(
           args,
           'mode',
-          new Set(['full', 'calls', 'branches', 'memory']),
+          new Set(['full', 'profile', 'calls', 'branches', 'memory']),
           'full',
         ) as TraceMode) ?? 'full';
+      const profileMode = mode === 'profile';
+      // Profile mode trades per-step rows for volume: a much larger default budget.
+      const maxSteps = Math.min(
+        argNumber(args, 'maxSteps', profileMode ? NEMU_PROFILE_MAX_STEPS : 1000),
+        profileMode ? NEMU_PROFILE_MAX_STEPS : TRACE_HARD_CAP,
+      );
+      const topN = Math.min(Math.max(Math.trunc(argNumber(args, 'topN', 20) || 20), 1), 1000);
       const tableRegRaw = argNumber(args, 'tableReg');
       const tableReg: number | undefined =
         tableRegRaw !== undefined && tableRegRaw >= 0 && tableRegRaw <= 30
@@ -1065,16 +1205,91 @@ export class NativeEmulatorHandlers {
 
       const events: Array<Record<string, unknown>> = [];
       let truncated = false;
+      // Per-trace-call disassembly cache: a VMP dispatch loop that re-executes
+      // the same handful of PCs thousands of times pays disassembleArm64 once
+      // per unique PC, not once per instruction.
+      const traceCtx = createTraceRowContext();
       // For registerDiff: track previous register snapshot (keyed by register name)
       let prevRegs: Record<string, unknown> | undefined;
       const engine = session.emulator.engine;
+      // ── Profile-mode aggregation state (mode === 'profile') ────────
+      // Per-pc frequency counters; the insn is kept so hot entries can be
+      // disassembled after execution (top-N only — no per-step rows).
+      const pcCounts = new Map<number, { count: number; insn: number }>();
+      const callNodeByAddr = new Map<number, ProfileCallNode>();
+      let callStack: number[] = [];
+      let profileRoot: ProfileCallNode | undefined;
+      let profileTotal = 0;
+      // Best-effort address → exported-symbol resolution (nearest preceding vaddr).
+      const symbolByAddr = new Map<number, string>();
+      if (profileMode) {
+        for (const name of engine.exportedSymbolNames()) {
+          const addr = engine.lookupSymbol(name);
+          if (addr !== undefined) symbolByAddr.set(addr, name);
+        }
+      }
+      const symbolNameAt = (addr: number): string | undefined => {
+        let best: string | undefined;
+        let bestAddr = -1;
+        for (const [a, name] of symbolByAddr) {
+          if (a <= addr && a > bestAddr) {
+            best = name;
+            bestAddr = a;
+          }
+        }
+        return best;
+      };
+      /** Record a BL/BLR call edge (target) from the current call-stack frame. */
+      const recordCall = (target: number): void => {
+        let node = callNodeByAddr.get(target);
+        if (!node) {
+          node = { address: hexAddr(target), count: 0, callees: [] };
+          const sym = symbolNameAt(target);
+          if (sym !== undefined) node.symbolName = sym;
+          callNodeByAddr.set(target, node);
+        }
+        node.count += 1;
+        const parent = callNodeByAddr.get(callStack[callStack.length - 1]!);
+        if (parent && parent !== node && !parent.callees.includes(node)) {
+          parent.callees.push(node);
+        }
+        callStack.push(target);
+      };
       const unsubscribe = engine.addInstructionHook((ev) => {
+        if (profileMode) {
+          if (profileTotal >= maxSteps) {
+            truncated = true;
+            engine.requestStop(); // hard-stop execution when budget exceeded
+            return;
+          }
+          profileTotal += 1;
+          const rec = pcCounts.get(ev.pc);
+          if (rec) rec.count += 1;
+          else pcCounts.set(ev.pc, { count: 1, insn: ev.insn });
+          const insn = ev.insn;
+          if ((insn & 0xfc000000) >>> 0 === 0x94000000) {
+            // BL imm26 — sign-extended 26-bit word offset
+            recordCall(ev.pc + (((insn & 0x03ffffff) << 6) >> 6) * 4);
+          } else if ((insn & 0xfffff1ff) >>> 0 === 0xd63f0000) {
+            // BLR family (BLR + PAC variants BLRAA/BLRAAZ/BLRAB/BLRABZ) — target
+            // is Rn (bits[9:5]). Mask 0xfffff1ff zeroes bits[11:10] (PAC op3
+            // discriminators) so all BLR variants are recorded as call edges.
+            try {
+              recordCall(Number(ev.x((insn >>> 5) & 0b11111)));
+            } catch {
+              /* register read may fault — skip this call edge */
+            }
+          } else if (insn === 0xd65f03c0 && callStack.length > 1) {
+            callStack.pop(); // RET — pop the current frame (never the entry frame)
+          }
+          return;
+        }
         if (events.length >= maxSteps) {
           truncated = true;
           engine.requestStop(); // hard-stop execution when trace budget exceeded
           return;
         }
-        const row = traceRow(ev, captureRegisters, mode, tableReg, captureBlArgs);
+        const row = traceRow(ev, captureRegisters, mode, tableReg, captureBlArgs, traceCtx);
         // registerDiff: only emit if at least one captured register changed
         if (registerDiff && captureRegisters && prevRegs) {
           const cur = row.registers as Record<string, unknown> | undefined;
@@ -1103,6 +1318,15 @@ export class NativeEmulatorHandlers {
         // Clear stale JNI diag from prior calls so only THIS trace's
         // JNI stub invocations are reported.
         session.emulator.clearJniDiag?.();
+        // Profile mode: seed the call tree with the traced entry as its root.
+        if (profileMode) {
+          const entryAddr = address ?? engine.lookupSymbol(symbol!) ?? 0;
+          callStack = [entryAddr];
+          profileRoot = { address: hexAddr(entryAddr), count: 1, callees: [] };
+          const rootSym = symbolNameAt(entryAddr);
+          if (rootSym !== undefined) profileRoot.symbolName = rootSym;
+          callNodeByAddr.set(entryAddr, profileRoot);
+        }
         let result = 0;
         let aborted: { pc: number; insn: number } | undefined;
         try {
@@ -1127,7 +1351,7 @@ export class NativeEmulatorHandlers {
           truncated = true;
           if (e instanceof UnsupportedOpcodeError) {
             aborted = { pc: e.pc, insn: e.insn };
-            if (events.length < maxSteps) {
+            if (!profileMode && events.length < maxSteps) {
               events.push({
                 step: events.length + 1,
                 pc: `0x${e.pc.toString(16)}`,
@@ -1143,7 +1367,7 @@ export class NativeEmulatorHandlers {
             // gap worth surfacing, but trace is an exploration tool.
             const faultPc = engine.readRegister('pc');
             aborted = { pc: faultPc, insn: 0 };
-            if (events.length < maxSteps) {
+            if (!profileMode && events.length < maxSteps) {
               events.push({
                 step: events.length + 1,
                 pc: `0x${faultPc.toString(16)}`,
@@ -1151,6 +1375,42 @@ export class NativeEmulatorHandlers {
               });
             }
           }
+        }
+        // Snapshot JNI diag AFTER execution (non-destructive).
+        const jniDiag = session.emulator.jniDiagSnapshot?.();
+        const abortError = aborted
+          ? `Unsupported ARM64 opcode 0x${aborted.insn.toString(16).padStart(8, '0')} at pc=0x${aborted.pc.toString(16)} — trace aborted with partial capture`
+          : undefined;
+        if (profileMode) {
+          const total = profileTotal;
+          const hot = [...pcCounts.entries()]
+            .toSorted((a, b) => b[1].count - a[1].count || a[0] - b[0])
+            .slice(0, topN)
+            .map(([pc, rec]) => ({
+              pc: hexAddr(pc),
+              count: rec.count,
+              percentage: pct(rec.count, total),
+              asm: disassembleInstruction('arm64', rec.insn, BigInt(pc)),
+            }));
+          return {
+            sessionId: session.id,
+            ...(address !== undefined ? { address: hexAddr(address) } : { symbol: symbol! }),
+            result,
+            mode: 'profile',
+            totalInstructions: total,
+            uniqueInstructions: pcCounts.size,
+            hotInstructions: hot,
+            callTree: profileRoot ? [profileRoot] : [],
+            summary: {
+              totalInstructions: total,
+              uniqueInstructions: pcCounts.size,
+              ...(hot[0] ? { topHotPc: hot[0].pc, topHotAsm: hot[0].asm } : {}),
+            },
+            steps: total,
+            truncated,
+            ...(abortError ? { error: abortError } : {}),
+            ...(jniDiag ? { jniCalls: jniDiag } : {}),
+          };
         }
         const traceInlineLimit =
           inlineLimitArg === undefined
@@ -1160,8 +1420,6 @@ export class NativeEmulatorHandlers {
         const traceArtifact = persistArtifact
           ? await persistTraceArtifact(session.id, traceLabel, result, events, truncated)
           : undefined;
-        // Snapshot JNI diag AFTER execution (non-destructive).
-        const jniDiag = session.emulator.jniDiagSnapshot?.();
         return {
           sessionId: session.id,
           ...(address !== undefined
@@ -1173,11 +1431,7 @@ export class NativeEmulatorHandlers {
           traceInlineLimit,
           ...(traceArtifact ? { traceArtifact } : {}),
           ...(jniDiag ? { jniCalls: jniDiag } : {}),
-          ...(aborted
-            ? {
-                error: `Unsupported ARM64 opcode 0x${aborted.insn.toString(16).padStart(8, '0')} at pc=0x${aborted.pc.toString(16)} — trace aborted with partial capture`,
-              }
-            : {}),
+          ...(abortError ? { error: abortError } : {}),
           trace: events.slice(0, traceInlineLimit),
         };
       } finally {
@@ -1274,6 +1528,15 @@ export class NativeEmulatorHandlers {
   /** Forwarded by the graceful-shutdown closables list. Idempotent. */
   dispose(): void {
     this.sessions.dispose();
+    // Dispose releases each session through the notifying manager, but clear
+    // the handler-owned map explicitly so injected plain managers can't leak it.
+    this.regSnapshots.clear();
+  }
+
+  /** Drop handler-owned per-session state (register snapshots, GDB RSP server). Idempotent. */
+  private cleanupSessionResources(sessionId: string): void {
+    this.regSnapshots.delete(sessionId);
+    removeGdbServer(sessionId);
   }
 
   // ── Guest memory management ──────────────────────────────────────────
@@ -1806,19 +2069,7 @@ export class NativeEmulatorHandlers {
       const word = argNumber(args, 'word');
       if (word === undefined) throw new Error('word (u32) is required');
       const w = word >>> 0; // treat as unsigned 32-bit
-
-      // LiteVM opcode format (matching Python sign_algorithm.py Opcode class):
-      // Bits[4:0]   = group (0-7)
-      // Bits[8:5]   = sub (4 bits)
-      // Bits[13:9]  = a1 (5 bits)
-      // Bits[26:14] = imm (13 bits, signed)
-      // Bits[31:27] = fl (5 bits)
-      const group = w & 0x1f;
-      const sub = (w >>> 5) & 0xf;
-      const a1 = (w >>> 9) & 0x1f;
-      const rawImm = (w >>> 14) & 0x1fff;
-      const imm = rawImm < 0x1000 ? rawImm : rawImm - 0x2000; // sign-extend 13-bit
-      const fl = (w >>> 27) & 0x1f;
+      const d = decodeLiteVmWord(w);
 
       // Group-specific fields
       const g3_sel = (w >>> 5) & 0xf;
@@ -1835,51 +2086,20 @@ export class NativeEmulatorHandlers {
       const rawOff = (w >>> 10) & 0x1fff;
       const g7_offset = rawOff < 0x1000 ? rawOff : rawOff - 0x2000;
 
-      // ASCII check — if all 4 bytes are printable ASCII, it's data not an opcode
-      const b0 = w & 0xff,
-        b1 = (w >>> 8) & 0xff,
-        b2 = (w >>> 16) & 0xff,
-        b3 = (w >>> 24) & 0xff;
-      const isAscii =
-        b0 >= 0x20 &&
-        b0 < 0x7f &&
-        b1 >= 0x20 &&
-        b1 < 0x7f &&
-        b2 >= 0x20 &&
-        b2 < 0x7f &&
-        b3 >= 0x20 &&
-        b3 < 0x7f;
-      const knownData = [
-        0x01000000, 0x02000000, 0x04000000, 0x08000000, 0x10000000, 0x20000000, 0x40000000,
-        0x80000000, 0xfffe8d80, 0xfffeaa44,
-      ];
-      const valid = group <= 7 && !isAscii && !knownData.includes(w >>> 0);
-
-      const handlerNames = [
-        'G0:SET',
-        'G1:STORE',
-        'G2:ARITH',
-        'G3',
-        'G4',
-        'G5:ADVANCE',
-        'G6:TABLE',
-        'G7:COND_JMP',
-      ];
-
       return {
         word: `0x${w.toString(16).padStart(8, '0').toUpperCase()}`,
-        group,
-        sub,
-        a1,
-        imm,
-        fl,
-        ...(group === 3 ? { g3_sel, g3_f1, g3_f2, g3_f3 } : {}),
-        ...(group === 4 ? { g4_lsr, g4_ctx4 } : {}),
-        ...(group === 5 ? { g5_imm } : {}),
-        ...(group === 6 ? { g6_a1, g6_sub } : {}),
-        ...(group === 7 ? { g7_operand, g7_offset } : {}),
-        valid,
-        handler: handlerNames[group] ?? `G${group}`,
+        group: d.group,
+        sub: d.sub,
+        a1: d.a1,
+        imm: d.imm,
+        fl: d.fl,
+        ...(d.group === 3 ? { g3_sel, g3_f1, g3_f2, g3_f3 } : {}),
+        ...(d.group === 4 ? { g4_lsr, g4_ctx4 } : {}),
+        ...(d.group === 5 ? { g5_imm } : {}),
+        ...(d.group === 6 ? { g6_a1, g6_sub } : {}),
+        ...(d.group === 7 ? { g7_operand, g7_offset } : {}),
+        valid: d.valid,
+        handler: d.handler,
       };
     });
   }
@@ -1895,44 +2115,6 @@ export class NativeEmulatorHandlers {
       const format = argString(args, 'outputFormat', 'summary');
       if (addr === undefined) throw new Error('address is required');
 
-      const KNOWN_DATA = new Set([
-        0x01000000, 0x02000000, 0x04000000, 0x08000000, 0x10000000, 0x20000000, 0x40000000,
-        0x80000000, 0xfffe8d80, 0xfffeaa44,
-      ]);
-      const decodeWord = (w: number) => {
-        const group = w & 0x1f;
-        const sub = (w >>> 5) & 0xf;
-        const a1 = (w >>> 9) & 0x1f;
-        const rawImm = (w >>> 14) & 0x1fff;
-        const imm = rawImm < 0x1000 ? rawImm : rawImm - 0x2000;
-        const fl = (w >>> 27) & 0x1f;
-        const b0 = w & 0xff,
-          b1 = (w >>> 8) & 0xff,
-          b2 = (w >>> 16) & 0xff,
-          b3 = (w >>> 24) & 0xff;
-        const isAscii =
-          b0 >= 0x20 &&
-          b0 < 0x7f &&
-          b1 >= 0x20 &&
-          b1 < 0x7f &&
-          b2 >= 0x20 &&
-          b2 < 0x7f &&
-          b3 >= 0x20 &&
-          b3 < 0x7f;
-        const valid = group <= 7 && !isAscii && !KNOWN_DATA.has(w >>> 0);
-        const names = [
-          'G0:SET',
-          'G1:STORE',
-          'G2:ARITH',
-          'G3',
-          'G4',
-          'G5:ADVANCE',
-          'G6:TABLE',
-          'G7:COND_JMP',
-        ];
-        return { group, sub, a1, imm, fl, valid, handler: names[group] ?? `G${group}` };
-      };
-
       // Read u32 words from guest memory
       const bytes = session.emulator.readGuestMemory(addr, count * 4);
       const words: number[] = [];
@@ -1946,13 +2128,22 @@ export class NativeEmulatorHandlers {
         );
       }
 
-      // Decode all
-      const decoded = words.map((w, i) => ({
-        index: i,
-        offset: addr + i * 4,
-        word: `0x${w.toString(16).padStart(8, '0').toUpperCase()}`,
-        ...decodeWord(w),
-      }));
+      // Decode all (pick the shared fields; keep the legacy output shape)
+      const decoded = words.map((w, i) => {
+        const d = decodeLiteVmWord(w);
+        return {
+          index: i,
+          offset: addr + i * 4,
+          word: `0x${w.toString(16).padStart(8, '0').toUpperCase()}`,
+          group: d.group,
+          sub: d.sub,
+          a1: d.a1,
+          imm: d.imm,
+          fl: d.fl,
+          valid: d.valid,
+          handler: d.handler,
+        };
+      });
 
       // Format output
       const validOps = decoded.filter((d) => d.valid);
@@ -2078,45 +2269,6 @@ export class NativeEmulatorHandlers {
       const bytesPerWord = wordSize === 'u32' ? 4 : 8;
       const bytes = session.emulator.readGuestMemory(addr, count * bytesPerWord);
 
-      // Decode helpers
-      const knownData = new Set([
-        0x01000000, 0x02000000, 0x04000000, 0x08000000, 0x10000000, 0x20000000, 0x40000000,
-        0x80000000, 0xfffe8d80, 0xfffeaa44,
-      ]);
-      const decodeOp = (w: number) => {
-        const g = w & 0x1f;
-        const s = (w >>> 5) & 0xf;
-        const a = (w >>> 9) & 0x1f;
-        const ri = (w >>> 14) & 0x1fff;
-        const imm = ri < 0x1000 ? ri : ri - 0x2000;
-        const fl = (w >>> 27) & 0x1f;
-        const b0 = w & 0xff,
-          b1 = (w >>> 8) & 0xff,
-          b2 = (w >>> 16) & 0xff,
-          b3 = (w >>> 24) & 0xff;
-        const ascii =
-          b0 >= 0x20 &&
-          b0 < 0x7f &&
-          b1 >= 0x20 &&
-          b1 < 0x7f &&
-          b2 >= 0x20 &&
-          b2 < 0x7f &&
-          b3 >= 0x20 &&
-          b3 < 0x7f;
-        const valid = g <= 7 && !ascii && !knownData.has(w >>> 0);
-        const names = ['G0', 'G1:STORE', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7'];
-        return {
-          group: g,
-          sub: s,
-          a1: a,
-          imm,
-          fl,
-          valid,
-          handler: names[g] ?? `G${g}`,
-          isAscii: ascii,
-        };
-      };
-
       const rows: Array<Record<string, unknown>> = [];
       for (let i = 0; i < count; i++) {
         const off = i * bytesPerWord;
@@ -2143,10 +2295,10 @@ export class NativeEmulatorHandlers {
         // Annotations for u32 mode
         if (wordSize === 'u32') {
           const w = Number(val);
-          const op = decodeOp(w);
+          const op = decodeLiteVmWord(w);
           if (op.valid) row.tag = 'OP';
           else if (op.isAscii) row.tag = 'ASCII';
-          else if (knownData.has(w >>> 0)) row.tag = 'BITMASK';
+          else if (LITEVM_KNOWN_DATA.has(w >>> 0)) row.tag = 'BITMASK';
           else row.tag = 'DATA';
           row.decode = op;
         } else {
@@ -2381,6 +2533,125 @@ export class NativeEmulatorHandlers {
     });
   }
 
+  async handleRelay(args: ToolArgs): Promise<ToolResponse> {
+    return handleSafe(async () => {
+      const action = argStringRequired(args, 'action');
+      const sessionId = argString(args, 'sessionId', '');
+      const host = argString(args, 'host', '127.0.0.1');
+      const port = argNumber(args, 'port', 17171);
+      const connectTimeoutMs = argNumber(args, 'connectTimeoutMs');
+      const maxMessageBytes = argNumber(args, 'maxMessageBytes');
+
+      const { getOrCreateRelay, removeRelay, getRelayStatus, listRelays } =
+        await import('@src/native/ipc/IpcRelay');
+
+      switch (action) {
+        case 'connect': {
+          if (!sessionId) throw new Error('sessionId is required for connect');
+          const relay = getOrCreateRelay({
+            sessionId,
+            host,
+            port,
+            connectTimeoutMs,
+            maxMessageBytes,
+          });
+          await relay.connect();
+          return { connected: true, status: relay.status };
+        }
+        case 'disconnect': {
+          if (!sessionId) throw new Error('sessionId is required for disconnect');
+          const removed = removeRelay(sessionId);
+          return { disconnected: removed, sessionId };
+        }
+        case 'status': {
+          if (sessionId) {
+            const status = getRelayStatus(sessionId);
+            return status ?? { sessionId, connected: false, reason: 'not found' };
+          }
+          return { relays: listRelays() };
+        }
+        default:
+          throw new Error(
+            `nemu_relay: invalid action "${action}" — expected connect, disconnect, or status`,
+          );
+      }
+    });
+  }
+
+  // ── GDBServer ────────────────────────────────────────────────────────
+  //
+  // Real GDB RSP TCP server that GDB/GEF/x64dbg clients can connect to.
+  // The server dispatches commands to the emulator session in real-time:
+  // register read/write, memory read/write, step, continue, breakpoints,
+  // vCont extended operations, qXfer target description, feature negotiation.
+  //
+  // Packet format: $<data>#<checksum>
+  // Checksum = sum of <data> bytes, mod 256, hex-encoded.
+  //
+  async handleGdbserver(args: ToolArgs): Promise<ToolResponse> {
+    return handleSafe(async () => {
+      const action = argStringRequired(args, 'action');
+
+      if (action === 'status') {
+        const sessionId = argString(args, 'sessionId');
+        if (sessionId) {
+          const server = getGdbServer(sessionId);
+          if (server) return server.status;
+          // Also check global list for orphaned servers.
+          const allServers = listGdbServers();
+          const match = allServers.find((s) => s.sessionId === sessionId);
+          if (match) return match;
+        }
+        return { running: false, servers: listGdbServers() };
+      }
+
+      if (action === 'stop') {
+        const sessionId = argString(args, 'sessionId');
+        if (sessionId) {
+          const removed = removeGdbServer(sessionId);
+          return { stopped: removed, sessionId };
+        }
+        // Stop all servers.
+        const servers = listGdbServers();
+        for (const s of servers) {
+          removeGdbServer(s.sessionId);
+        }
+        return { stopped: true, count: servers.length };
+      }
+
+      if (action !== 'start') {
+        throw new Error(
+          `nemu_gdbserver: invalid action "${action}" — expected start, stop, or status`,
+        );
+      }
+
+      // start — launch a real TCP GDB RSP server.
+      const sessionId = argStringRequired(args, 'sessionId');
+      const host = argString(args, 'host', '127.0.0.1');
+      const port = argNumber(args, 'port', 1234);
+
+      // Verify session exists.
+      this.sessions.requireSession(sessionId);
+
+      // Check for existing server on this session.
+      const existing = getGdbServer(sessionId);
+      if (existing?.running) {
+        return existing.status;
+      }
+
+      // Create and start the server.
+      const server = getOrCreateGdbServer(sessionId, {
+        host,
+        port,
+        sessionId,
+        getSession: (sid) => this.sessions.requireSession(sid),
+      });
+
+      await server.start();
+      return server.status;
+    });
+  }
+
   private requireSession(args: ToolArgs): EmulatorSession {
     return this.sessions.requireSession(argStringRequired(args, 'sessionId'));
   }
@@ -2403,14 +2674,56 @@ function fmt(v: bigint | number): string {
   return `0x${BigInt(v).toString(16).toUpperCase().padStart(16, '0')}`;
 }
 
+/** Format a guest address as a lowercase 0x-hex string (matches trace rows). */
+function hexAddr(n: number): string {
+  return `0x${n.toString(16)}`;
+}
+
+/** Exact 3-decimal percentage: count / total × 100. */
+function pct(count: number, total: number): number {
+  return total === 0 ? 0 : Math.round((count / total) * 100000) / 1000;
+}
+
+// RSP helpers (decodeRspPacket, encodeRspPacket, parseRspFields, bytesToHex,
+// hexToBytes, GDB_REG_NAMES) are now imported from @native/GdbRspProtocol.
+
+/**
+ * Exact decoded byte count of a base64 string, computed without allocating a
+ * buffer. Mirrors `Buffer.from(encoded, 'base64').length` for well-formed
+ * base64 (the shape produced by `Buffer#toString('base64')`).
+ */
+function base64DecodedLength(encoded: string): number {
+  const len = encoded.length;
+  const padding = encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0;
+  return Math.floor(((len - padding) * 3) / 4);
+}
+
 function decodeBionicOptions(
   filesValue: unknown,
   extraSymbolsValue?: unknown,
 ): BionicOptions | undefined {
   const files = new Map<string, Uint8Array>();
+  let totalBytes = 0;
   if (typeof filesValue === 'object' && filesValue !== null && !Array.isArray(filesValue)) {
     for (const [path, encoded] of Object.entries(filesValue)) {
-      if (typeof encoded === 'string') files.set(path, toUint8(Buffer.from(encoded, 'base64')));
+      if (typeof encoded === 'string') {
+        // Reject oversized payloads from their encoded length BEFORE decoding:
+        // otherwise an attacker can submit N×16MB base64 blobs and force every
+        // one to be allocated before the total-cap check throws.
+        const decodedLength = base64DecodedLength(encoded);
+        if (decodedLength > NEMU_VFS_MAX_FILE_BYTES) {
+          throw new Error(
+            `VFS file "${path}" is ${decodedLength} bytes, which exceeds the ${NEMU_VFS_MAX_FILE_BYTES}-byte per-file cap`,
+          );
+        }
+        totalBytes += decodedLength;
+        if (totalBytes > NEMU_VFS_MAX_TOTAL_BYTES) {
+          throw new Error(
+            `VFS files total ${totalBytes} bytes exceeds the ${NEMU_VFS_MAX_TOTAL_BYTES}-byte cap`,
+          );
+        }
+        files.set(path, toUint8(Buffer.from(encoded, 'base64')));
+      }
     }
   }
   const extraSymbols = new Map<string, number>();

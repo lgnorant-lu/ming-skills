@@ -7,7 +7,5 @@ export {
   getSnapshotCache,
   storeSnapshot,
   handleHeapSnapshotCapture,
-  handleHeapSearch,
 } from './heap-snapshot';
 export { handleBytecodeExtract } from './bytecode-extract';
-export { handleJitInspect } from './jit-inspect';

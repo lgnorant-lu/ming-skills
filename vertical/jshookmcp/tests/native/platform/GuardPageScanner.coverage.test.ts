@@ -76,18 +76,23 @@ describe('scanGuardPages', () => {
     expect(r.stats.scannedRegions).toBe(3);
   });
 
-  it('reports queryFailures when queryRegion throws mid-scan', async () => {
+  it('reports queryFailures when queryRegion throws mid-scan and keeps scanning', async () => {
     let call = 0;
     const api = makeApi({
       queryRegion: vi.fn(() => {
         call++;
         if (call === 2) throw new Error('query failed');
+        if (call >= 3) return null; // end the scan
         return { baseAddress: BigInt(call) * 0x1000n, size: 4096, protection: 0 };
       }),
     });
     const r = await scanGuardPages(api, 1);
-    expect(r.stats.queryFailures).toBeGreaterThanOrEqual(1);
-    // closeProcess runs in the finally block (api is a `as never` mock, so the
-    // property access isn't type-checked here); the scan result is asserted above.
+    expect(r.stats.queryFailures).toBe(1);
+    expect(r.stats.scannedRegions).toBe(1);
+    // The scan continued after the failure — the third query (end-of-scan
+    // null) was reached. Old behavior aborted the loop at the throw (2 calls).
+    expect(
+      (api as unknown as { queryRegion: ReturnType<typeof vi.fn> }).queryRegion,
+    ).toHaveBeenCalledTimes(3);
   });
 });

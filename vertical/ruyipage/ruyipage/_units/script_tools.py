@@ -49,6 +49,7 @@ class ScriptResult(object):
     def __init__(self, data):
         self.raw = dict(data or {})
         self.type = self.raw.get("type")
+        self.realm = self.raw.get("realm")
         self.result = ScriptRemoteValue(self.raw.get("result", {}))
         self.exception_details = self.raw.get("exceptionDetails")
 

@@ -25,7 +25,16 @@ def _safe_run(driver, method, params, description='permissions command'):
         raise
 
 
-def set_permission(driver, descriptor, state, origin='https://example.com', contexts=None):
+def set_permission(
+    driver,
+    descriptor,
+    state,
+    origin='https://example.com',
+    contexts=None,
+    *,
+    embedded_origin=None,
+    user_context=None,
+):
     """设置浏览器权限（扩展模块，Firefox可能不支持）
 
     优先级：
@@ -36,7 +45,9 @@ def set_permission(driver, descriptor, state, origin='https://example.com', cont
         descriptor: 权限描述符，如 {'name': 'geolocation'}
         state: 'granted' / 'denied' / 'prompt'
         origin: 限定源（默认'https://example.com'）
-        contexts: 限定context列表（可选）
+        embedded_origin: 可选的嵌入源
+        user_context: 可选的 user context ID
+        contexts: 已废弃；permissions 扩展不接受 browsing contexts
 
     Returns:
         命令结果，或{'fallback': 'prefs'}（降级时），或None（无法设置）
@@ -49,9 +60,15 @@ def set_permission(driver, descriptor, state, origin='https://example.com', cont
         >>> permissions.set_permission(driver, {'name': 'notifications'}, 'denied')
     """
     # 尝试BiDi命令
+    if contexts is not None:
+        raise ValueError("permissions.setPermission does not accept contexts")
+    if state not in ('granted', 'denied', 'prompt'):
+        raise ValueError("state must be granted, denied, or prompt")
     params = {'descriptor': descriptor, 'state': state, 'origin': origin}
-    if contexts:
-        params['contexts'] = contexts if isinstance(contexts, list) else [contexts]
+    if embedded_origin is not None:
+        params['embeddedOrigin'] = embedded_origin
+    if user_context is not None:
+        params['userContext'] = user_context
 
     result = _safe_run(driver, 'permissions.setPermission', params,
                        'permissions.setPermission')

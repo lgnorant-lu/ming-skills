@@ -123,6 +123,8 @@ export class BrowserToolHandlers {
   private readonly getCurrentSessionId?: () => string | null;
   private readonly sessionCoordinator?: BrowserSessionCoordinator;
   private readonly fleetRouter?: BrowserFleetRouter;
+  /** Elicitation bridge — powers the CAPTCHA manual-solve suspend/resume flow. */
+  private readonly elicitationBridge?: import('@server/ElicitationBridge').ElicitationBridge;
   private readonly onBrowserAttachStateChanged?: (
     snapshot: Partial<BrowserAttachRuntimeSnapshot>,
   ) => void;
@@ -140,6 +142,7 @@ export class BrowserToolHandlers {
     sessionCoordinator?: BrowserSessionCoordinator,
     onBrowserAttachStateChanged?: (snapshot: Partial<BrowserAttachRuntimeSnapshot>) => void,
     fleetRouter?: BrowserFleetRouter,
+    elicitationBridge?: import('@server/ElicitationBridge').ElicitationBridge,
   ) {
     this.collector = collector;
     this.pageController = pageController;
@@ -151,6 +154,7 @@ export class BrowserToolHandlers {
     this.sessionCoordinator = sessionCoordinator;
     this.fleetRouter = fleetRouter;
     this.onBrowserAttachStateChanged = onBrowserAttachStateChanged;
+    this.elicitationBridge = elicitationBridge;
 
     const screenshotDir = resolveOutputDirectory(
       getConfig().paths.captchaScreenshotDir,
@@ -825,6 +829,27 @@ export class BrowserToolHandlers {
     return this.detailedData.handleGetOffloadedData(args);
   }
 
+  // ── Performance Tools (P0) ──
+  async handleBrowserPerformanceObserver(args: Record<string, unknown>) {
+    const { handleBrowserPerformanceObserver } = await import('./handlers/performance-tools');
+    return handleBrowserPerformanceObserver({ collector: this.collector }, args);
+  }
+
+  async handleBrowserResourceTiming(args: Record<string, unknown>) {
+    const { handleBrowserResourceTiming } = await import('./handlers/performance-tools');
+    return handleBrowserResourceTiming({ collector: this.collector }, args);
+  }
+
+  async handleBrowserCdpPerformanceMetrics(args: Record<string, unknown>) {
+    const { handleBrowserCdpPerformanceMetrics } = await import('./handlers/performance-tools');
+    return handleBrowserCdpPerformanceMetrics({ collector: this.collector }, args);
+  }
+
+  async handleV8TypeProfile(args: Record<string, unknown>) {
+    const { handleV8TypeProfile } = await import('./handlers/performance-tools');
+    return handleV8TypeProfile({ collector: this.collector }, args);
+  }
+
   // ── Coverage & Script Blocking (P2) ──
   async handlePageCoverageStart(args: Record<string, unknown>) {
     const { handlePageCoverageStart } = await import('./handlers/coverage-and-block');
@@ -886,7 +911,7 @@ export class BrowserToolHandlers {
 
   // ── CAPTCHA Solving ──
   async handleCaptchaVisionSolve(args: Record<string, unknown>) {
-    return handleCaptchaVisionSolve(args, this.collector);
+    return handleCaptchaVisionSolve(args, this.collector, this.elicitationBridge);
   }
 
   async handleWidgetChallengeSolve(args: Record<string, unknown>) {

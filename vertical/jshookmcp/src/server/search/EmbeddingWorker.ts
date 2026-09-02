@@ -10,7 +10,7 @@
  *   ← { type: 'result',      id: number, embedding: Float32Array | Float32Array[] }
  *   ← { type: 'error',       id: number, message: string }
  */
-import { parentPort } from 'worker_threads';
+import { parentPort } from 'node:worker_threads';
 import { DEFAULT_SEARCH_VECTOR_MODEL_ID } from '../../constants/search-model.ts';
 import { StaticEmbeddingModel } from './StaticEmbeddingModel.ts';
 

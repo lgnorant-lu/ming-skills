@@ -107,12 +107,15 @@ export function tagAsHeapObject(addr: bigint): bigint {
  *  ```
  */
 export class DartRuntime {
+  private readonly cpu: CpuEngine;
   private dartThread: bigint = 0n;
   private dartObjectPool: bigint = 0n;
   private dartNullObject: bigint = 0n;
   private dartHeapBase: bigint = 0n;
 
-  constructor(private readonly cpu: CpuEngine) {}
+  constructor(cpu: CpuEngine) {
+    this.cpu = cpu;
+  }
 
   /**
    * Initialize Dart runtime state.

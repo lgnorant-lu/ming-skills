@@ -238,6 +238,24 @@ describe('snapshot-persistence', () => {
       // small (10 bytes) also exceeds 1 byte cap, so it should be evicted too.
       expect(res.evictedIds).toContain(small.meta.id);
     });
+
+    it('drops evicted ids from the in-memory cache in lockstep', async () => {
+      const oldest = await persistOne(30, { deltaMs: -90_000 });
+      const mid = await persistOne(31, { deltaMs: -30_000 });
+      const newest = await persistOne(32, { deltaMs: 0 });
+
+      const memoryCache = new Map<string, { capturedAt: string }>([
+        [oldest.meta.id, { capturedAt: oldest.meta.capturedAt }],
+        [mid.meta.id, { capturedAt: mid.meta.capturedAt }],
+        [newest.meta.id, { capturedAt: newest.meta.capturedAt }],
+      ]);
+
+      await enforceSnapshotRetention({ maxCount: 1, memoryCache });
+
+      expect(memoryCache.has(oldest.meta.id)).toBe(false);
+      expect(memoryCache.has(mid.meta.id)).toBe(false);
+      expect(memoryCache.has(newest.meta.id)).toBe(true);
+    });
   });
 
   describe('getHeapSnapshotArtifactDir', () => {

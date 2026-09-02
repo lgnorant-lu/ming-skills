@@ -2,6 +2,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ReadWriteHandlers } from '../../../../../src/server/domains/memory/handlers/readwrite';
 import { MemoryAuditTrail } from '../../../../../src/modules/process/memory/AuditTrail';
 
+// Mock MemoryScanSession for batch_edit tests — the handler dynamically imports it
+vi.mock('@native/MemoryScanSession', () => ({
+  scanSessionManager: {
+    getSession: vi.fn(),
+  },
+}));
+
+vi.mock('@native/formatAddress', () => ({
+  formatAddress: vi.fn((addr: bigint) => `0x${addr.toString(16).toUpperCase()}`),
+}));
+
 describe('ReadWriteHandlers', () => {
   let handlers: ReadWriteHandlers;
   const dummyArgs = {
@@ -285,6 +296,205 @@ describe('ReadWriteHandlers', () => {
       const response = await handlers.handleWriteValue(dummyArgs);
       const parsed = JSON.parse((response.content[0] as any).text);
       expect(parsed.success).toBe(true);
+    });
+  });
+
+  describe('handleBatchEdit', () => {
+    const batchEditDummy = { sessionId: 'test-session', value: '999', valueType: 'int32' };
+
+    beforeEach(async () => {
+      const { scanSessionManager } = await import('@native/MemoryScanSession');
+      (scanSessionManager.getSession as ReturnType<typeof vi.fn>).mockReset();
+      mockmemCtrl.writeValue = vi.fn();
+    });
+
+    it('rejects missing sessionId', async () => {
+      const response = await handlers.handleBatchEdit({
+        value: '999',
+        valueType: 'int32',
+      });
+      const parsed = JSON.parse((response.content[0] as any).text);
+      expect(parsed.success).toBe(false);
+      expect(parsed.error).toContain('memory_batch_edit');
+      expect(parsed.error).toContain('sessionId');
+    });
+
+    it('rejects when session has no addresses', async () => {
+      const { scanSessionManager } = await import('@native/MemoryScanSession');
+      (scanSessionManager.getSession as ReturnType<typeof vi.fn>).mockReturnValue({
+        pid: 1234,
+        addresses: [],
+        valueType: 'int32',
+      });
+
+      const response = await handlers.handleBatchEdit(batchEditDummy);
+      const parsed = JSON.parse((response.content[0] as any).text);
+      expect(parsed.success).toBe(false);
+      expect(parsed.error).toContain('no addresses');
+    });
+
+    it('rejects when session exceeds 1000 address cap', async () => {
+      const { scanSessionManager } = await import('@native/MemoryScanSession');
+      const bigAddresses = Array.from({ length: 1500 }, (_, i) => BigInt(0x1000 + i * 8));
+      (scanSessionManager.getSession as ReturnType<typeof vi.fn>).mockReturnValue({
+        pid: 1234,
+        addresses: bigAddresses,
+        valueType: 'int32',
+      });
+
+      const response = await handlers.handleBatchEdit(batchEditDummy);
+      const parsed = JSON.parse((response.content[0] as any).text);
+      expect(parsed.success).toBe(false);
+      expect(parsed.error).toContain('exceeds maximum');
+    });
+  });
+
+  describe('handleWatch', () => {
+    const watchDummy = {
+      pid: 1234,
+      address: '0x7FF612340000',
+      valueType: 'int32',
+      intervalMs: 100,
+      timeoutMs: 2000,
+    };
+
+    it('rejects missing address', async () => {
+      mockmemCtrl.dumpMemory = vi.fn();
+      const response = await handlers.handleWatch({
+        pid: 1234,
+        valueType: 'int32',
+      });
+      const parsed = JSON.parse((response.content[0] as any).text);
+      expect(parsed.success).toBe(false);
+      expect(parsed.error).toContain('address must be a hex address');
+    });
+
+    it('rejects invalid valueType', async () => {
+      mockmemCtrl.dumpMemory = vi.fn();
+      const response = await handlers.handleWatch({
+        pid: 1234,
+        address: '0x7FF612340000',
+        valueType: 'bogus',
+      });
+      const parsed = JSON.parse((response.content[0] as any).text);
+      expect(parsed.success).toBe(false);
+      expect(parsed.error).toContain('Invalid valueType');
+    });
+
+    it('returns changed=true when value changes', async () => {
+      let callCount = 0;
+      mockmemCtrl.dumpMemory = vi.fn().mockImplementation(() => {
+        callCount++;
+        // Return different hex on second call
+        if (callCount === 1) return Promise.resolve(Buffer.from([0x64, 0x00, 0x00, 0x00]));
+        return Promise.resolve(Buffer.from([0xc8, 0x00, 0x00, 0x00]));
+      });
+
+      const response = await handlers.handleWatch(watchDummy);
+      const parsed = JSON.parse((response.content[0] as any).text);
+      expect(parsed.success).toBe(true);
+      expect(parsed.changed).toBe(true);
+      expect(parsed.oldValue).toBe('64000000');
+      expect(parsed.newValue).toBe('c8000000');
+      expect(typeof parsed.elapsedMs).toBe('number');
+    });
+
+    it('returns changed=false on timeout', async () => {
+      mockmemCtrl.dumpMemory = vi
+        .fn()
+        .mockReturnValue(Promise.resolve(Buffer.from([0x64, 0x00, 0x00, 0x00])));
+
+      const response = await handlers.handleWatch({
+        ...watchDummy,
+        intervalMs: 100,
+        timeoutMs: 300,
+      });
+      const parsed = JSON.parse((response.content[0] as any).text);
+      expect(parsed.success).toBe(true);
+      expect(parsed.changed).toBe(false);
+      expect(parsed.value).toBe('64000000');
+    });
+  });
+
+  describe('handleFreezeExport', () => {
+    it('exports all active freezes as structured JSON', async () => {
+      mockmemCtrl.listFreezes = vi.fn().mockReturnValue([
+        {
+          id: 'f1',
+          pid: 1234,
+          address: '0x7FF612340000',
+          value: [100, 0, 0, 0],
+          valueType: 'int32',
+          intervalMs: 50,
+          isActive: true,
+        },
+        {
+          id: 'f2',
+          pid: 1234,
+          address: '0x7FF612340008',
+          value: [200, 0, 0, 0],
+          valueType: 'int32',
+          intervalMs: 100,
+          isActive: true,
+        },
+      ]);
+
+      const response = await handlers.handleFreezeExport({});
+      const parsed = JSON.parse((response.content[0] as any).text);
+      expect(parsed.success).toBe(true);
+      expect(parsed.count).toBe(2);
+      expect(parsed.filtered).toBe(false);
+      expect(parsed.freezes).toEqual([
+        {
+          freezeId: 'f1',
+          pid: 1234,
+          address: '0x7FF612340000',
+          value: [100, 0, 0, 0],
+          valueType: 'int32',
+          intervalMs: 50,
+          active: true,
+        },
+        {
+          freezeId: 'f2',
+          pid: 1234,
+          address: '0x7FF612340008',
+          value: [200, 0, 0, 0],
+          valueType: 'int32',
+          intervalMs: 100,
+          active: true,
+        },
+      ]);
+    });
+
+    it('filters by pid when pid argument is provided', async () => {
+      mockmemCtrl.listFreezes = vi.fn().mockReturnValue([
+        {
+          id: 'f1',
+          pid: 1234,
+          address: '0x1000',
+          value: [1],
+          valueType: 'byte',
+          intervalMs: 50,
+          isActive: true,
+        },
+        {
+          id: 'f2',
+          pid: 5678,
+          address: '0x2000',
+          value: [2],
+          valueType: 'byte',
+          intervalMs: 100,
+          isActive: true,
+        },
+      ]);
+
+      const response = await handlers.handleFreezeExport({ pid: 1234 });
+      const parsed = JSON.parse((response.content[0] as any).text);
+      expect(parsed.success).toBe(true);
+      expect(parsed.count).toBe(1);
+      expect(parsed.filtered).toBe(true);
+      expect(parsed.freezes[0].freezeId).toBe('f1');
+      expect(parsed.freezes[0].pid).toBe(1234);
     });
   });
 });

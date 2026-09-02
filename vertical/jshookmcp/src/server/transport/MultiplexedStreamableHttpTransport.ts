@@ -1,43 +1,68 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import type {
-  Transport,
-  TransportSendOptions,
-} from '@modelcontextprotocol/sdk/shared/transport.js';
-import type {
-  JSONRPCMessage,
-  MessageExtraInfo,
-  RequestId,
-} from '@modelcontextprotocol/sdk/types.js';
 import {
   isJSONRPCErrorResponse,
   isJSONRPCNotification,
   isJSONRPCRequest,
   isJSONRPCResultResponse,
-} from '@modelcontextprotocol/sdk/types.js';
+} from '@modelcontextprotocol/server';
+import type {
+  Transport,
+  TransportSendOptions,
+  JSONRPCMessage,
+  MessageExtraInfo,
+  RequestId,
+} from '@modelcontextprotocol/server';
+import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { logger } from '@utils/logger';
-import { HTTP_CAPACITY_RETRY_AFTER_MS } from '@src/constants';
+import { HTTP_CAPACITY_RETRY_AFTER_MS, MCP_HTTP_JSON_RESPONSE } from '@src/constants';
+import { readEnvInteger } from '@src/config/environment';
+
+// Notifications (e.g. logging messages) are broadcast to every HTTP session.
+// Skip sessions idle past this threshold to bound the O(log × sessions)
+// amplification under load instead of fanning out to the full session table.
+const DEFAULT_BROADCAST_IDLE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Per-session in-flight request cap. `inFlight` previously only counted — never
+ * bounded — so a single session could pile up unbounded concurrent requests and
+ * exhaust the process (a1-06). Overridable via MCP_HTTP_MAX_INFLIGHT.
+ */
+const DEFAULT_MAX_INFLIGHT = 64;
+
+/**
+ * Per-session cap on concurrent SSE GET streams (the server→client event
+ * channel). A client holds one GET open while awaiting notifications, so these
+ * are long-lived. Counting them against `maxInFlight` would let 64 idle GETs
+ * self-DoS a session (every subsequent POST gets 503), so they are bounded
+ * separately at a small limit — this also prevents a hostile client from
+ * holding open unbounded half-open streams. Overridable via MCP_HTTP_MAX_SSE_INFLIGHT.
+ */
+const DEFAULT_MAX_SSE_INFLIGHT = 8;
 
 interface SessionRecord {
   sessionId: string;
-  transport: StreamableHTTPServerTransport;
+  transport: NodeStreamableHTTPServerTransport;
   lastTouchedAt: number;
   inFlight: number;
+  sseInFlight: number;
 }
 
 interface RequestRouteRecord {
   sessionId: string;
   originalId: RequestId;
-  transport: StreamableHTTPServerTransport;
+  transport: NodeStreamableHTTPServerTransport;
 }
 
 export interface MultiplexedStreamableHttpTransportOptions {
   onSessionClosed?: (sessionId: string) => void;
   onSessionOpened?: (sessionId: string) => void | Promise<void>;
   maxSessions?: number;
+  maxInFlight?: number;
+  maxSseInFlight?: number;
   capacityRetryAfterMs?: number;
   sessionIdleTtlMs?: number;
+  broadcastIdleTtlMs?: number;
   now?: () => number;
 }
 
@@ -54,6 +79,7 @@ function keyForRequestId(id: RequestId): string {
 }
 
 export class MultiplexedStreamableHttpTransport implements Transport {
+  private readonly options: MultiplexedStreamableHttpTransportOptions;
   onclose?: () => void;
   onerror?: (error: Error) => void;
   onmessage?: <T extends JSONRPCMessage>(message: T, extra?: MessageExtraInfo) => void;
@@ -63,10 +89,20 @@ export class MultiplexedStreamableHttpTransport implements Transport {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly requestRoutes = new Map<string, RequestRouteRecord>();
   private readonly sessionOriginalToInternal = new Map<string, Map<string, string>>();
+  private readonly maxInFlight: number;
+  private readonly maxSseInFlight: number;
   private pendingSessionAdmissions = 0;
   private requestSequence = 0;
 
-  constructor(private readonly options: MultiplexedStreamableHttpTransportOptions = {}) {}
+  constructor(options: MultiplexedStreamableHttpTransportOptions = {}) {
+    this.options = options;
+    this.maxInFlight =
+      options.maxInFlight ??
+      readEnvInteger('MCP_HTTP_MAX_INFLIGHT', DEFAULT_MAX_INFLIGHT, { min: 1 });
+    this.maxSseInFlight =
+      options.maxSseInFlight ??
+      readEnvInteger('MCP_HTTP_MAX_SSE_INFLIGHT', DEFAULT_MAX_SSE_INFLIGHT, { min: 1 });
+  }
 
   async start(): Promise<void> {
     if (this.started) {
@@ -112,7 +148,12 @@ export class MultiplexedStreamableHttpTransport implements Transport {
     }
 
     if (isJSONRPCNotification(message)) {
-      await Promise.allSettled(sessions.map((session) => session.transport.send(message, options)));
+      const activeSessions = this.getActiveBroadcastSessions();
+      if (activeSessions.length > 0) {
+        await Promise.allSettled(
+          activeSessions.map((session) => session.transport.send(message, options)),
+        );
+      }
       return;
     }
 
@@ -149,7 +190,11 @@ export class MultiplexedStreamableHttpTransport implements Transport {
       }
       const now = this.getNow();
       const idleTtlMs = this.options.sessionIdleTtlMs ?? Number.POSITIVE_INFINITY;
-      if (existing.inFlight === 0 && now - existing.lastTouchedAt >= idleTtlMs) {
+      if (
+        existing.inFlight === 0 &&
+        existing.sseInFlight === 0 &&
+        now - existing.lastTouchedAt >= idleTtlMs
+      ) {
         this.dropSession(sessionId);
         await existing.transport.close().catch(() => undefined);
         res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -166,12 +211,77 @@ export class MultiplexedStreamableHttpTransport implements Transport {
         );
         return;
       }
-      existing.inFlight += 1;
+
+      // SSE GET streams are long-lived and must not count against the POST
+      // in-flight cap (they would self-DoS the session); they get their own
+      // small limit instead.
+      const isGet = (req.method ?? '').toUpperCase() === 'GET';
+      if (isGet) {
+        const maxSseInFlight = this.maxSseInFlight;
+        if (existing.sseInFlight >= maxSseInFlight) {
+          const retryAfterMs = this.options.capacityRetryAfterMs ?? HTTP_CAPACITY_RETRY_AFTER_MS;
+          res.writeHead(503, {
+            'Content-Type': 'application/json',
+            'Retry-After': String(Math.max(1, Math.ceil(retryAfterMs / 1000))),
+          });
+          res.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: {
+                code: -32001,
+                message: 'MCP session SSE stream capacity reached',
+                data: {
+                  code: 'MCP_SESSION_SSE_CAPACITY',
+                  retryAfterMs,
+                  sseInFlight: existing.sseInFlight,
+                  sseInFlightLimit: maxSseInFlight,
+                  sessionId,
+                },
+              },
+              id: null,
+            }),
+          );
+          return;
+        }
+        existing.sseInFlight += 1;
+      } else {
+        const maxInFlight = this.maxInFlight;
+        if (existing.inFlight >= maxInFlight) {
+          const retryAfterMs = this.options.capacityRetryAfterMs ?? HTTP_CAPACITY_RETRY_AFTER_MS;
+          res.writeHead(503, {
+            'Content-Type': 'application/json',
+            'Retry-After': String(Math.max(1, Math.ceil(retryAfterMs / 1000))),
+          });
+          res.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: {
+                code: -32001,
+                message: 'MCP session in-flight capacity reached',
+                data: {
+                  code: 'MCP_SESSION_INFLIGHT_CAPACITY',
+                  retryAfterMs,
+                  inFlight: existing.inFlight,
+                  inFlightLimit: maxInFlight,
+                  sessionId,
+                },
+              },
+              id: null,
+            }),
+          );
+          return;
+        }
+        existing.inFlight += 1;
+      }
       existing.lastTouchedAt = now;
       try {
         await existing.transport.handleRequest(req, res, parsedBody);
       } finally {
-        existing.inFlight = Math.max(0, existing.inFlight - 1);
+        if (isGet) {
+          existing.sseInFlight = Math.max(0, existing.sseInFlight - 1);
+        } else {
+          existing.inFlight = Math.max(0, existing.inFlight - 1);
+        }
         existing.lastTouchedAt = this.getNow();
       }
       return;
@@ -210,7 +320,7 @@ export class MultiplexedStreamableHttpTransport implements Transport {
     this.pendingSessionAdmissions += 1;
     let admissionClaimed = false;
     let registered = false;
-    let transport: StreamableHTTPServerTransport | null = null;
+    let transport: NodeStreamableHTTPServerTransport | null = null;
     try {
       try {
         if (this.options.onSessionOpened) {
@@ -248,6 +358,7 @@ export class MultiplexedStreamableHttpTransport implements Transport {
             transport,
             lastTouchedAt: this.getNow(),
             inFlight: 0,
+            sseInFlight: 0,
           });
           registered = true;
         }
@@ -286,9 +397,22 @@ export class MultiplexedStreamableHttpTransport implements Transport {
     };
   }
 
-  private createInnerTransport(sessionId: string): StreamableHTTPServerTransport {
-    const transport = new StreamableHTTPServerTransport({
+  private createInnerTransport(sessionId: string): NodeStreamableHTTPServerTransport {
+    const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: () => sessionId,
+      // MCP_HTTP_JSON_RESPONSE switches the SDK into "JSON response" mode
+      // (application/json body instead of an SSE stream). Two documented
+      // trade-offs (see the constant's JSDoc in @src/constants/server.ts):
+      //   1. In-tool-call elicitation/sampling requests (sent with a
+      //      relatedRequestId) are silently dropped by the SDK in this mode, so
+      //      ElicitationBridge / LLMSamplingBridge delegation breaks. We do NOT
+      //      degrade those messages back to SSE here: the drop happens inside
+      //      the SDK's inner transport (out of reach of this multiplexer), and
+      //      stripping their relatedRequestId would change routing semantics in
+      //      multi-session deployments. The flag therefore defaults OFF.
+      //   2. No streaming first byte: the response is buffered until all
+      //      replies are ready, so long tasks lose progressive output.
+      enableJsonResponse: MCP_HTTP_JSON_RESPONSE,
     });
 
     // eslint-disable-next-line unicorn/prefer-add-event-listener
@@ -320,7 +444,7 @@ export class MultiplexedStreamableHttpTransport implements Transport {
 
   private rewriteInboundMessage(
     sessionId: string,
-    transport: StreamableHTTPServerTransport,
+    transport: NodeStreamableHTTPServerTransport,
     message: JSONRPCMessage,
   ): JSONRPCMessage {
     if (isJSONRPCRequest(message)) {
@@ -422,10 +546,21 @@ export class MultiplexedStreamableHttpTransport implements Transport {
     const cutoff = this.getNow() - idleTtlMs;
     const expired: SessionRecord[] = [];
     for (const session of this.sessions.values()) {
-      if (session.inFlight === 0 && session.lastTouchedAt <= cutoff) expired.push(session);
+      if (session.inFlight === 0 && session.sseInFlight === 0 && session.lastTouchedAt <= cutoff) {
+        expired.push(session);
+      }
     }
     for (const session of expired) this.dropSession(session.sessionId);
     await Promise.allSettled(expired.map(async (session) => await session.transport.close()));
+  }
+
+  private getActiveBroadcastSessions(): SessionRecord[] {
+    const ttlMs = this.options.broadcastIdleTtlMs ?? DEFAULT_BROADCAST_IDLE_TTL_MS;
+    if (!Number.isFinite(ttlMs)) return [...this.sessions.values()];
+    const cutoff = this.getNow() - ttlMs;
+    return [...this.sessions.values()].filter(
+      (session) => session.sseInFlight > 0 || session.lastTouchedAt > cutoff,
+    );
   }
 
   private getNow(): number {

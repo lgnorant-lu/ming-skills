@@ -1,6 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TEST_URLS, withPath } from '@tests/shared/test-urls';
 
+// Block `.env` loading so fallback assertions always observe the source
+// defaults. Without this, a local (gitignored, search-tune generated) `.env`
+// re-injects keys during the env-bootstrap that runs on every constants
+// re-import, silently overriding the defaults under test. Mirrors the
+// isolation pattern used by tests/utils/config.test.ts.
+const { dotenvMock } = vi.hoisted(() => ({
+  dotenvMock: {
+    config: vi.fn(() => ({ error: Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) })),
+  },
+}));
+
+vi.mock('dotenv', () => dotenvMock);
+
 const ORIGINAL_ENV = { ...process.env };
 
 async function loadConstants(overrides: Record<string, string | undefined> = {}) {
@@ -72,6 +85,35 @@ describe('constants env parsing', () => {
       (await loadConstants({ SEARCH_WORKFLOW_DOMAIN_BOOST_MULTIPLIER: '2.25' }))
         .SEARCH_WORKFLOW_DOMAIN_BOOST_MULTIPLIER,
     ).toBe(2.25);
+    // Per-tool boost multipliers: fallback to defaults, parse valid floats.
+    expect(
+      (await loadConstants({ SEARCH_EXTENSION_TOOL_BOOST_MULTIPLIER: undefined }))
+        .SEARCH_EXTENSION_TOOL_BOOST_MULTIPLIER,
+    ).toBe(1.12);
+    expect(
+      (await loadConstants({ SEARCH_EXTENSION_TOOL_BOOST_MULTIPLIER: 'abc' }))
+        .SEARCH_EXTENSION_TOOL_BOOST_MULTIPLIER,
+    ).toBe(1.12);
+    expect(
+      (await loadConstants({ SEARCH_EXTENSION_TOOL_BOOST_MULTIPLIER: '1.6' }))
+        .SEARCH_EXTENSION_TOOL_BOOST_MULTIPLIER,
+    ).toBe(1.6);
+    expect(
+      (await loadConstants({ SEARCH_WORKFLOW_TOOL_BOOST_MULTIPLIER: undefined }))
+        .SEARCH_WORKFLOW_TOOL_BOOST_MULTIPLIER,
+    ).toBe(1.35);
+    expect(
+      (await loadConstants({ SEARCH_WORKFLOW_TOOL_BOOST_MULTIPLIER: '2.0' }))
+        .SEARCH_WORKFLOW_TOOL_BOOST_MULTIPLIER,
+    ).toBe(2.0);
+    expect(
+      (await loadConstants({ SEARCH_WORKFLOW_LIST_TOOL_BOOST_MULTIPLIER: undefined }))
+        .SEARCH_WORKFLOW_LIST_TOOL_BOOST_MULTIPLIER,
+    ).toBe(1.25);
+    expect(
+      (await loadConstants({ SEARCH_WORKFLOW_LIST_TOOL_BOOST_MULTIPLIER: '0.9' }))
+        .SEARCH_WORKFLOW_LIST_TOOL_BOOST_MULTIPLIER,
+    ).toBe(0.9);
   });
 
   it('parses string env values with fallback semantics', async () => {
@@ -87,16 +129,21 @@ describe('constants env parsing', () => {
     ).toBe(withPath(TEST_URLS.root, 'test'));
   });
 
-  it('parses numeric lists and drops invalid entries without falling back', async () => {
+  it('parses numeric lists and falls back to defaults when every entry is invalid', async () => {
     expect((await loadConstants({ DEBUG_PORT_CANDIDATES: '' })).DEBUG_PORT_CANDIDATES).toEqual([
       9222, 9229, 9333, 2039,
     ]);
     expect(
       (await loadConstants({ DEBUG_PORT_CANDIDATES: '9333,foo,9444' })).DEBUG_PORT_CANDIDATES,
     ).toEqual([9333, 9444]);
+    // readEnvIntegerList/list() falls back to the default list (not []) when
+    // every comma-separated entry fails to parse — see the "Backward-compatible
+    // alias" doc comment on list() in src/config/environment.ts: an all-invalid
+    // config value preserves the effective default instead of silently
+    // emptying a list that callers then treat as "no candidates".
     expect(
       (await loadConstants({ DEBUG_PORT_CANDIDATES: 'foo,bar' })).DEBUG_PORT_CANDIDATES,
-    ).toEqual([]);
+    ).toEqual([9222, 9229, 9333, 2039]);
   });
 
   it('parses csv tiers with normalization and fallback semantics', async () => {
@@ -195,6 +242,22 @@ describe('constants env parsing', () => {
       (await loadConstants({ PAGE_OPERATION_TIMEOUT_MS: 'abc', PAGE_EVALUATE_TIMEOUT_MS: '45000' }))
         .PAGE_EVALUATE_TIMEOUT_MS,
     ).toBe(45_000);
+  });
+
+  it('parses ANALYSIS_EXPLOIT_LLM_MAX_TOKENS env with 3072 fallback', async () => {
+    expect(
+      (await loadConstants({ ANALYSIS_EXPLOIT_LLM_MAX_TOKENS: undefined }))
+        .ANALYSIS_EXPLOIT_LLM_MAX_TOKENS,
+    ).toBe(3_072);
+    expect(
+      (await loadConstants({ ANALYSIS_EXPLOIT_LLM_MAX_TOKENS: '4096' }))
+        .ANALYSIS_EXPLOIT_LLM_MAX_TOKENS,
+    ).toBe(4_096);
+    // Invalid values fall back to the 3072 default
+    expect(
+      (await loadConstants({ ANALYSIS_EXPLOIT_LLM_MAX_TOKENS: 'abc' }))
+        .ANALYSIS_EXPLOIT_LLM_MAX_TOKENS,
+    ).toBe(3_072);
   });
 
   it('parses MEMORY_SCAN_REGION_GUARD_BYTES env with 1 GiB fallback', async () => {

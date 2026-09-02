@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { crc32 } from 'node:zlib';
 
-import { extractArm64Libs } from '@modules/native-emulator/apk';
+import { extractArm64Libs, extractArm64LibsDetailed } from '@modules/native-emulator/apk';
 
 let workDir: string;
 
@@ -172,5 +172,47 @@ describe('extractArm64Libs', () => {
     await expect(extractArm64Libs(notZip)).rejects.toThrowError(
       expect.objectContaining({ name: 'ToolError', code: 'VALIDATION' }),
     );
+  });
+});
+
+describe('extractArm64LibsDetailed aggregate cap', () => {
+  it('returns truncated=false and totalBytes when all libs fit under the cap', async () => {
+    const apk = await writeApk('small.apk', [
+      { name: 'lib/arm64-v8a/libapp.so', data: ELF_BYTES },
+      { name: 'lib/arm64-v8a/libtest.so', data: ELF_BYTES },
+    ]);
+    const { libs, truncated, totalBytes } = await extractArm64LibsDetailed(apk);
+    expect(truncated).toBe(false);
+    expect(libs).toHaveLength(2);
+    expect(totalBytes).toBe(ELF_BYTES.length * 2);
+  });
+
+  it('stops collecting and marks truncated when the aggregate cap is exceeded', async () => {
+    const chunk = new Uint8Array(100);
+    const apk = await writeApk('bomb.apk', [
+      { name: 'lib/arm64-v8a/liba.so', data: chunk },
+      { name: 'lib/arm64-v8a/libb.so', data: chunk },
+      { name: 'lib/arm64-v8a/libc.so', data: chunk },
+      { name: 'lib/arm64-v8a/libd.so', data: chunk },
+    ]);
+    const { libs, truncated, totalBytes } = await extractArm64LibsDetailed(apk, {
+      maxTotalBytes: 250,
+    });
+    expect(truncated).toBe(true);
+    expect(libs.map((l) => l.name)).toEqual(['liba.so', 'libb.so']);
+    expect(totalBytes).toBe(200);
+  });
+
+  it('extractArm64Libs preserves the array-returning contract', async () => {
+    const chunk = new Uint8Array(100);
+    const apk = await writeApk('bomb-legacy.apk', [
+      { name: 'lib/arm64-v8a/liba.so', data: chunk },
+      { name: 'lib/arm64-v8a/libb.so', data: chunk },
+      { name: 'lib/arm64-v8a/libc.so', data: chunk },
+    ]);
+    const libs = await extractArm64Libs(apk);
+    // Default cap is far above these tiny libs, so nothing is truncated here —
+    // this only pins the array-returning contract for existing callers.
+    expect(libs.map((l) => l.name)).toEqual(['liba.so', 'libb.so', 'libc.so']);
   });
 });

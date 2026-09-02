@@ -35,4 +35,4 @@ class LogEntry(object):
         )
 
     def __repr__(self):
-        return '<LogEntry [{}] {}>'.format(self.level, self.text[:60])
+        return '<LogEntry [{}] {}>'.format(self.level, (self.text or '')[:60])

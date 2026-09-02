@@ -15,17 +15,52 @@
  *   captured-data → replay-artifact (replays)
  */
 import type { ReverseEvidenceGraph } from '@server/evidence/ReverseEvidenceGraph';
+import type { EvidenceEdgeType } from '@server/evidence/types';
 import type { InstrumentationOperation, InstrumentationArtifact } from './types';
 
 export class EvidenceGraphBridge {
+  private readonly graph: ReverseEvidenceGraph;
   /** Maps operationId → primary evidence node ID for edge linking. */
   private readonly operationNodeMap = new Map<string, string>();
   /** Maps operationId → request node ID for manual linking / replay chaining. */
   private readonly requestNodeMap = new Map<string, string>();
 
-  constructor(private readonly graph: ReverseEvidenceGraph) {}
+  /** Independent cap on bridge-side maps to prevent unbounded growth. */
+  private static readonly MAX_MAP_ENTRIES = 10_000;
+
+  constructor(graph: ReverseEvidenceGraph) {
+    this.graph = graph;
+  }
 
   // ── Helpers ─────────────────────────────────────────────
+
+  /**
+   * Add an edge only when both endpoints still exist in the graph.
+   *
+   * ReverseEvidenceGraph evicts its oldest nodes under a size cap, which can
+   * retire a node the bridge already recorded. `addEdge` throws on a dangling
+   * endpoint; skipping here degrades gracefully instead of crashing long-lived
+   * sessions — the evidence edge is lost together with the evicted node anyway.
+   */
+  private linkSafe(sourceId: string, targetId: string, type: EvidenceEdgeType): void {
+    if (this.graph.getNode(sourceId) === undefined) return;
+    if (this.graph.getNode(targetId) === undefined) return;
+    this.graph.addEdge(sourceId, targetId, type);
+  }
+
+  /**
+   * Insert into a bridge map, evicting the oldest entry once the cap is crossed.
+   * Maps are keyed by operationId and preserve insertion order, so the oldest
+   * entry is the map's first key.
+   */
+  private static setWithPrune(map: Map<string, string>, key: string, value: string): void {
+    map.set(key, value);
+    while (map.size > EvidenceGraphBridge.MAX_MAP_ENTRIES) {
+      const oldestKey = map.keys().next().value;
+      if (oldestKey === undefined) break;
+      map.delete(oldestKey);
+    }
+  }
 
   private getString(value: unknown): string | undefined {
     return typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -56,7 +91,7 @@ export class EvidenceGraphBridge {
 
   /** Manually link a request node to an initiator-stack node. */
   linkRequestToInitiator(requestNodeId: string, initiatorStackNodeId: string): void {
-    this.graph.addEdge(requestNodeId, initiatorStackNodeId, 'initiates');
+    this.linkSafe(requestNodeId, initiatorStackNodeId, 'initiates');
   }
 
   /**
@@ -83,7 +118,7 @@ export class EvidenceGraphBridge {
             sessionId: op.sessionId,
             operationId: op.id,
           });
-          this.graph.addEdge(scriptNode.id, funcNode.id, 'contains');
+          this.linkSafe(scriptNode.id, funcNode.id, 'contains');
         }
 
         // function → breakpoint-hook (triggers)
@@ -93,7 +128,7 @@ export class EvidenceGraphBridge {
           operationId: op.id,
           config: op.config,
         });
-        this.graph.addEdge(funcNode.id, hookNode.id, 'triggers');
+        this.linkSafe(funcNode.id, hookNode.id, 'triggers');
         primaryNodeId = hookNode.id;
         break;
       }
@@ -106,7 +141,7 @@ export class EvidenceGraphBridge {
           operationId: op.id,
           config: op.config,
         });
-        this.requestNodeMap.set(op.id, reqNode.id);
+        EvidenceGraphBridge.setWithPrune(this.requestNodeMap, op.id, reqNode.id);
 
         // request → initiator-stack (initiates)
         const initiatorLabel = this.getInitiatorLabel(op.config);
@@ -130,7 +165,7 @@ export class EvidenceGraphBridge {
             sessionId: op.sessionId,
             operationId: op.id,
           });
-          this.graph.addEdge(initiatorNodeId, scriptNode.id, 'loads');
+          this.linkSafe(initiatorNodeId, scriptNode.id, 'loads');
         }
 
         primaryNodeId = reqNode.id;
@@ -153,7 +188,7 @@ export class EvidenceGraphBridge {
             sessionId: op.sessionId,
             operationId: op.id,
           });
-          this.graph.addEdge(scriptNode.id, funcNode.id, 'contains');
+          this.linkSafe(scriptNode.id, funcNode.id, 'contains');
         }
 
         primaryNodeId = funcNode.id;
@@ -172,7 +207,7 @@ export class EvidenceGraphBridge {
     }
 
     if (primaryNodeId) {
-      this.operationNodeMap.set(op.id, primaryNodeId);
+      EvidenceGraphBridge.setWithPrune(this.operationNodeMap, op.id, primaryNodeId);
     }
 
     return primaryNodeId;
@@ -186,6 +221,12 @@ export class EvidenceGraphBridge {
   onArtifact(artifact: InstrumentationArtifact): void {
     const operationNodeId = this.operationNodeMap.get(artifact.operationId);
 
+    // Drop stale map entries whose backing node was evicted, so the link below
+    // degrades to a skip instead of throwing on a dangling endpoint.
+    if (operationNodeId !== undefined && this.graph.getNode(operationNodeId) === undefined) {
+      this.operationNodeMap.delete(artifact.operationId);
+    }
+
     const dataNode = this.graph.addNode('captured-data', `data:${artifact.operationId}`, {
       sessionId: artifact.sessionId,
       operationId: artifact.operationId,
@@ -195,7 +236,7 @@ export class EvidenceGraphBridge {
 
     // Link operation node → captured-data (captures)
     if (operationNodeId) {
-      this.graph.addEdge(operationNodeId, dataNode.id, 'captures');
+      this.linkSafe(operationNodeId, dataNode.id, 'captures');
     }
 
     // captured-data → replay-artifact (replays)
@@ -210,7 +251,7 @@ export class EvidenceGraphBridge {
         method: artifact.data.method,
         statusCode: artifact.data.statusCode,
       });
-      this.graph.addEdge(dataNode.id, replayNode.id, 'replays');
+      this.linkSafe(dataNode.id, replayNode.id, 'replays');
     }
   }
 }

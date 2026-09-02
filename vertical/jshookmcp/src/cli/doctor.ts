@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 
+import { bootstrapRuntimeEnv } from '@src/config/env-bootstrap';
 import { formatEnvironmentDoctorReport, runEnvironmentDoctor } from '@utils/environmentDoctor';
+
+bootstrapRuntimeEnv();
 
 const report = await runEnvironmentDoctor({ includeBridgeHealth: true });
 process.stdout.write(`${formatEnvironmentDoctorReport(report)}\n`);

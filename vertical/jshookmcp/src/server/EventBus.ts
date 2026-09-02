@@ -20,6 +20,8 @@ export interface ServerEventMap {
     sessionId?: string | null;
     timestamp: string;
     success: boolean;
+    /** Wall-clock duration of the completed call (ms). Absent on pre-duration emitters. */
+    durationMs?: number;
     args?: Record<string, unknown>;
     result?: {
       success?: boolean;
@@ -44,6 +46,12 @@ export interface ServerEventMap {
     timestamp: string;
   };
   'evidence:updated': { timestamp: string; reason: string };
+  'evidence-evicted': {
+    reason: 'node-cap' | 'edge-cap';
+    droppedNodes: number;
+    droppedEdges: number;
+    timestamp: string;
+  };
   'network:intercept_started': { interceptType: string; timestamp: string };
   'network:dns_resolved': { hostname: string; count: number; timestamp: string };
   'network:dns_reversed': { address: string; count: number; timestamp: string };

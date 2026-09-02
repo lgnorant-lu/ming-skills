@@ -24,6 +24,9 @@ export async function fetchRealEnvironmentData(
   const { url, detected, depth, resolveExecutablePath, buildManifestFromTemplate } = params;
   const manifest: ManifestRecord = {};
 
+  // A browser we launched ourselves is owned by this call: it must be closed
+  // when extraction fails, since the caller has no reference to it.
+  const ownsBrowser = !params.browser;
   let browser = params.browser;
   let page: Page | undefined;
 
@@ -442,7 +445,17 @@ export async function fetchRealEnvironmentData(
     logger.info(`  ${Object.keys(manifest).length} `);
   } catch (error) {
     logger.warn('Variable extraction failed', error);
-    return { manifest: buildManifestFromTemplate(detected, 'chrome'), browser };
+    if (ownsBrowser && browser) {
+      try {
+        await browser.close();
+      } catch {
+        // ignore browser close errors
+      }
+    }
+    return {
+      manifest: buildManifestFromTemplate(detected, 'chrome'),
+      browser: ownsBrowser ? undefined : browser,
+    };
   } finally {
     if (page) {
       try {

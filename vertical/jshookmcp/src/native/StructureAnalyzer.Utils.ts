@@ -10,11 +10,18 @@ import type { ProcessHandle } from './platform/types.js';
 import { nativeMemoryManager } from './NativeMemoryManager.impl';
 
 export class StructAnalyzerUtils {
-  constructor(private provider: PlatformMemoryAPI) {}
+  private provider: PlatformMemoryAPI;
+  constructor(provider: PlatformMemoryAPI) {
+    this.provider = provider;
+  }
 
-  readCString(handle: ProcessHandle, address: bigint, maxLen: number): string | null {
+  async readCString(
+    handle: ProcessHandle,
+    address: bigint,
+    maxLen: number,
+  ): Promise<string | null> {
     try {
-      const buf = this.provider.readMemory(handle, address, maxLen).data;
+      const buf = (await this.provider.readMemory(handle, address, maxLen)).data;
       const nullIdx = buf.indexOf(0);
       if (nullIdx < 0) return null;
       const str = buf.subarray(0, nullIdx).toString('ascii');

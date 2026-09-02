@@ -58,12 +58,12 @@ export interface ExtensionTarget {
   url: string;
 }
 
-const enum VlqConstant {
-  BASE_SHIFT = 5,
-  BASE = 1 << BASE_SHIFT,
-  BASE_MASK = BASE - 1,
-  CONTINUATION_BIT = BASE,
-}
+const VlqConstant = {
+  BASE_SHIFT: 5,
+  BASE: 1 << 5, // 1 << BASE_SHIFT
+  BASE_MASK: (1 << 5) - 1, // BASE - 1
+  CONTINUATION_BIT: 1 << 5, // BASE
+} as const;
 
 const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 

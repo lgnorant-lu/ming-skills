@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
     /* Language and Environment */
-    "target": "ES2023",
-    "lib": ["ES2023", "DOM"],
+    "target": "ES2024",
+    "lib": ["ES2024", "DOM"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
@@ -14,7 +14,6 @@
       "@modules/*": ["./src/modules/*"],
       "@native/*": ["./src/native/*"],
       "@server/*": ["./src/server/*"],
-      "@services/*": ["./src/services/*"],
       "@tests/*": ["./tests/*"],
       "@internal-types/*": ["./src/types/*"],
       "@utils/*": ["./src/utils/*"]
@@ -35,6 +34,7 @@
     "forceConsistentCasingInFileNames": true,
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
 
     /* Type Checking */
     "strict": true,

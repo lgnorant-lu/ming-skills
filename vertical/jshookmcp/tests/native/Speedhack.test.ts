@@ -23,10 +23,17 @@ vi.mock('@native/Win32API', () => ({
   VirtualAllocEx: vi.fn(() => 0x50000n),
   VirtualFreeEx: vi.fn(() => true),
   VirtualProtectEx: vi.fn(() => ({ success: true, oldProtect: 0x20 })),
-  GetModuleHandle: vi.fn(() => 0x7ff000000000n),
+  GetModuleHandle: vi.fn((name: string) => {
+    if (name === 'kernel32.dll') return 0x7ff000000000n;
+    if (name === 'winmm.dll') return 0x7ff100000000n;
+    return 0n;
+  }),
   GetProcAddress: vi.fn((base: bigint, name: string) => {
     if (name === 'GetTickCount64') return base + 0x1000n;
     if (name === 'QueryPerformanceCounter') return base + 0x2000n;
+    if (name === 'QueryPerformanceFrequency') return base + 0x3000n;
+    if (name === 'timeGetTime') return base + 0x4000n;
+    if (name === 'GetSystemTimeAsFileTime') return base + 0x5000n;
     return 0n;
   }),
   PAGE: { EXECUTE_READWRITE: 0x40, EXECUTE_READ: 0x20 },
@@ -51,6 +58,9 @@ describe('Speedhack', () => {
       expect(result.success).toBe(true);
       expect(result.hookedApis).toContain('GetTickCount64');
       expect(result.hookedApis).toContain('QueryPerformanceCounter');
+      expect(result.hookedApis).toContain('QueryPerformanceFrequency');
+      expect(result.hookedApis).toContain('timeGetTime');
+      expect(result.hookedApis).toContain('GetSystemTimeAsFileTime');
     });
 
     it('should mark process as active', async () => {
@@ -141,14 +151,18 @@ describe('Speedhack', () => {
     it('should hook functions creating JMP detours', async () => {
       // If apply succeeds with both APIs, the JMP builder worked
       const result = await sh.apply(1234, 2.0);
-      expect(result.hookedApis.length).toBe(2);
+      expect(result.hookedApis.length).toBe(5);
     });
   });
 
   describe('resource hygiene (leaks / double-close / concurrent apply)', () => {
-    it('closes the process handle exactly once on the failure path', async () => {
-      vi.mocked(GetModuleHandle).mockReturnValueOnce(0n); // kernel32 lookup fails
-      await expect(sh.apply(1234, 2.0)).rejects.toThrow(/kernel32/);
+    it('returns success:false when no timer modules are available (handle closed)', async () => {
+      // Make ALL module lookups fail (both kernel32 and winmm) — hook loop is empty.
+      vi.mocked(GetModuleHandle).mockReturnValue(0n);
+      const result = await sh.apply(1234, 2.0);
+      expect(result.success).toBe(false);
+      expect(result.hookedApis).toHaveLength(0);
+      // Process handle is still closed in the finally block.
       expect(vi.mocked(CloseHandle)).toHaveBeenCalledTimes(1);
     });
 
@@ -218,6 +232,38 @@ describe('Speedhack', () => {
       await sh.remove(1234);
       expect(vi.mocked(VirtualFreeEx)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(CloseHandle)).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('HOOK_TARGETS completeness', () => {
+    it('should define 6 hook targets (3 original + 3 new)', async () => {
+      const result = await sh.apply(1234, 2.0);
+      expect(result.hookedApis).toHaveLength(5); // GetTickCount returns 0n (not available)
+      const allNames = result.hookedApis.toSorted();
+      expect(allNames).toEqual([
+        'GetSystemTimeAsFileTime',
+        'GetTickCount64',
+        'QueryPerformanceCounter',
+        'QueryPerformanceFrequency',
+        'timeGetTime',
+      ]);
+    });
+
+    it('should hook QPF (QueryPerformanceFrequency) and scale via division', async () => {
+      const result = await sh.apply(5678, 2.0);
+      expect(result.hookedApis).toContain('QueryPerformanceFrequency');
+    });
+
+    it('should hook GetSystemTimeAsFileTime (pointer-parameter, void return)', async () => {
+      const result = await sh.apply(9012, 0.5);
+      expect(result.hookedApis).toContain('GetSystemTimeAsFileTime');
+    });
+
+    it('should hook timeGetTime from winmm.dll', async () => {
+      const result = await sh.apply(3456, 1.0);
+      expect(result.hookedApis).toContain('timeGetTime');
+      // Verify winmm.dll was queried
+      expect(vi.mocked(GetModuleHandle)).toHaveBeenCalledWith('winmm.dll');
     });
   });
 });

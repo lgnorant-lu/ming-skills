@@ -12,7 +12,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { logger } from '@utils/logger';
-import koffi from 'koffi';
+import { requireKoffi } from './koffi-loader';
 import { openProcessForMemory, CloseHandle, ReadProcessMemory } from '@native/Win32API';
 import { ToolError } from '@errors/ToolError';
 import {
@@ -36,7 +36,7 @@ import { parseProcMaps } from '@modules/process/memory/linux/mapsParser';
 
 let heapApisCache: ReturnType<typeof winLoadHeapApis> | null = null;
 function winLoadHeapApis() {
-  const k32 = koffi.load('kernel32.dll');
+  const k32 = requireKoffi().load('kernel32.dll');
   return {
     CreateToolhelp32Snapshot: k32.func('CreateToolhelp32Snapshot', 'intptr', ['uint32', 'uint32']),
     Heap32ListFirst: k32.func('Heap32ListFirst', 'bool', ['intptr', '_Inout_ uint8_t *']),

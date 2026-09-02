@@ -1,4 +1,5 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
+import { DEBUGGER_WAIT_FOR_PAUSED_TIMEOUT_MS } from '@src/constants/analysis';
 import { tool } from '@server/registry/tool-builder';
 
 export const DEBUGGER_CORE_TOOLS: Tool[] = [
@@ -21,11 +22,15 @@ export const DEBUGGER_CORE_TOOLS: Tool[] = [
       .number('lineNumber', 'Line number 0-based', { minimum: 0 })
       .number('columnNumber', 'Column number 0-based', { minimum: 0 })
       .string('condition', 'Optional conditional expression for the temporary breakpoint')
-      .number('timeout', 'Timeout in milliseconds (default: 30000)', {
-        default: 30000,
-        minimum: 1000,
-        maximum: 120000,
-      })
+      .number(
+        'timeout',
+        `Timeout in milliseconds (default: ${DEBUGGER_WAIT_FOR_PAUSED_TIMEOUT_MS})`,
+        {
+          default: DEBUGGER_WAIT_FOR_PAUSED_TIMEOUT_MS,
+          minimum: 1000,
+          maximum: 120000,
+        },
+      )
       .required('lineNumber'),
   ),
   tool('debugger_step', (t) =>
@@ -105,11 +110,15 @@ Types & params:
   tool('debugger_wait_for_paused', (t) =>
     t
       .desc('Wait for debugger pause after setting breakpoints.')
-      .number('timeout', 'Timeout in milliseconds (default: 30000)', {
-        default: 30000,
-        minimum: 1000,
-        maximum: 120000,
-      })
+      .number(
+        'timeout',
+        `Timeout in milliseconds (default: ${DEBUGGER_WAIT_FOR_PAUSED_TIMEOUT_MS})`,
+        {
+          default: DEBUGGER_WAIT_FOR_PAUSED_TIMEOUT_MS,
+          minimum: 1000,
+          maximum: 120000,
+        },
+      )
       .query(),
   ),
   tool('debugger_capture_hit', (t) =>
@@ -117,11 +126,15 @@ Types & params:
       .desc(
         'Wait for the next debugger pause and capture call stack plus optional top-frame scope variables.',
       )
-      .number('timeout', 'Timeout in milliseconds (default: 30000)', {
-        default: 30000,
-        minimum: 1000,
-        maximum: 120000,
-      })
+      .number(
+        'timeout',
+        `Timeout in milliseconds (default: ${DEBUGGER_WAIT_FOR_PAUSED_TIMEOUT_MS})`,
+        {
+          default: DEBUGGER_WAIT_FOR_PAUSED_TIMEOUT_MS,
+          minimum: 1000,
+          maximum: 120000,
+        },
+      )
       .boolean('includeScope', 'Include top-frame scope variables in the capture.', {
         default: true,
       })

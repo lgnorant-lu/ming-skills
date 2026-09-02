@@ -18,12 +18,11 @@ export interface CDPSessionLike {
 }
 
 export class CDPTimingProxy implements CDPSessionLike {
+  private readonly wrapped: CDPSessionLike;
   private options: CDPTimingOptions;
 
-  constructor(
-    private readonly wrapped: CDPSessionLike,
-    options?: Partial<CDPTimingOptions>,
-  ) {
+  constructor(wrapped: CDPSessionLike, options?: Partial<CDPTimingOptions>) {
+    this.wrapped = wrapped;
     this.options = { ...DEFAULT_TIMING_OPTIONS, ...options };
   }
 

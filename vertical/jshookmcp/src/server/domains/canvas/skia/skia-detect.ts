@@ -12,6 +12,20 @@ import { correlateToJS } from '@modules/skia-capture/SkiaObjectCorrelator';
 import type { JSObjectInfo } from '@modules/skia-capture/SkiaObjectCorrelator';
 
 /**
+ * Build the NOT_FOUND ToolError shared by SKIA-02/SKIA-03 when the active
+ * canvas engine exposes no Skia scene graph. Only the operation noun differs
+ * between the two call sites; the canvasId suffix and reason are identical.
+ */
+function unsupportedSceneError(operation: string, canvasId: string | undefined): ToolError {
+  return new ToolError(
+    'NOT_FOUND',
+    `Skia ${operation} is not supported for the active canvas engine (canvasId=${
+      canvasId || 'auto'
+    }); no Skia scene graph is exposed via the DOM`,
+  );
+}
+
+/**
  * Handler for skia_detect_renderer (SKIA-01).
  */
 export async function detectRenderer(
@@ -44,6 +58,10 @@ export async function dumpScene(
     includeDrawCommands,
   );
 
+  if (sceneTree.unsupported) {
+    throw unsupportedSceneError('scene extraction', canvasId);
+  }
+
   return {
     sceneTree,
     canvasId: canvasId || 'auto',
@@ -67,17 +85,30 @@ export async function correlateObjects(
   // Extract Skia scene
   const sceneTree = await extractSceneTree(pageController, canvasId || undefined, true);
 
-  if (sceneTree.layers.length === 0 && sceneTree.drawCommands.length === 0) {
-    throw new ToolError('PREREQUISITE', 'No Skia scene data available for correlation');
+  if (sceneTree.unsupported) {
+    throw unsupportedSceneError('object correlation', canvasId);
   }
 
-  // Get JS objects from v8-inspector if available
+  if (sceneTree.layers.length === 0 && sceneTree.drawCommands.length === 0) {
+    throw new ToolError(
+      'PREREQUISITE',
+      `No Skia scene data available for correlation (canvasId=${canvasId || 'auto'})`,
+    );
+  }
+
+  // Get JS objects from v8-inspector if available — degrade gracefully, but
+  // surface the failure so 'no correlations' is distinguishable from a
+  // v8-inspector integration error.
   let jsObjects: JSObjectInfo[] = [];
+  let jsObjectsWarning: string | undefined;
   if (getJSObjects) {
     try {
       jsObjects = await getJSObjects();
-    } catch {
+    } catch (err) {
       jsObjects = [];
+      jsObjectsWarning = `v8-inspector JS object fetch failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
     }
   }
 
@@ -102,5 +133,6 @@ export async function correlateObjects(
     canvasId: canvasId || 'auto',
     skiaNodeIds: skiaNodeIds.length > 0 ? skiaNodeIds : undefined,
     correlationComplete: true,
+    ...(jsObjectsWarning ? { warning: jsObjectsWarning } : {}),
   };
 }

@@ -51,3 +51,5 @@ export * from './mojo.js';
 export * from './boringssl.js';
 export * from './process.js';
 export * from './syscall-hook.js';
+export * from './hypervisor.js';
+export * from './byovd.js';

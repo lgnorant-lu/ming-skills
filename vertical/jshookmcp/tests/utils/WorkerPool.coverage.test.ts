@@ -9,6 +9,8 @@ type Listener = (payload: any) => void;
 
 const workerState = vi.hoisted(() => {
   class WorkerMock {
+    public readonly script: string;
+    public readonly options: Record<string, unknown>;
     public listeners = new Map<string, Listener[]>();
     public postMessage = vi.fn();
     public terminate = vi.fn(async () => 0);
@@ -21,10 +23,10 @@ const workerState = vi.hoisted(() => {
       return this;
     });
 
-    constructor(
-      public readonly script: string,
-      public readonly options: Record<string, unknown>,
-    ) {}
+    constructor(script: string, options: Record<string, unknown>) {
+      this.script = script;
+      this.options = options;
+    }
 
     on(event: string, callback: Listener) {
       const callbacks = this.listeners.get(event) ?? [];
@@ -444,7 +446,9 @@ describe('WorkerPool – v8 ignore branch coverage', () => {
 
     expect(worker.removeAllListeners).toHaveBeenCalledWith('message');
     expect(worker.removeAllListeners).toHaveBeenCalledWith('error');
-    expect(worker.removeAllListeners).toHaveBeenCalledWith('exit');
+    // The 'exit' listener must survive termination: ProcessRegistry relies on
+    // its own once('exit') to auto-deregister the dead worker.
+    expect(worker.removeAllListeners).not.toHaveBeenCalledWith('exit');
     // idleTimer was set by armIdleTimer and cleared by terminateWorker
     expect(pooledWorker?.idleTimer).toBeNull();
 

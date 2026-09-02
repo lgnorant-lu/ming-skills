@@ -1,20 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import {
-  decodeMsgPack,
-  decodeMsgPackArray,
-  decodeMsgPackMap,
-  decodeMsgPackValue,
-  ensureRange,
-  msgPackMapKey,
-} from '@server/domains/encoding/encoding-msgpack';
+import { decodeMsgPack, msgPackMapKey } from '@server/domains/encoding/encoding-msgpack';
 
 const tool = {
   decodeMsgPack,
-  decodeMsgPackValue,
-  decodeMsgPackArray,
-  decodeMsgPackMap,
   msgPackMapKey,
-  ensureRange,
 };
 
 const b = (...bytes: number[]) => Buffer.from(bytes);
@@ -157,37 +146,6 @@ function encodeMap32(entries: Array<[Buffer, Buffer]>): Buffer {
   return concat(...parts);
 }
 
-describe('EncodingToolHandlersMsgPack.ensureRange', () => {
-  it('allows a valid range', async () => {
-    const buffer = Buffer.from([0x00, 0x01, 0x02]);
-    expect(() => tool.ensureRange(buffer, 1, 2)).not.toThrow();
-  });
-
-  it('throws when offset is out of bounds', async () => {
-    const buffer = Buffer.from([0x00, 0x01, 0x02]);
-    expect(() => tool.ensureRange(buffer, 4, 0)).toThrow(
-      'Unexpected EOF while reading 0 bytes at offset 4',
-    );
-  });
-
-  it('throws when length exceeds buffer', async () => {
-    const buffer = Buffer.from([0x00, 0x01, 0x02]);
-    expect(() => tool.ensureRange(buffer, 2, 2)).toThrow(
-      'Unexpected EOF while reading 2 bytes at offset 2',
-    );
-  });
-
-  it('throws on negative values', async () => {
-    const buffer = Buffer.from([0x00, 0x01, 0x02]);
-    expect(() => tool.ensureRange(buffer, -1, 1)).toThrow(
-      'Unexpected EOF while reading 1 bytes at offset -1',
-    );
-    expect(() => tool.ensureRange(buffer, 0, -1)).toThrow(
-      'Unexpected EOF while reading -1 bytes at offset 0',
-    );
-  });
-});
-
 describe('EncodingToolHandlersMsgPack.msgPackMapKey', () => {
   it('returns string keys unchanged', async () => {
     expect(tool.msgPackMapKey('alpha')).toBe('alpha');
@@ -319,31 +277,19 @@ describe('EncodingToolHandlersMsgPack.decodeMsgPack (single value)', () => {
   it('decodes bin8', async () => {
     const payload = Buffer.from([0x01, 0x02, 0x03]);
     const decoded = tool.decodeMsgPack(encodeBin8(payload));
-    expect(decoded).toEqual({
-      type: 'bytes',
-      base64: payload.toString('base64'),
-      hex: payload.toString('hex'),
-    });
+    expect(decoded).toEqual({ base64: payload.toString('base64') });
   });
 
   it('decodes bin16', async () => {
     const payload = Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x00]);
     const decoded = tool.decodeMsgPack(encodeBin16(payload));
-    expect(decoded).toEqual({
-      type: 'bytes',
-      base64: payload.toString('base64'),
-      hex: payload.toString('hex'),
-    });
+    expect(decoded).toEqual({ base64: payload.toString('base64') });
   });
 
   it('decodes bin32', async () => {
     const payload = Buffer.from([0x10, 0x20, 0x30, 0x40]);
     const decoded = tool.decodeMsgPack(encodeBin32(payload));
-    expect(decoded).toEqual({
-      type: 'bytes',
-      base64: payload.toString('base64'),
-      hex: payload.toString('hex'),
-    });
+    expect(decoded).toEqual({ base64: payload.toString('base64') });
   });
 
   it('decodes array16', async () => {
@@ -368,115 +314,8 @@ describe('EncodingToolHandlersMsgPack.decodeMsgPack (single value)', () => {
 
   it('throws when decode does not consume the whole buffer', async () => {
     expect(() => tool.decodeMsgPack(b(0x01, 0x00))).toThrow(
-      'MessagePack decode ended early: consumed 1 of 2 bytes',
+      /Extra 1 of 2 byte\(s\) found at buffer\[1\]/,
     );
-  });
-});
-
-describe('EncodingToolHandlersMsgPack.decodeMsgPackValue (offset + safety)', () => {
-  it('throws when depth exceeds safety limit', async () => {
-    expect(() => tool.decodeMsgPackValue(b(0x01), 0, 65)).toThrow(
-      'MessagePack decode depth exceeds safety limit',
-    );
-  });
-
-  it('throws on unexpected EOF when startOffset is beyond buffer', async () => {
-    expect(() => tool.decodeMsgPackValue(Buffer.alloc(0), 0, 0)).toThrow(
-      'Unexpected EOF at offset 0',
-    );
-    expect(() => tool.decodeMsgPackValue(b(0x01), 2, 0)).toThrow('Unexpected EOF at offset 2');
-  });
-
-  it('returns value + next offset without requiring full-buffer consumption', async () => {
-    const buf = concat(b(0xcc, 0xff), b(0x01));
-    const decoded = tool.decodeMsgPackValue(buf, 0, 0);
-    expect(decoded).toEqual({ value: 255, offset: 2 });
-  });
-
-  it('decodes from a non-zero startOffset', async () => {
-    const buf = concat(b(0x01), encodeFixStr('a'), b(0x02));
-    const decoded = tool.decodeMsgPackValue(buf, 1, 0);
-    expect(decoded).toEqual({ value: 'a', offset: 3 });
-  });
-
-  it('throws on unsupported prefix', async () => {
-    expect(() => tool.decodeMsgPackValue(b(0xc1), 0, 0)).toThrow(
-      'Unsupported MessagePack prefix 0xc1 at offset 0',
-    );
-  });
-
-  it('throws on truncated fixstr payload (ensureRange)', async () => {
-    // fixstr length=2 but only 1 byte present
-    expect(() => tool.decodeMsgPackValue(b(0xa2, 0x61), 0, 0)).toThrow(
-      'Unexpected EOF while reading 2 bytes at offset 1',
-    );
-  });
-
-  it('decodes fixext1', async () => {
-    const payload = Buffer.from([0xab]);
-    const buf = concat(b(0xd4), b(0x05), payload);
-    expect(tool.decodeMsgPackValue(buf, 0, 0)).toEqual({
-      value: {
-        type: 'ext',
-        extType: 5,
-        base64: payload.toString('base64'),
-        hex: payload.toString('hex'),
-      },
-      offset: 3,
-    });
-  });
-
-  it('decodes ext8', async () => {
-    const payload = Buffer.from([0xde, 0xad, 0xbe]);
-    const buf = concat(b(0xc7, payload.length), b(0xff), payload);
-    const decoded = tool.decodeMsgPackValue(buf, 0, 0);
-    expect(decoded).toEqual({
-      value: {
-        type: 'ext',
-        extType: -1,
-        base64: payload.toString('base64'),
-        hex: payload.toString('hex'),
-      },
-      offset: 1 + 1 + 1 + payload.length,
-    });
-  });
-});
-
-describe('EncodingToolHandlersMsgPack.decodeMsgPackArray', () => {
-  it('decodes an empty array when length=0', async () => {
-    const decoded = tool.decodeMsgPackArray(Buffer.alloc(0), 0, 0, 0);
-    expect(decoded).toEqual({ value: [], offset: 0 });
-  });
-
-  it('decodes an array with mixed types', async () => {
-    const buf = concat(b(0x01), encodeFixStr('a'), b(0xc0), b(0xc3));
-    const decoded = tool.decodeMsgPackArray(buf, 0, 4, 0);
-    expect(decoded).toEqual({ value: [1, 'a', null, true], offset: buf.length });
-  });
-});
-
-describe('EncodingToolHandlersMsgPack.decodeMsgPackMap', () => {
-  it('decodes an empty map when length=0', async () => {
-    const decoded = tool.decodeMsgPackMap(Buffer.alloc(0), 0, 0, 0);
-    expect(decoded).toEqual({ value: {}, offset: 0 });
-  });
-
-  it('decodes a map with various key/value types', async () => {
-    const buf = concat(
-      encodeFixStr('a'),
-      b(0x01),
-      b(0x02),
-      b(0xc2),
-      b(0xc3),
-      encodeFixStr('yes'),
-      b(0xc0),
-      b(0x00),
-    );
-    const decoded = tool.decodeMsgPackMap(buf, 0, 4, 0);
-    expect(decoded).toEqual({
-      value: { a: 1, '2': false, true: 'yes', null: 0 },
-      offset: buf.length,
-    });
   });
 });
 
@@ -491,7 +330,7 @@ describe('Roundtrip (manually encoded bytes -> decodeMsgPack)', () => {
 
     expect(tool.decodeMsgPack(nested)).toEqual({
       arr: [1, 2, 'x'],
-      bin: { type: 'bytes', base64: bytes.toString('base64'), hex: bytes.toString('hex') },
+      bin: { base64: bytes.toString('base64') },
       nested: { true: false },
     });
   });

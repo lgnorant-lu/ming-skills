@@ -1031,16 +1031,20 @@ describe('BinaryInstrumentHandlers', () => {
 });
 
 class StubGhidraAnalyzer extends GhidraAnalyzer {
+  private readonly stub: {
+    available: boolean;
+    reason?: string;
+    analysis?: Awaited<ReturnType<GhidraAnalyzer['analyze']>>;
+  };
   analyzeCalls: Array<{ binaryPath: string; options: { timeout?: number } | undefined }> = [];
 
-  constructor(
-    private readonly stub: {
-      available: boolean;
-      reason?: string;
-      analysis?: Awaited<ReturnType<GhidraAnalyzer['analyze']>>;
-    },
-  ) {
+  constructor(stub: {
+    available: boolean;
+    reason?: string;
+    analysis?: Awaited<ReturnType<GhidraAnalyzer['analyze']>>;
+  }) {
     super({ discoveryPaths: [] });
+    this.stub = stub;
   }
 
   override async getAvailability() {

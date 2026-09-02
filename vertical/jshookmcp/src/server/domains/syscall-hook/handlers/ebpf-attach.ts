@@ -236,7 +236,7 @@ function extractSyscallName(probe: string, syscalls: string[]): string | undefin
   const match = /sys_(?:enter|exit)_(\w+)$/.exec(probe);
   if (!match) return undefined;
   const name = match[1]!;
-  return syscalls.includes(name) ? name : name;
+  return syscalls.includes(name) ? name : undefined;
 }
 
 function extractEnterArgs(parsed: Record<string, unknown>): string[] {
@@ -318,9 +318,19 @@ async function captureLiveBpftrace(
         });
 
         const stdoutLines: string[] = [];
+        let stdoutBuffer = '';
         const warnings: string[] = [];
         let stderr = '';
         let settled = false;
+
+        // Flush any partial line left in the buffer (JSON lines split across
+        // chunk boundaries must be reassembled before parsing).
+        const flushStdout = () => {
+          if (stdoutBuffer) {
+            stdoutLines.push(stdoutBuffer);
+            stdoutBuffer = '';
+          }
+        };
 
         const timer = setTimeout(
           () => {
@@ -332,6 +342,7 @@ async function captureLiveBpftrace(
               /* ignore */
             }
             // If we got some output, return what we have; otherwise timeout is an error
+            flushStdout();
             if (stdoutLines.length > 0) {
               const { events, warnings: parseWarns } = parseBpftraceJsonl(
                 stdoutLines,
@@ -347,12 +358,12 @@ async function captureLiveBpftrace(
         );
 
         child.stdout?.on('data', (chunk: Buffer) => {
-          const text = chunk.toString();
-          const lines = text.split('\n');
-          // Keep incomplete last line in buffer (handled by passing full split array)
-          for (const line of lines) {
-            stdoutLines.push(line);
-          }
+          // Reassemble chunk-split JSON lines: keep the trailing partial line
+          // in the buffer and only push complete lines for parsing.
+          stdoutBuffer += chunk.toString();
+          const lines = stdoutBuffer.split('\n');
+          stdoutBuffer = lines.pop() ?? '';
+          stdoutLines.push(...lines);
         });
 
         child.stderr?.on('data', (chunk: Buffer) => {
@@ -379,6 +390,7 @@ async function captureLiveBpftrace(
           clearTimeout(timer);
           // Flush remaining stderr
           if (stderr.trim()) warnings.push(stderr.trim());
+          flushStdout();
 
           if (code !== 0 && stdoutLines.length === 0) {
             reject(new Error(`bpftrace exited with code ${code}: ${warnings.join('; ')}`));
@@ -529,16 +541,18 @@ export async function handleSyscallEbpfAttach(
     };
   }
 
-  // Parse durationSec
+  // Parse durationSec — must be an integer: bpftrace `interval:s:<n>` rejects
+  // non-integer values, so a float would produce an unparseable script.
   let durationSec = argNumber(args, 'durationSec') ?? SYSCALL_TRACE_DURATION_DEFAULT_SEC;
   if (!Number.isFinite(durationSec)) durationSec = SYSCALL_TRACE_DURATION_DEFAULT_SEC;
   if (
+    !Number.isInteger(durationSec) ||
     durationSec < SYSCALL_TRACE_DURATION_MIN_SEC ||
     durationSec > SYSCALL_TRACE_DURATION_MAX_SEC
   ) {
     return {
       success: false,
-      error: `durationSec must be between ${SYSCALL_TRACE_DURATION_MIN_SEC} and ${SYSCALL_TRACE_DURATION_MAX_SEC}`,
+      error: `durationSec must be an integer between ${SYSCALL_TRACE_DURATION_MIN_SEC} and ${SYSCALL_TRACE_DURATION_MAX_SEC}`,
       pid: effectivePid,
       durationSec,
       syscallsTraced: effectiveSyscalls,

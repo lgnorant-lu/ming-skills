@@ -9,6 +9,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   parseContext,
   writeContext,
+  writeBreakpointRegisters,
+  readBreakpointRegisterAddress,
+  setSingleStepFlag,
   encodeDR7,
   CONTEXT_SIZE,
   CONTEXT_FLAGS,
@@ -380,6 +383,99 @@ describe('Win32Debug', () => {
       // Timeout
       mockFunc.mockReturnValueOnce(0);
       expect(WaitForDebugEvent(0)).toBeNull();
+    });
+  });
+
+  // ── Windows-on-ARM64 (ARM64_NT_CONTEXT) branch ──
+  // Layout verified against the Windows SDK winnt.h. These tests lock the
+  // offsets so the WOA path can't silently regress even though the branch is
+  // not exercisable at runtime on an x64 host. ARM64_NT_CONTEXT is 912 bytes:
+  // ContextFlags@0x00, Cpsr@0x04, X0..X28@0x08.., Fp@0xF0, Lr@0xF8, Sp@0x100,
+  // Pc@0x108, Bvr[8]@0x338, Bcr[8]@0x318, Wvr[2]@0x380, Wcr[2]@0x378.
+  describe('Windows-on-ARM64 (forceArm64)', () => {
+    const ARM64 = true;
+    const ARM64_CTX = 912;
+
+    it('parseContext reads ARM64_NT_CONTEXT fields at the SDK offsets', () => {
+      const buf = Buffer.alloc(ARM64_CTX);
+      buf.writeUInt32LE(0x0040000f, 0x00); // ContextFlags
+      buf.writeUInt32LE(0x600003c0, 0x04); // Cpsr
+      buf.writeBigUInt64LE(0x1111n, 0x08); // X0
+      buf.writeBigUInt64LE(0x2222n, 0xf0); // Fp (x29)
+      buf.writeBigUInt64LE(0x3333n, 0xf8); // Lr (x30)
+      buf.writeBigUInt64LE(0x5555n, 0x100); // Sp
+      buf.writeBigUInt64LE(0x6666n, 0x108); // Pc
+      buf.writeBigUInt64LE(0xaaaa0001n, 0x338); // Bvr0
+      buf.writeUInt32LE(0x2003, 0x318); // Bcr0
+      buf.writeBigUInt64LE(0xbbbb0002n, 0x380); // Wvr0
+      buf.writeUInt32LE(0x2003, 0x378); // Wcr0
+
+      const ctx = parseContext(buf, ARM64);
+      expect(ctx.contextFlags).toBe(0x0040000f);
+      expect(ctx.eflags).toBe(0x600003c0); // Cpsr → eflags slot
+      expect(ctx.rax).toBe(0x1111n);
+      expect(ctx.rbp).toBe(0x2222n); // Fp → rbp
+      expect(ctx.lr).toBe(0x3333n);
+      expect(ctx.rsp).toBe(0x5555n);
+      expect(ctx.rip).toBe(0x6666n); // Pc → rip
+      expect(ctx.bvr).toEqual([0xaaaa0001n, ...Array(7).fill(0n)]);
+      expect(ctx.bcr[0]).toBe(0x2003);
+      expect(ctx.wvr[0]).toBe(0xbbbb0002n);
+      expect(ctx.wcr[0]).toBe(0x2003);
+      // No DR registers on ARM64.
+      expect(ctx.dr0).toBe(0n);
+      expect(ctx.dr6).toBe(0n);
+      expect(ctx.dr7).toBe(0n);
+    });
+
+    it('writeContext writes ARM64 fields without touching DR bytes', () => {
+      const buf = Buffer.alloc(ARM64_CTX);
+      writeContext(
+        buf,
+        { rip: 0xdeadn, rsp: 0xbeefn, contextFlags: CONTEXT_FLAGS.ALL, eflags: 0x200000 },
+        ARM64,
+      );
+      expect(buf.readBigUInt64LE(0x108)).toBe(0xdeadn); // Pc
+      expect(buf.readBigUInt64LE(0x100)).toBe(0xbeefn); // Sp
+      expect(buf.readUInt32LE(0x00)).toBe(CONTEXT_FLAGS.ALL);
+      expect(buf.readUInt32LE(0x04)).toBe(0x200000); // Cpsr
+      expect(buf.readBigUInt64LE(0x48)).toBe(0n); // x64 Dr0 slot stays zero
+    });
+
+    it('writeBreakpointRegisters programs Wvr/Wcr watchpoint pair', () => {
+      const buf = Buffer.alloc(ARM64_CTX);
+      writeBreakpointRegisters(buf, 0, 0x1234n, true, 'readwrite', 'watch', ARM64);
+      expect(buf.readBigUInt64LE(0x380)).toBe(0x1234n); // Wvr0
+      expect(buf.readUInt32LE(0x378) & 0x2000).toBe(0x2000); // E (enabled) bit 13
+      // LSC load|store (bits 2-3) = 0b11 for readwrite → wcr&0b1100 === 0b1100
+      expect(buf.readUInt32LE(0x378) & 0b1100).toBe(0b1100);
+      // BAS (bits 0-1) = 0b1111 grandule → low 2 bits set
+      expect(buf.readUInt32LE(0x378) & 0b0011).toBe(0b0011);
+    });
+
+    it('readBreakpointRegisterAddress reads Wvr slots', () => {
+      const buf = Buffer.alloc(ARM64_CTX);
+      buf.writeBigUInt64LE(0x9999n, 0x380);
+      expect(readBreakpointRegisterAddress(buf, 0, ARM64)).toBe(0x9999n);
+      expect(readBreakpointRegisterAddress(buf, 1, ARM64)).toBe(0n);
+      expect(readBreakpointRegisterAddress(buf, 5, ARM64)).toBe(0n); // out of range
+    });
+
+    it('setSingleStepFlag toggles PSTATE.SS (bit 21) in Cpsr', () => {
+      const buf = Buffer.alloc(ARM64_CTX);
+      buf.writeUInt32LE(0, 0x04);
+      setSingleStepFlag(buf, true, ARM64);
+      expect(buf.readUInt32LE(0x04) & (1 << 21)).toBe(1 << 21);
+      setSingleStepFlag(buf, false, ARM64);
+      expect(buf.readUInt32LE(0x04) & (1 << 21)).toBe(0);
+    });
+
+    it('writeBreakpointRegisters ignores out-of-range watchpoint index', () => {
+      const buf = Buffer.alloc(ARM64_CTX);
+      writeBreakpointRegisters(buf, 2, 0x4444n, true, 'write', 'watch', ARM64);
+      // Wvr0/1 unchanged (only 2 watchpoints on ARM64)
+      expect(buf.readBigUInt64LE(0x380)).toBe(0n);
+      expect(buf.readBigUInt64LE(0x388)).toBe(0n);
     });
   });
 });

@@ -11,11 +11,17 @@ interface ConsoleHandlersDeps {
 }
 
 export class ConsoleHandlers {
-  constructor(private deps: ConsoleHandlersDeps) {}
+  private deps: ConsoleHandlersDeps;
+  constructor(deps: ConsoleHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handleConsoleMonitor(args: Record<string, unknown>): Promise<ToolResponse> {
     return handleSafe(async () => {
       const action = argString(args, 'action') as 'enable' | 'disable';
+      if (action !== 'enable' && action !== 'disable') {
+        throw new Error(`Invalid action: "${String(action)}". Expected "enable" or "disable".`);
+      }
       if (action === 'enable') {
         await this.deps.consoleMonitor.enable();
         return { message: 'Console monitoring enabled' };
@@ -34,7 +40,8 @@ export class ConsoleHandlers {
       const since = argNumber(args, 'since') as number;
 
       const logs = this.deps.consoleMonitor.getLogs({ type, limit, since });
-      const result = this.deps.detailedDataManager.smartHandle({ count: logs.length, logs }, 51200);
+      // Threshold follows DETAILED_DATA_SMART_THRESHOLD_BYTES (env-configurable).
+      const result = await this.deps.detailedDataManager.smartHandle({ count: logs.length, logs });
       return result as Record<string, unknown>;
     });
   }
@@ -48,7 +55,7 @@ export class ConsoleHandlers {
       if (!expression.trim()) throw new Error('expression is required');
 
       const raw = await this.deps.consoleMonitor.execute(expression);
-      const processed = applyEvaluationPostFilters(raw, this.deps.detailedDataManager, {
+      const processed = await applyEvaluationPostFilters(raw, this.deps.detailedDataManager, {
         autoSummarize: true,
         maxSize,
         stripBase64,

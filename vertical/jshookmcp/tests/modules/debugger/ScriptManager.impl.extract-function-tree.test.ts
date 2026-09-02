@@ -234,7 +234,7 @@ describe('ScriptManager extract-function-tree internals', () => {
     );
   });
 
-  it('limits extraction by maxDepth and warns on oversized output', async () => {
+  it('limits extraction by maxDepth (dependency layers, not function count) and warns on oversized output', async () => {
     const ctx = {
       getScriptSource: vi.fn().mockResolvedValue({
         source: 'function main() {}',
@@ -269,9 +269,51 @@ describe('ScriptManager extract-function-tree internals', () => {
       maxSize: 0,
     });
 
+    // maxDepth counts layers: main (layer 0) and helper (layer 1) qualify;
+    // leaf sits at layer 2 and is correctly excluded.
     expect(result.functions.map((func) => func.name)).toEqual(['main', 'helper']);
     expect(functionTreeMocks.logger.warn).toHaveBeenCalledWith(
       expect.stringContaining('Extracted code size'),
     );
+  });
+
+  it('includes all dependencies of a shallow layer (wide branches are not truncated)', async () => {
+    const ctx = {
+      getScriptSource: vi.fn().mockResolvedValue({
+        source: 'function main() {}',
+      }),
+    };
+    functionTreeMocks.declarations = [
+      {
+        name: 'main',
+        code: 'function main() { a(); b(); }',
+        deps: ['a', 'b'],
+        startLine: 1,
+        endLine: 3,
+      },
+      {
+        name: 'a',
+        code: 'function a() {}',
+        deps: [],
+        startLine: 5,
+        endLine: 7,
+      },
+      {
+        name: 'b',
+        code: 'function b() {}',
+        deps: [],
+        startLine: 9,
+        endLine: 11,
+      },
+    ];
+
+    const result = await extractFunctionTreeCore(ctx, 'script-1', 'main', {
+      maxDepth: 2,
+      maxSize: 0,
+    });
+
+    // Both direct dependencies live at layer 1 — a per-function counter
+    // would have dropped 'b' after extracting only one of them.
+    expect(result.functions.map((func) => func.name)).toEqual(['main', 'a', 'b']);
   });
 });

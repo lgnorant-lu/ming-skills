@@ -41,6 +41,8 @@ const state = vi.hoisted(() => ({
   CreateRemoteThread: vi.fn(),
   GetModuleHandle: vi.fn(),
   GetProcAddress: vi.fn(),
+  WaitForSingleObject: vi.fn(() => 0),
+  GetExitCodeThread: vi.fn(() => ({ success: true, exitCode: 1 })),
   NtQueryInformationProcess: vi.fn(),
   checkNativeMemoryAvailability: vi.fn(),
   logger: {
@@ -84,6 +86,8 @@ vi.mock('@native/Win32API', () => ({
   CreateRemoteThread: state.CreateRemoteThread,
   GetModuleHandle: state.GetModuleHandle,
   GetProcAddress: state.GetProcAddress,
+  WaitForSingleObject: state.WaitForSingleObject,
+  GetExitCodeThread: state.GetExitCodeThread,
   NtQueryInformationProcess: state.NtQueryInformationProcess,
 }));
 

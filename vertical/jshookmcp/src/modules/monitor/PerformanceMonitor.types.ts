@@ -1,13 +1,19 @@
+/**
+ * Polled performance metrics. Note: FID is intentionally absent — it cannot
+ * be recovered by polling after the fact; it requires a PerformanceObserver
+ * registered before first input (use browser_performance_observer for that).
+ */
 export interface PerformanceMetrics {
   fcp?: number;
   lcp?: number;
-  fid?: number;
   cls?: number;
-  ttfb?: number;
+  /** Time to first byte; null when the navigation entry has no requestStart. */
+  ttfb?: number | null;
 
   domContentLoaded?: number;
   loadComplete?: number;
 
+  /** Engine-level totals from CDP Performance.getMetrics (cross-origin aggregate). */
   scriptDuration?: number;
   layoutDuration?: number;
   recalcStyleDuration?: number;
@@ -15,6 +21,11 @@ export interface PerformanceMetrics {
   jsHeapSizeLimit?: number;
   totalJSHeapSize?: number;
   usedJSHeapSize?: number;
+
+  /** Navigation Timing Level 2 resource sizes (bytes; 0 when cached/cross-origin). */
+  transferSize?: number;
+  encodedBodySize?: number;
+  decodedBodySize?: number;
 }
 
 export interface CoverageInfo {
@@ -143,11 +154,22 @@ export function isCDPHeapSamplingPayload(value: unknown): value is CDPHeapSampli
   return isRecord(value) && isRecord(value.profile) && isCDPHeapSamplingNode(value.profile.head);
 }
 
-export function countTraceEvents(traceData: string): number {
-  const eventPattern = /"ph"\s*:/g;
+export function countTraceEvents(traceData: Buffer | string): number {
+  if (typeof traceData === 'string') {
+    const eventPattern = /"ph"\s*:/g;
+    let count = 0;
+    while (eventPattern.exec(traceData) !== null) {
+      count++;
+    }
+    return count;
+  }
+  // Buffer scan — avoids a full UTF-8 decode of multi-MB traces.
+  const needle = Buffer.from('"ph":');
   let count = 0;
-  while (eventPattern.exec(traceData) !== null) {
+  let index = 0;
+  while ((index = traceData.indexOf(needle, index)) !== -1) {
     count++;
+    index += needle.length;
   }
   return count;
 }

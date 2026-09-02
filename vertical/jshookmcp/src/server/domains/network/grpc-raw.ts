@@ -20,6 +20,8 @@
  * protobuf_decode_raw.
  */
 
+import { GRPC_MAX_TOTAL_PAYLOAD_BYTES } from '@src/constants/network';
+
 const GRPC_FRAME_HEADER_BYTES = 5; // 1 flag + 4 length
 const GRPC_COMPRESSED_FLAG = 0x01;
 const GRPC_TRAILER_FLAG = 0x80;
@@ -38,9 +40,9 @@ export interface GrpcMessageFrame {
   declaredLength: number;
   /** Actual payload bytes captured (may be < declaredLength on truncation). */
   payloadBytes: number;
-  /** Payload as lowercase hex. */
-  payloadHex: string;
-  /** Payload as base64 (feed directly to protobuf_decode_raw). */
+  /** Payload as lowercase hex (display only; omitted when includeHex=false). */
+  payloadHex?: string;
+  /** Payload as base64 (feed directly to protobuf_decode_raw). The only retained copy when includeHex=false. */
   payloadBase64: string;
   /** True when the captured payload is shorter than declared (truncated capture). */
   truncated: boolean;
@@ -72,6 +74,17 @@ function decodeInput(data: string, encoding: 'hex' | 'base64'): Buffer {
   return Buffer.from(reflowed, 'base64');
 }
 
+export interface ParseGrpcFramesOptions {
+  /** Cap on the total retained payload bytes across all messages (default 1MB). */
+  maxTotalPayloadBytes?: number;
+  /**
+   * Include `payloadHex` on each frame (display only). When false, only
+   * `payloadBase64` is retained — the hex can be derived from base64 on demand.
+   * Default true for backward-compatible tool output.
+   */
+  includeHex?: boolean;
+}
+
 /**
  * Split a gRPC/gRPC-Web body into its length-prefixed messages.
  *
@@ -79,15 +92,45 @@ function decodeInput(data: string, encoding: 'hex' | 'base64'): Buffer {
  * bytes) is still emitted with the captured payload + a warning rather than
  * discarded, so a partial capture remains analysable. Stray trailing bytes too
  * short for a header are reported via a warning.
+ *
+ * Bounded: the total retained payload bytes across messages is capped at
+ * `maxTotalPayloadBytes`; a message that would exceed the budget is truncated
+ * and emitted with `truncated: true` before parsing stops.
  */
 export function parseGrpcFrames(
   data: string,
   encoding: 'hex' | 'base64' = 'hex',
+  options: ParseGrpcFramesOptions = {},
 ): ParsedGrpcFrames {
+  const maxTotalPayloadBytes = options.maxTotalPayloadBytes ?? GRPC_MAX_TOTAL_PAYLOAD_BYTES;
+  const includeHex = options.includeHex ?? true;
   const buffer = decodeInput(data, encoding);
   const frames: GrpcMessageFrame[] = [];
   const warnings: string[] = [];
   let offset = 0;
+  let retainedPayloadBytes = 0;
+
+  const buildFrame = (
+    flag: number,
+    declaredLength: number,
+    payload: Buffer,
+    truncated: boolean,
+  ): GrpcMessageFrame => {
+    const frame: GrpcMessageFrame = {
+      index: frames.length,
+      compressed: (flag & GRPC_COMPRESSED_FLAG) !== 0,
+      isTrailer: (flag & GRPC_TRAILER_FLAG) !== 0,
+      flag,
+      declaredLength,
+      payloadBytes: payload.length,
+      payloadBase64: payload.toString('base64'),
+      truncated,
+    };
+    if (includeHex) {
+      frame.payloadHex = payload.toString('hex');
+    }
+    return frame;
+  };
 
   while (offset + GRPC_FRAME_HEADER_BYTES <= buffer.length) {
     const flag = buffer[offset]!;
@@ -96,37 +139,35 @@ export function parseGrpcFrames(
     const available = buffer.length - payloadStart;
 
     if (declaredLength > available) {
-      // Truncated message — emit what we have and stop.
-      const payload = buffer.subarray(payloadStart);
-      frames.push({
-        index: frames.length,
-        compressed: (flag & GRPC_COMPRESSED_FLAG) !== 0,
-        isTrailer: (flag & GRPC_TRAILER_FLAG) !== 0,
-        flag,
-        declaredLength,
-        payloadBytes: payload.length,
-        payloadHex: payload.toString('hex'),
-        payloadBase64: payload.toString('base64'),
-        truncated: true,
-      });
+      // Truncated message — emit what we have and stop. The total-payload
+      // budget still applies: retain at most the remaining budget, not the
+      // entire leftover buffer.
+      const remainingBudget = maxTotalPayloadBytes - retainedPayloadBytes;
+      const payload = buffer.subarray(
+        payloadStart,
+        payloadStart + Math.min(available, Math.max(0, remainingBudget)),
+      );
+      frames.push(buildFrame(flag, declaredLength, payload, true));
       warnings.push(
         `message ${String(frames.length - 1)} declares ${String(declaredLength)} payload bytes but only ${String(available)} remain; captured partial payload`,
       );
       break;
     }
 
-    const payload = buffer.subarray(payloadStart, payloadStart + declaredLength);
-    frames.push({
-      index: frames.length,
-      compressed: (flag & GRPC_COMPRESSED_FLAG) !== 0,
-      isTrailer: (flag & GRPC_TRAILER_FLAG) !== 0,
-      flag,
-      declaredLength,
-      payloadBytes: declaredLength,
-      payloadHex: payload.toString('hex'),
-      payloadBase64: payload.toString('base64'),
-      truncated: false,
-    });
+    const fullPayload = buffer.subarray(payloadStart, payloadStart + declaredLength);
+    const remainingBudget = maxTotalPayloadBytes - retainedPayloadBytes;
+    if (fullPayload.length > remainingBudget) {
+      // Total byte budget exceeded — truncate this message and stop.
+      const truncatedPayload = fullPayload.subarray(0, Math.max(0, remainingBudget));
+      frames.push(buildFrame(flag, declaredLength, truncatedPayload, true));
+      warnings.push(
+        `message ${String(frames.length - 1)} exceeds the ${String(maxTotalPayloadBytes)}-byte total payload budget; payload truncated to ${String(truncatedPayload.length)} bytes`,
+      );
+      break;
+    }
+
+    retainedPayloadBytes += fullPayload.length;
+    frames.push(buildFrame(flag, declaredLength, fullPayload, false));
     offset = payloadStart + declaredLength;
   }
 

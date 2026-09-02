@@ -28,6 +28,7 @@ import type { BrowserFetchResult } from '@server/domains/graphql/handlers.impl.c
 import { argString, argObject, argBool, argArray } from '@server/domains/shared/parse-args';
 import { GRAPHQL_REPLAY_FETCH_TIMEOUT_MS } from '@src/constants/analysis';
 import { evaluateWithTimeout } from '@modules/collector/PageController';
+import { fetchWithTimeout } from '@utils/network/fetch';
 
 interface PersistedQuery {
   sha256Hash: string;
@@ -125,6 +126,59 @@ function createReplayFetchFn(): (input: ReplayFetchInput) => Promise<BrowserFetc
   ) => Promise<BrowserFetchResult>;
 }
 
+/**
+ * Node-side replay fetch: the in-process equivalent of the in-page
+ * `REPLAY_FETCH_PIPELINE` above, sharing the same `BrowserFetchResult` shape but
+ * using the unified `fetchWithTimeout` helper for timeout + error normalization.
+ */
+async function replayFetchViaNode(input: ReplayFetchInput): Promise<BrowserFetchResult> {
+  const requestHeaders = { 'content-type': 'application/json', ...input.headers };
+  try {
+    const response = await fetchWithTimeout(
+      input.endpoint,
+      {
+        method: 'POST',
+        headers: requestHeaders,
+        body: input.body,
+      },
+      input.timeoutMs,
+    );
+    const responseText = await response.text();
+
+    let responseJson: unknown = null;
+    try {
+      responseJson = JSON.parse(responseText);
+    } catch {
+      responseJson = null;
+    }
+
+    const rawText = responseJson === null ? responseText : '';
+    const responseHeaders: Record<string, string> = {};
+    response.headers.forEach((value, key) => {
+      responseHeaders[key] = value;
+    });
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      responseText: rawText,
+      responseJson,
+      responseHeaders,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      statusText: 'FETCH_ERROR',
+      responseText: '',
+      responseJson: null,
+      responseHeaders: {},
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 function normalizePersistedQuery(raw: Record<string, unknown> | undefined): PersistedQuery | null {
   if (!raw) return null;
   const hash = raw.sha256Hash;
@@ -215,7 +269,10 @@ function extractGraphqlErrors(responseJson: unknown): {
 }
 
 export class ReplayHandlers {
-  constructor(private collector: CodeCollector) {}
+  private collector: CodeCollector;
+  constructor(collector: CodeCollector) {
+    this.collector = collector;
+  }
 
   async handleGraphqlReplay(args: Record<string, unknown>) {
     try {
@@ -288,7 +345,7 @@ export class ReplayHandlers {
     headers: Record<string, string>,
     meta: ReplayMeta,
   ) {
-    const result = await createReplayFetchFn()({
+    const result = await replayFetchViaNode({
       endpoint,
       body,
       headers,

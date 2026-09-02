@@ -16,7 +16,10 @@ function getErrorMessage(error: unknown): string {
 }
 
 export class XHRBreakpointHandlers {
-  constructor(private deps: XHRBreakpointHandlersDeps) {}
+  private deps: XHRBreakpointHandlersDeps;
+  constructor(deps: XHRBreakpointHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handleXHRBreakpointSet(args: Record<string, unknown>) {
     try {

@@ -1,4 +1,5 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
+import { PAGE_EVAL_MAX_SIZE_BYTES } from '@src/constants/browser';
 import { tool } from '@server/registry/tool-builder';
 
 export const browserRuntimeTools: Tool[] = [
@@ -92,8 +93,8 @@ export const browserRuntimeTools: Tool[] = [
     t
       .desc('Start, close, or check status of a Camoufox anti-detect server.')
       .enum('action', ['launch', 'close', 'status'], 'Action')
-      .number('port', 'Listen port (launch)')
-      .string('ws_path', 'WebSocket path (launch)')
+      .number('port', 'Listen port (launch)', { minimum: 1, maximum: 65535 })
+      .string('ws_path', 'WebSocket path (launch)', { pattern: '^/[A-Za-z0-9_/-]*$' })
       .enum('os', ['windows', 'macos', 'linux'], 'OS fingerprint (launch)', {
         default: 'windows',
       })
@@ -190,7 +191,7 @@ export const browserRuntimeTools: Tool[] = [
       .boolean('returnByValue', 'Return by value', { default: true })
       .boolean('awaitPromise', 'Await promises', { default: true })
       .boolean('autoSummarize', 'Summarize large results', { default: true })
-      .number('maxSize', 'Max size before summarizing', { default: 51200 })
+      .number('maxSize', `Max size before summarizing`, { default: PAGE_EVAL_MAX_SIZE_BYTES })
       .array('fieldFilter', { type: 'string' }, 'Field names to strip')
       .boolean('stripBase64', 'Strip base64 payloads', { default: false })
       .openWorld(),

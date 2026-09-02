@@ -26,10 +26,13 @@ const DEFAULT_MAX_STDERR_BYTES = 64 * 1024;
 const MAX_PENDING_LINE_CHARS = 64 * 1024;
 
 export class LogcatLineCollector {
+  private readonly filter: LogcatLineFilter;
   private readonly lines: string[] = [];
   private pending = '';
 
-  constructor(private readonly filter: LogcatLineFilter) {}
+  constructor(filter: LogcatLineFilter) {
+    this.filter = filter;
+  }
 
   pushChunk(chunk: string): void {
     this.pending += chunk;
@@ -56,7 +59,7 @@ export class LogcatLineCollector {
 
   private acceptLine(line: string): void {
     if (!line.trim()) return;
-    if (this.filter.pid && !line.includes(` ${this.filter.pid} `)) return;
+    if (this.filter.pid && !line.split(/\s+/).includes(this.filter.pid)) return;
     if (this.filter.packageName && !this.filter.pid && !line.includes(this.filter.packageName)) {
       return;
     }
@@ -86,6 +89,15 @@ export async function captureAdbLogcat(
 
     const timeout = setTimeout(() => {
       child.kill();
+      // `kill()` does not always terminate the process tree (Windows), so
+      // 'close' may never fire — settle with whatever was captured so far.
+      settled = true;
+      resolve({
+        lines: collector.finish(),
+        stderr: stderrParts.join(''),
+        exitCode: -1,
+        signal: 'SIGKILL',
+      });
     }, options.timeoutMs);
 
     child.stdout.setEncoding('utf8');
@@ -95,7 +107,16 @@ export async function captureAdbLogcat(
     child.stderr.on('data', (chunk: string) => {
       if (stderrBytes >= maxStderrBytes) return;
       const remaining = maxStderrBytes - stderrBytes;
-      const slice = chunk.length > remaining ? chunk.slice(0, remaining) : chunk;
+      let slice = chunk.length > remaining ? chunk.slice(0, remaining) : chunk;
+      // Never end on a lone high surrogate — that would emit an unpaired
+      // half of a multi-code-unit character into the joined stderr string.
+      if (
+        slice.length > 0 &&
+        slice.charCodeAt(slice.length - 1) >= 0xd800 &&
+        slice.charCodeAt(slice.length - 1) <= 0xdbff
+      ) {
+        slice = slice.slice(0, -1);
+      }
       stderrParts.push(slice);
       stderrBytes += slice.length;
     });

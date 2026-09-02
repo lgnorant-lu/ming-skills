@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { bootstrapRuntimeEnv } from '@src/config/env-bootstrap';
 import { MCPServer } from '@server/MCPServer';
 import { getConfig, validateConfig } from '@utils/config';
 import { logger } from '@utils/logger';
@@ -16,6 +17,9 @@ import {
   RUNTIME_ERROR_WINDOW_MS,
   RUNTIME_ERROR_THRESHOLD,
 } from '@src/constants';
+import { readEnvString } from '@src/config/environment';
+
+bootstrapRuntimeEnv();
 
 interface RuntimeRecoveryState {
   windowStart: number;
@@ -82,7 +86,26 @@ export async function main(): Promise<void> {
     }
 
     const config = getConfig();
-    logger.debug('Configuration loaded:', config);
+    const transportMode =
+      config.server?.transport ??
+      (readEnvString('MCP_TRANSPORT', 'stdio', { trim: true }).toLowerCase() === 'http'
+        ? 'http'
+        : 'stdio');
+    const rawProfile =
+      config.mcp?.toolProfile ??
+      readEnvString('MCP_TOOL_PROFILE', 'search', { trim: true }).toLowerCase();
+    const profile =
+      rawProfile === 'workflow' || rawProfile === 'full' || rawProfile === 'search'
+        ? rawProfile
+        : 'search';
+    logger.debug('Configuration loaded:', {
+      transport: transportMode,
+      host: config.server?.host,
+      port: config.server?.port,
+      profile,
+      authConfigured: Boolean(config.server?.authToken),
+      captchaCredentialsConfigured: Boolean(config.captcha?.apiKey),
+    });
 
     const validation = validateConfig(config);
     if (!validation.valid) {
@@ -103,16 +126,6 @@ export async function main(): Promise<void> {
     }
 
     logger.info('Creating MCP server instance...');
-    const transportMode = (process.env.MCP_TRANSPORT ?? 'stdio').toLowerCase();
-    const explicitProfile = (process.env.MCP_TOOL_PROFILE ?? '').trim().toLowerCase() as
-      | 'search'
-      | 'workflow'
-      | 'full'
-      | undefined;
-    const profile =
-      explicitProfile === 'full' || explicitProfile === 'workflow' || explicitProfile === 'search'
-        ? explicitProfile
-        : 'search';
     logger.info(`[startup] transport=${transportMode} profile=${profile}`);
     await registerServerInstance({ transport: transportMode, profile });
     await initRegistry(profile);

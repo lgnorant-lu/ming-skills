@@ -13,7 +13,14 @@ export function readXmlAttr(tag: string, attr: string): string | undefined {
 
 export function listTags(xml: string, tagName: string): string[] {
   const tags: string[] = [];
-  const re = new RegExp(`<${tagName}\\b[^>]*(?:/>|>[\\s\\S]*?<\\/${tagName}>)`, 'gi');
+  // `(?=[\s/>])` instead of `\b`: `\b` also matches `<activity-alias` (the
+  // `-` is a non-word char), so collecting `<activity>` would swallow alias
+  // tags and truncate the activity list. The lookahead requires a real tag
+  // boundary — whitespace, `/` (self-closing), or `>`.
+  const re = new RegExp(
+    `<${tagName}(?=[\\s/>])[^>]*(?:/>|>[\\s\\S]*?<\\/${tagName}(?=[\\s/>])>)`,
+    'gi',
+  );
   let match: RegExpExecArray | null;
   while ((match = re.exec(xml)) !== null) {
     if (match[0]) tags.push(match[0]);
@@ -117,11 +124,13 @@ export function summarizeManifestXml(xml: string): ManifestSummary {
     usesFeatures,
     components,
     counts: {
+      // REAL tag counts from the raw scan — `components` are deduped and
+      // truncated (limits of 500/200), so their lengths undercount.
       permissions: permissions.length,
-      activities: components.activities.length,
-      services: components.services.length,
-      receivers: components.receivers.length,
-      providers: components.providers.length,
+      activities: activities.length,
+      services: services.length,
+      receivers: receivers.length,
+      providers: providers.length,
     },
   };
 }

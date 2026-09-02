@@ -38,7 +38,10 @@ function getTempRootsForValidation(): string[] {
 }
 
 export class ExternalToolRunner {
-  constructor(private readonly registry: ToolRegistry) {}
+  private readonly registry: ToolRegistry;
+  constructor(registry: ToolRegistry) {
+    this.registry = registry;
+  }
 
   /**
    * Probe all registered tools for availability.

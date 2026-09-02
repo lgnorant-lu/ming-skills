@@ -124,7 +124,10 @@ function normalizeJsStacks(value: unknown): Record<string, unknown>[] {
 }
 
 export class LiveStateFetcher {
-  constructor(private readonly ctx?: MCPServerContext) {}
+  private readonly ctx?: MCPServerContext;
+  constructor(ctx?: MCPServerContext) {
+    this.ctx = ctx;
+  }
 
   async hydrate(args: Record<string, unknown>): Promise<LiveStateFetchResult> {
     const hydrated = { ...args };

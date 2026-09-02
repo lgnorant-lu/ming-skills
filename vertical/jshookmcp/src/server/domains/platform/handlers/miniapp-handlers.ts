@@ -1,5 +1,6 @@
 import { readFile, mkdir, writeFile, stat } from 'node:fs/promises';
 import { basename, dirname, extname, relative, resolve } from 'node:path';
+import { MINIAPP_UNPACK_TIMEOUT_MS } from '@src/constants';
 import type { CodeCollector } from '@server/domains/shared/modules/collector';
 import { type ExternalToolRunner } from '@server/domains/shared/modules';
 import { logger } from '@utils/logger';
@@ -120,7 +121,7 @@ async function tryExternalUnpack(
     const result = await runner.run({
       tool: 'miniapp.unpacker',
       args: attempt,
-      timeoutMs: 180_000,
+      timeoutMs: MINIAPP_UNPACK_TIMEOUT_MS,
       cwd: dirname(inputPath),
       expectedOutputPaths: [outputDir],
       allowDirectoryOutputs: true,

@@ -91,6 +91,28 @@ describe('MOJO-03: Mojo-to-CDP Correlator', () => {
     ).toBe(true);
   });
 
+  it('picks the closest network request within the timestamp window (Pass 2)', async () => {
+    const mojoMessages = [
+      {
+        interface: 'MojomURLLoader',
+        method: 'Start',
+        timestamp: 500,
+        messageId: 'msg-close',
+      },
+    ];
+    // Both requests are inside the 50ms window; the earlier array entry is
+    // farther away, so the closest one must win (not the first match).
+    const networkRequests = [
+      { requestId: 'req-far', url: buildTestUrl('x', { path: '/x' }), timestamp: 545 },
+      { requestId: 'req-near', url: buildTestUrl('other', { path: '/y' }), timestamp: 502 },
+    ];
+
+    const result = correlateMojoToCDP(bridge, mojoMessages, [], networkRequests);
+    const pair = result.matchedPairs.find((p) => p.matchType === 'urlloader');
+    expect(pair?.networkRequestId).toBe('req-near');
+    expect(pair?.timestampDelta).toBe(2);
+  });
+
   it('should match by timestamp proximity when interface pattern does not apply', async () => {
     // Use non-matching interface + close timestamps to ensure Pass 3 (timestamp) fires
     const mojoMessages = [

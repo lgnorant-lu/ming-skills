@@ -105,6 +105,69 @@ describe('network grpc-raw parseGrpcFrames', () => {
     // and decodes back to "Hello"
     expect(Buffer.from(frames[0]!.payloadBase64, 'base64').toString('utf8')).toBe('Hello');
   });
+
+  it('enforces a total payload byte budget, truncating overflow', () => {
+    const built = buildGrpcBody([
+      { payloadHex: '414141414141' }, // 6 bytes
+      { payloadHex: '424242424242' }, // 6 bytes
+    ]);
+    const { frames, warnings } = parseGrpcFrames(built.hex, 'hex', { maxTotalPayloadBytes: 8 });
+    expect(frames).toHaveLength(2);
+    expect(frames[0]!.payloadBytes).toBe(6);
+    expect(frames[0]!.truncated).toBe(false);
+    expect(frames[1]!.payloadBytes).toBe(2);
+    expect(frames[1]!.truncated).toBe(true);
+    expect(frames[1]!.payloadHex).toBe('4242');
+    expect(warnings.some((w) => /total payload budget/.test(w))).toBe(true);
+  });
+
+  it('caps a truncated trailing frame payload to the total budget', () => {
+    // Final frame declares 1000 payload bytes but only 100 are captured;
+    // with an 8-byte budget the retained payload must be capped at 8 bytes.
+    const header = Buffer.alloc(5);
+    header.writeUInt32BE(1000, 1);
+    const body = Buffer.concat([header, Buffer.alloc(100, 0x41)]);
+    const { frames } = parseGrpcFrames(body.toString('hex'), 'hex', {
+      maxTotalPayloadBytes: 8,
+    });
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.truncated).toBe(true);
+    expect(frames[0]!.declaredLength).toBe(1000);
+    expect(frames[0]!.payloadBytes).toBe(8);
+    expect(frames[0]!.payloadBase64).toBe(Buffer.alloc(8, 0x41).toString('base64'));
+  });
+
+  it('caps a truncated trailing frame to the remaining budget after prior frames', () => {
+    // Frame 1 consumes 6 of an 8-byte budget; a truncated final frame declaring
+    // 1000 bytes (100 captured) must be capped to the remaining 2 bytes.
+    const first = buildGrpcBody([{ payloadHex: '414141414141' }]); // 6 bytes
+    const header = Buffer.alloc(5);
+    header.writeUInt32BE(1000, 1);
+    const body = Buffer.concat([Buffer.from(first.hex, 'hex'), header, Buffer.alloc(100, 0x42)]);
+    const { frames } = parseGrpcFrames(body.toString('hex'), 'hex', {
+      maxTotalPayloadBytes: 8,
+    });
+    expect(frames).toHaveLength(2);
+    expect(frames[0]!.payloadBytes).toBe(6);
+    expect(frames[0]!.truncated).toBe(false);
+    expect(frames[1]!.truncated).toBe(true);
+    expect(frames[1]!.declaredLength).toBe(1000);
+    expect(frames[1]!.payloadBytes).toBe(2);
+    expect(frames[1]!.payloadBase64).toBe(Buffer.alloc(2, 0x42).toString('base64'));
+  });
+
+  it('omits payloadHex when includeHex is false (base64-only retention)', () => {
+    const data = '000000000548656c6c6f';
+    const { frames } = parseGrpcFrames(data, 'hex', { includeHex: false });
+    expect(frames[0]!.payloadBase64).toBe('SGVsbG8=');
+    expect(frames[0]!.payloadHex).toBeUndefined();
+  });
+
+  it('keeps payloadHex by default (display parity)', () => {
+    const data = '000000000548656c6c6f';
+    const { frames } = parseGrpcFrames(data);
+    expect(frames[0]!.payloadHex).toBe('48656c6c6f');
+  });
 });
 
 describe('network grpc-raw buildGrpcBody', () => {

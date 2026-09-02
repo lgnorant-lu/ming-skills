@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """BiDi network 模块命令"""
 
+import warnings
+
 
 def add_intercept(driver, phases, url_patterns=None, contexts=None):
     """注册网络拦截
@@ -68,8 +70,23 @@ def continue_with_auth(driver, request_id, action='default', credentials=None):
         action: 'provideCredentials' / 'default' / 'cancel'
         credentials: {'type': 'password', 'username': str, 'password': str}
     """
+    actions = {'provideCredentials', 'default', 'cancel'}
+    if action not in actions:
+        raise ValueError("action must be provideCredentials, default, or cancel")
+    if action == 'provideCredentials' and credentials is None:
+        raise ValueError("credentials are required for provideCredentials")
+    if action != 'provideCredentials' and credentials is not None:
+        raise ValueError("credentials are only valid for provideCredentials")
+    if credentials is not None:
+        if not isinstance(credentials, dict) or credentials.get('type') != 'password':
+            raise ValueError("credentials must be a password credentials object")
+        if not isinstance(credentials.get('username'), str) or not isinstance(
+            credentials.get('password'), str
+        ):
+            raise ValueError("credentials username/password must be strings")
+
     params = {'request': request_id, 'action': action}
-    if credentials:
+    if credentials is not None:
         params['credentials'] = credentials
     return driver.run('network.continueWithAuth', params)
 
@@ -97,7 +114,7 @@ def provide_response(driver, request_id, body=None, cookies=None,
 
 
 def set_cache_behavior(driver, behavior, contexts=None):
-    """设置缓存行为（Firefox 私有扩展，非 W3C 标准）
+    """设置缓存行为（W3C WebDriver BiDi 标准命令）
 
     Args:
         behavior: 'default' / 'bypass'
@@ -119,7 +136,21 @@ def set_extra_headers(driver, headers, contexts=None, user_contexts=None):
         params["userContexts"] = user_contexts if isinstance(user_contexts, list) else [user_contexts]
     return driver.run("network.setExtraHeaders", params)
 
-def add_data_collector(driver, events=None, contexts=None, max_encoded_data_size=10485760, data_types=None, collector_type="blob", user_contexts=None):
+def add_data_collector(
+    driver,
+    events=None,
+    contexts=None,
+    max_encoded_data_size=10485760,
+    data_types=None,
+    collector_type="blob",
+    user_contexts=None,
+):
+    if events is not None:
+        warnings.warn(
+            "events is not part of network.addDataCollector; use data_types",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     params = {
         "dataTypes": data_types if data_types else ["request", "response"],
         "maxEncodedDataSize": max_encoded_data_size,

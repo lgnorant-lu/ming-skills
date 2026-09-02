@@ -5,6 +5,7 @@
 import type { CodeCollector } from '@server/domains/shared/modules/collector';
 import { RingBuffer } from '@utils/RingBuffer';
 import type { GrpcMessageFrame } from '@server/domains/network/grpc-raw';
+import { asJsonResponse } from '@server/domains/shared/response';
 
 export type TextToolResponse = {
   content: [{ type: 'text'; text: string }];
@@ -31,6 +32,8 @@ export interface WsFrameRecord {
   payloadPreview: string;
   payloadSample: string;
   payload?: string;
+  /** True when the retained `payload` was truncated to the per-frame byte budget. */
+  payloadTruncated?: boolean;
   isBinary: boolean;
 }
 
@@ -172,10 +175,9 @@ export function isGrpcContentType(value: unknown): boolean {
 
 // ── Shared helpers ──
 
+/** JSON-stringify a payload as a text tool response (thin typed wrapper over shared asJsonResponse). */
 export function asJson(payload: unknown): TextToolResponse {
-  return {
-    content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
-  };
+  return asJsonResponse(payload) as TextToolResponse;
 }
 
 export function parseOptionalStringArg(value: unknown): string | undefined {
@@ -217,7 +219,21 @@ export function parseBooleanArg(value: unknown, defaultValue: boolean): boolean 
   return defaultValue;
 }
 
+/**
+ * Pattern heuristics for catastrophic backtracking (ReDoS): nested quantifiers
+ * on the same token — `(a+)+`, `(a*)*`, `(a|a?)+`, `([ab]+)*` — can blow up
+ * exponentially on crafted input. These are rejected before the regex is ever
+ * compiled/executed. (Best-effort: no static analysis is complete.)
+ */
+const RE_DOS_PATTERNS: RegExp[] = [
+  /\([^()]*[+*][^()]*\)[+*]/,
+  /\((?:[^()]|\\.)*[+*](?:[^()]|\\.)*\)[+*]/,
+];
+
 export function compileRegex(pattern: string): { regex?: RegExp; error?: string } {
+  if (RE_DOS_PATTERNS.some((re) => re.test(pattern))) {
+    return { error: 'catastrophic backtracking (ReDoS) risk: nested quantifiers rejected' };
+  }
   try {
     return { regex: new RegExp(pattern) };
   } catch (error) {

@@ -103,6 +103,10 @@ export function resolveNtdll(ntdllPath?: string): ResolvedNtdll {
 
   // ── PE parse (lite — no dependency on PEAnalyzer) ─────────────────────
   const e_lfanew = fileData.readUInt32LE(60);
+  // Bounds-check every header read below (e_lfanew + optional header must fit).
+  if (e_lfanew + 256 > fileData.length) {
+    throw new Error('SyscallResolver: truncated PE header');
+  }
   const peSig = fileData.readUInt32LE(e_lfanew);
   if (peSig !== 0x4550) throw new Error('SyscallResolver: invalid PE signature');
 
@@ -110,6 +114,7 @@ export function resolveNtdll(ntdllPath?: string): ResolvedNtdll {
   if (machine !== 0x8664) throw new Error('SyscallResolver: ntdll is not x64');
 
   const numSections = fileData.readUInt16LE(e_lfanew + 6);
+  if (numSections > 0x1000) throw new Error('SyscallResolver: implausible section count');
   const sizeOfOptHdr = fileData.readUInt16LE(e_lfanew + 20);
   const secOff = e_lfanew + 24 + sizeOfOptHdr;
 
@@ -142,6 +147,11 @@ export function resolveNtdll(ntdllPath?: string): ResolvedNtdll {
   if (expOff < 0) throw new Error('SyscallResolver: cannot resolve export directory RVA');
 
   const numNames = fileData.readUInt32LE(expOff + 24);
+  // A malformed count must not drive the export loop into OOB reads — each
+  // name consumes 4 (RVA array) + 2 (ordinal array) bytes inside exportDirSize.
+  if (numNames > exportDirSize / 4) {
+    throw new Error('SyscallResolver: implausible export count');
+  }
   const funcRvaArr = fileData.readUInt32LE(expOff + 28);
   const nameRvaArr = fileData.readUInt32LE(expOff + 32);
   const ordRvaArr = fileData.readUInt32LE(expOff + 36);

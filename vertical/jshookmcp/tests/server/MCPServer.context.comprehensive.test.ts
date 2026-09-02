@@ -1,7 +1,6 @@
+import { TaskManager } from '@server/tasks/TaskManager';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-
-import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { McpServer, RegisteredTool, Tool } from '@modelcontextprotocol/server';
 import type { Config } from '@internal-types/index';
 import type { TokenBudgetManager } from '@utils/TokenBudgetManager';
 import type { UnifiedCacheManager } from '@utils/UnifiedCacheManager';
@@ -71,6 +70,7 @@ describe('MCPServer.context types and composition', () => {
         isElicitationSupported: () => false,
         requestFormInput: async () => null,
       } as any,
+      taskManager: new TaskManager(),
       mcpLog: {
         log: vi.fn(),
         debug: vi.fn(),

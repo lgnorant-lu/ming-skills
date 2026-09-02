@@ -4,7 +4,7 @@
  */
 
 import { readFile, realpath } from 'node:fs/promises';
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import type { CodeCollector } from '@server/domains/shared/modules/collector';
 
@@ -408,6 +408,14 @@ export function hexDump(buffer: Buffer, bytesPerRow = 16): string {
 
 // ── Output rendering ──
 
+/**
+ * Hex response amplification guard: hex output is ~2x the buffer size and the
+ * accompanying hex dump ~4-5x, so a large decompressed buffer would blow the
+ * response many times over. When the buffer exceeds this cap, the hex result
+ * and dump are sampled to the first 1MB and flagged `truncated`.
+ */
+const HEX_OUTPUT_MAX_BYTES = 1024 * 1024;
+
 export function renderDecodedOutput(params: {
   encoding: DecodeEncoding;
   outputFormat: OutputFormat;
@@ -415,15 +423,21 @@ export function renderDecodedOutput(params: {
   jsonValue?: unknown;
 }) {
   const { encoding, outputFormat, buffer, jsonValue } = params;
-  if (outputFormat === 'hex')
+  if (outputFormat === 'hex') {
+    const truncated = buffer.length > HEX_OUTPUT_MAX_BYTES;
+    const sampled = truncated ? buffer.subarray(0, HEX_OUTPUT_MAX_BYTES) : buffer;
     return ok({
       success: true,
       encoding,
       outputFormat,
       byteLength: buffer.length,
-      result: buffer.toString('hex'),
-      hexDump: hexDump(buffer),
+      ...(truncated
+        ? { truncated: true, truncatedBytes: buffer.length - HEX_OUTPUT_MAX_BYTES }
+        : {}),
+      result: sampled.toString('hex'),
+      hexDump: hexDump(sampled),
     });
+  }
   if (outputFormat === 'utf8')
     return ok({
       success: true,
@@ -466,7 +480,12 @@ export async function resolveBufferBySource(options: {
         }
       }),
     );
-    if (!allowedRoots.some((root) => real.startsWith(root)))
+    // Separator-aware prefix check: startsWith alone lets a sibling directory
+    // (e.g. `<root>2/x`) pass, since `<root>2` is a string prefix of `<root>`.
+    const isAllowed = allowedRoots.some(
+      (root) => real === root || real.startsWith(root.endsWith(sep) ? root : root + sep),
+    );
+    if (!isAllowed)
       throw new Error(`File access denied: path "${filePath}" is outside allowed directories`);
     const fileBuffer = await readFile(real);
     return typeof maxBytes === 'number' ? fileBuffer.subarray(0, maxBytes) : fileBuffer;

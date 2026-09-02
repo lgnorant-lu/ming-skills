@@ -120,7 +120,7 @@ describe('GrpcHandlers', () => {
     expect(call.responseMessageCount).toBe(2);
     expect(call.requestMessageCount).toBe(1);
     expect(call.hasTrailer).toBe(true);
-    expect(call.responseMessages[0].payloadHex).toBe('48656c6c6f');
+    expect(call.responseMessages[0].payloadHex).toBeUndefined();
     expect(call.responseMessages[0].payloadBase64).toBe('SGVsbG8=');
   });
 

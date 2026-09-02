@@ -36,3 +36,21 @@ export const ADV_DEOBF_LLM_MAX_TOKENS = int('ADV_DEOBF_LLM_MAX_TOKENS', 3_000);
 export const VM_DEOBF_LLM_MAX_TOKENS = int('VM_DEOBF_LLM_MAX_TOKENS', 4_000);
 export const DEOBF_LLM_MAX_TOKENS = int('DEOBF_LLM_MAX_TOKENS', 2_000);
 export const CRYPTO_DETECT_LLM_MAX_TOKENS = int('CRYPTO_DETECT_LLM_MAX_TOKENS', 2_000);
+
+/* ================================================================== */
+/*  Deobfuscation limits                                               */
+/* ================================================================== */
+
+export const DEOBF_JSFUCK_MAX_CODE_SIZE = int('DEOBF_JSFUCK_MAX_CODE_SIZE', 100_000);
+export const DEOBF_LLM_MAX_CODE_SNIPPET = int('DEOBF_LLM_MAX_CODE_SNIPPET', 2000);
+export const DEOBF_LLM_MAX_IDENTIFIERS = int('DEOBF_LLM_MAX_IDENTIFIERS', 20);
+export const DEOBF_WEBCRACK_MAX_BUNDLE_MODULES = int('DEOBF_WEBCRACK_MAX_BUNDLE_MODULES', 100);
+export const APK_SURFACE_HINTS_MAX_EVIDENCE = int('APK_SURFACE_HINTS_MAX_EVIDENCE', 10);
+export const APK_SURFACE_HINTS_MAX_CUSTOM_ENTRY_LINES = int(
+  'APK_SURFACE_HINTS_MAX_CUSTOM_ENTRY_LINES',
+  5000,
+);
+export const APK_SURFACE_HINTS_MAX_CUSTOM_PATTERNS = int(
+  'APK_SURFACE_HINTS_MAX_CUSTOM_PATTERNS',
+  50,
+);

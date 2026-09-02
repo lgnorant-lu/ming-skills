@@ -67,6 +67,27 @@ describe('EmbeddingEngine worker lifecycle', () => {
     await terminating;
   });
 
+  it('defaults the idle window to SEARCH_VECTOR_WORKER_IDLE_MS', async () => {
+    process.env.SEARCH_VECTOR_WORKER_IDLE_MS = '15000';
+    vi.useFakeTimers();
+    try {
+      const { EmbeddingEngine } = await import('@server/search/EmbeddingEngine');
+      const engine = new EmbeddingEngine({ modelId: 'default-idle/model' });
+      const pending = engine.embed('hello');
+      const worker = workerState.workers[0]!;
+      worker.emit('message', { type: 'result', id: 0, embedding: new Float32Array([1]) });
+      await pending;
+
+      expect(engine.isWorkerAlive()).toBe(true);
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(engine.isWorkerAlive()).toBe(true);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(engine.isWorkerAlive()).toBe(false);
+    } finally {
+      delete process.env.SEARCH_VECTOR_WORKER_IDLE_MS;
+    }
+  });
+
   it('does not let an old worker exit reject requests owned by its replacement', async () => {
     const { EmbeddingEngine } = await import('@server/search/EmbeddingEngine');
     const engine = new EmbeddingEngine({ idleMs: 0 });

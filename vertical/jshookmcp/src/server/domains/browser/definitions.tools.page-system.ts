@@ -1,4 +1,5 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
+import { PAGE_EVAL_MAX_SIZE_BYTES } from '@src/constants/browser';
 import { tool } from '@server/registry/tool-builder';
 
 export const browserPageSystemTools: Tool[] = [
@@ -25,7 +26,7 @@ export const browserPageSystemTools: Tool[] = [
         'maxSize',
         'Max result size in bytes before offloading (default 50KB → detailId ref)',
         {
-          default: 51200,
+          default: PAGE_EVAL_MAX_SIZE_BYTES,
           minimum: 1024,
           maximum: 104857600,
         },

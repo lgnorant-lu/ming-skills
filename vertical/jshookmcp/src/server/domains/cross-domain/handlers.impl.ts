@@ -62,10 +62,12 @@ const V5_DOMAIN_NAMES = [
 ];
 
 export class CrossDomainWorkflowClassifier {
-  constructor(
-    private readonly ctx: MCPServerContext,
-    private readonly evidenceBridgeReady: boolean,
-  ) {}
+  private readonly ctx: MCPServerContext;
+  private readonly evidenceBridgeReady: boolean;
+  constructor(ctx: MCPServerContext, evidenceBridgeReady: boolean) {
+    this.ctx = ctx;
+    this.evidenceBridgeReady = evidenceBridgeReady;
+  }
 
   getCapabilities(): {
     availableDomains: string[];
@@ -200,7 +202,7 @@ export class CrossDomainWorkflowClassifier {
       return ['analysis'];
     }
     if (toolName.startsWith('adb_')) return ['adb-bridge'];
-    if (toolName.startsWith('js_heap') || toolName.startsWith('performance_take_heap_snapshot')) {
+    if (toolName.startsWith('js_heap')) {
       return ['v8-inspector'];
     }
     if (toolName.startsWith('v8_')) return ['v8-inspector'];
@@ -341,11 +343,18 @@ export class CrossDomainWorkflowClassifier {
 }
 
 export class CrossDomainHandlers {
+  private readonly evidenceBridge: CrossDomainEvidenceBridge;
+  private readonly workflowClassifier?: CrossDomainWorkflowClassifier;
+  private readonly ctx?: MCPServerContext;
   constructor(
-    private readonly evidenceBridge: CrossDomainEvidenceBridge,
-    private readonly workflowClassifier?: CrossDomainWorkflowClassifier,
-    private readonly ctx?: MCPServerContext,
-  ) {}
+    evidenceBridge: CrossDomainEvidenceBridge,
+    workflowClassifier?: CrossDomainWorkflowClassifier,
+    ctx?: MCPServerContext,
+  ) {
+    this.evidenceBridge = evidenceBridge;
+    this.workflowClassifier = workflowClassifier;
+    this.ctx = ctx;
+  }
 
   async handleCapabilitiesTool(args: Record<string, unknown>): Promise<ToolResponse> {
     return handleSafe(async () => await this.handleCapabilities(args));

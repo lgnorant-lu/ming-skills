@@ -98,3 +98,10 @@ describe('buildFingerprintSummary', () => {
     expect(buildFingerprintSummary({})).toEqual({});
   });
 });
+
+describe('parseGetprop value edges', () => {
+  it('keeps values containing a closing bracket', () => {
+    const entries = parseGetprop('[ro.test.bracket]: [a]b]');
+    expect(entries).toEqual([{ key: 'ro.test.bracket', value: 'a]b' }]);
+  });
+});

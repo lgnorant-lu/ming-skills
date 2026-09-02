@@ -12,13 +12,21 @@ import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { UnifiedProcessManager } from '@modules/process/UnifiedProcessManager';
 import { logger } from '@utils/logger';
+import { readEnvString } from '@src/config/environment';
 
-export enum InjectionValidationMode {
-  STRICT = 'strict', // All checks enforced, confirmation required for unsigned processes
-  BALANCED = 'balanced', // Validation + warnings, no confirmation required (default)
-  PERMISSIVE = 'permissive', // Basic checks only (PID exists, file exists)
-  DISABLED = 'disabled', // No validation (backward compatible)
-}
+export const InjectionValidationMode = {
+  /** All checks enforced, confirmation required for unsigned processes */
+  STRICT: 'strict',
+  /** Validation + warnings, no confirmation required (default) */
+  BALANCED: 'balanced',
+  /** Basic checks only (PID exists, file exists) */
+  PERMISSIVE: 'permissive',
+  /** No validation (backward compatible) */
+  DISABLED: 'disabled',
+} as const;
+
+export type InjectionValidationMode =
+  (typeof InjectionValidationMode)[keyof typeof InjectionValidationMode];
 
 export interface InjectionValidatorConfig {
   mode: InjectionValidationMode;
@@ -447,7 +455,9 @@ export class InjectionValidator {
  * Create validator instance from environment configuration
  */
 export function createValidatorFromEnv(): InjectionValidator {
-  const modeStr = (process.env.JSHOOK_INJECTION_VALIDATION_MODE ?? 'balanced').toLowerCase();
+  const modeStr = readEnvString('JSHOOK_INJECTION_VALIDATION_MODE', 'balanced', {
+    trim: true,
+  }).toLowerCase();
   const mode = Object.values(InjectionValidationMode).includes(modeStr as InjectionValidationMode)
     ? (modeStr as InjectionValidationMode)
     : InjectionValidationMode.BALANCED;

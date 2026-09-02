@@ -61,7 +61,6 @@ pnpm run audit:tools
 
 ```bash
 pnpm run doctor
-pnpm run format:docs
 ```
 
 ## 扩展开发建议

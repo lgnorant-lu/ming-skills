@@ -2,6 +2,7 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { SEARCH_VECTOR_MODEL_ID, SEARCH_VECTOR_WORKER_IDLE_MS } from '@src/constants';
+import { readEnvInteger } from '@src/config/environment';
 import { ProcessRegistry } from '@utils/ProcessRegistry';
 
 type EmbeddingResult = Float32Array | Float32Array[];
@@ -27,14 +28,13 @@ export class EmbeddingEngine {
   private readonly modelId: string;
 
   constructor(options?: EmbeddingEngineOptions) {
-    const rawIdleMs = process.env.SEARCH_VECTOR_WORKER_IDLE_MS;
-    const parsedIdleMs =
-      rawIdleMs === undefined || rawIdleMs === '' ? Number.NaN : Number(rawIdleMs);
-    const transportDefault =
-      process.env.MCP_TRANSPORT?.trim().toLowerCase() === 'http'
-        ? 300_000
-        : SEARCH_VECTOR_WORKER_IDLE_MS;
-    const runtimeIdleMs = Number.isFinite(parsedIdleMs) ? parsedIdleMs : transportDefault;
+    // SEARCH_VECTOR_WORKER_IDLE_MS already encodes the HTTP-transport default
+    // (300_000 vs 15_000) at the constants layer — no need to re-derive it here.
+    const runtimeIdleMs = readEnvInteger(
+      'SEARCH_VECTOR_WORKER_IDLE_MS',
+      SEARCH_VECTOR_WORKER_IDLE_MS,
+      { min: 0 },
+    );
     const configuredIdleMs = options?.idleMs ?? runtimeIdleMs;
     this.idleMs = Number.isFinite(configuredIdleMs) ? Math.max(0, configuredIdleMs) : 0;
     this.modelId = options?.modelId?.trim() || SEARCH_VECTOR_MODEL_ID;

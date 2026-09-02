@@ -54,12 +54,10 @@ export const IDA_BRIDGE_ENDPOINT = str('IDA_BRIDGE_URL', 'http://127.0.0.1:18081
 
 /** Base URL for the configured external CAPTCHA solver service. */
 export const CAPTCHA_SOLVER_BASE_URL =
-  process.env.CAPTCHA_SOLVER_BASE_URL?.trim() ||
-  process.env.CAPTCHA_2CAPTCHA_BASE_URL?.trim() ||
-  '';
+  str('CAPTCHA_SOLVER_BASE_URL', '').trim() || str('CAPTCHA_2CAPTCHA_BASE_URL', '').trim();
 
 /** Extension registry base URL. Must be supplied via .env or environment. */
-export const EXTENSION_REGISTRY_BASE_URL = process.env.EXTENSION_REGISTRY_BASE_URL?.trim() || '';
+export const EXTENSION_REGISTRY_BASE_URL = str('EXTENSION_REGISTRY_BASE_URL', '').trim();
 
 /* ================================================================== */
 /*  MCP transport timeouts                                             */
@@ -182,6 +180,35 @@ export const SSE_HEARTBEAT_MS = int('SSE_HEARTBEAT_MS', 30_000);
 /** Retry-After (ms) returned by the HTTP transport when at session capacity. */
 export const HTTP_CAPACITY_RETRY_AFTER_MS = int('HTTP_CAPACITY_RETRY_AFTER_MS', 1_000);
 
+/**
+ * Opt-in MCP Streamable HTTP "JSON response" mode: reply with an
+ * `application/json` body instead of the default `text/event-stream` stream.
+ *
+ * Latency win (mean -15%~-33%, p90 ~3.08ms → 1.71ms per the SSE-reuse survey)
+ * at two documented costs:
+ *
+ *   1. The SDK (1.29.0) silently DROPS server-initiated requests sent with a
+ *      `relatedRequestId` in JSON mode — `send()` neither writes them to the
+ *      (now-absent) response SSE stream nor buffers them into the JSON body
+ *      (webStandardStreamableHttp.js). ElicitationBridge (`elicitation/create`)
+ *      and LLMSamplingBridge (`sampling/createMessage`) attach
+ *      `relatedRequestId` when invoked from INSIDE a tool call, so those
+ *      mid-call requests are lost. The same requests sent WITHOUT a
+ *      `relatedRequestId` (e.g. from a background task) route to the
+ *      standalone GET SSE stream and are unaffected. Resolution: this flag
+ *      defaults OFF; enabling it disables in-tool-call elicitation/sampling
+ *      delegation (the common CAPTCHA-pause / LLM-delegate path).
+ *
+ *   2. No streaming first byte: the SDK buffers until every response for the
+ *      POST is ready before resolving the JSON body, so long-running tools get
+ *      no progressive output (no progress notifications over the response, no
+ *      early partial results).
+ *
+ * @env MCP_HTTP_JSON_RESPONSE
+ * @default false
+ */
+export const MCP_HTTP_JSON_RESPONSE = bool('MCP_HTTP_JSON_RESPONSE', false);
+
 /* ================================================================== */
 /*  MCP structured logging                                             */
 /* ================================================================== */
@@ -200,12 +227,15 @@ export const MCP_LOG_FILE_DIR = str('MCP_LOG_FILE_DIR', '');
 /* ================================================================== */
 
 /**
- * Retention caps for persisted v8_inspector heap snapshots. Both default to 0
- * (no eviction) so persistence never surprises the user with deletions; set
- * MCP_V8_HEAP_SNAPSHOT_MAX_COUNT / MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB to bound
- * the on-disk and in-memory snapshot store.
+ * Retention caps for v8_inspector heap snapshots.
+ *
+ * `MCP_V8_HEAP_SNAPSHOT_MAX_COUNT` bounds both the on-disk and in-memory
+ * snapshot store. It defaults to 3 so a long-lived process never retains every
+ * captured snapshot's chunks in memory (each capture is GB-scale); set it to 0
+ * to opt out of eviction, or raise it via env. `MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB`
+ * additionally bounds the on-disk bytes and defaults to 0 (disabled).
  */
-export const MCP_V8_HEAP_SNAPSHOT_MAX_COUNT = int('MCP_V8_HEAP_SNAPSHOT_MAX_COUNT', 0);
+export const MCP_V8_HEAP_SNAPSHOT_MAX_COUNT = int('MCP_V8_HEAP_SNAPSHOT_MAX_COUNT', 3);
 export const MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB = int('MCP_V8_HEAP_SNAPSHOT_MAX_TOTAL_MB', 0);
 
 /* ================================================================== */
@@ -259,6 +289,15 @@ export const OFFLOADER_DETAIL_THRESHOLD_BYTES = int('OFFLOADER_DETAIL_THRESHOLD'
 /** LargeDataOffloader: strings larger than this (bytes) go directly to a file. */
 export const OFFLOADER_FILE_THRESHOLD_BYTES = int('OFFLOADER_FILE_THRESHOLD', 4 * 1024 * 1024);
 
+/**
+ * handleGetOffloadedData read-back guard: refuse to read an offloaded file
+ * larger than this (bytes) back into memory in a single read. A multi-MB blob
+ * read synchronously would freeze the event loop and balloon ~33% larger as a
+ * base64 string. Offloaded files live in artifacts/offloaded/; raise this env
+ * var deliberately only when a caller must read back a larger blob (a2-05/a4-05).
+ */
+export const MAX_OFFLOADED_READ_BYTES = int('MAX_OFFLOADED_READ_BYTES', 64 * 1024 * 1024);
+
 /* ================================================================== */
 /*  Buffer sizes                                                       */
 /* ================================================================== */
@@ -304,3 +343,16 @@ export const ARGS_PREVIEW_MAX_CHARS = int('ARGS_PREVIEW_MAX_CHARS', 500);
 
 /** Milliseconds in one minute (pure unit constant, not env-configurable). */
 export const MS_PER_MINUTE = 60_000;
+
+/* ================================================================== */
+/*  Browser session coordinator                                        */
+/* ================================================================== */
+
+/** Max tracked browser sessions; new session ids are rejected once exceeded. */
+export const BROWSER_SESSION_MAX_SESSIONS = int('BROWSER_SESSION_MAX_SESSIONS', 512);
+
+/** Idle threshold before a tracked browser session is swept (ms). */
+export const BROWSER_SESSION_IDLE_TTL_MS = int('BROWSER_SESSION_IDLE_TTL_MS', 30 * 60_000);
+
+/** Idle sweep interval for the browser session coordinator (ms). */
+export const BROWSER_SESSION_SWEEP_MS = int('BROWSER_SESSION_SWEEP_MS', 60_000);

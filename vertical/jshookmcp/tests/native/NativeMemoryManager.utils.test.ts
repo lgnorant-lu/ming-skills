@@ -28,7 +28,7 @@ vi.mock('@native/Win32API', () => ({
   PAGE: state.PAGE,
   MEM: state.MEM,
   MEM_TYPE: state.MEM_TYPE,
-  isKoffiAvailable: state.isWin32KoffiAvailable,
+  isKoffiBindingUsable: state.isWin32KoffiAvailable,
 }));
 
 import {

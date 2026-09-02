@@ -31,6 +31,7 @@ interface TraceNetworkCaptureCounts {
 }
 
 export class TraceNetworkCapture {
+  private readonly deps: TraceNetworkCaptureDeps;
   private readonly resources = new Map<string, NetworkTraceResource>();
   private options: Required<TraceNetworkCaptureOptions> = { ...DEFAULT_NETWORK_CAPTURE };
   private counts: TraceNetworkCaptureCounts = {
@@ -39,7 +40,9 @@ export class TraceNetworkCapture {
     networkBodyCount: 0,
   };
 
-  constructor(private readonly deps: TraceNetworkCaptureDeps) {}
+  constructor(deps: TraceNetworkCaptureDeps) {
+    this.deps = deps;
+  }
 
   configure(options?: TraceNetworkCaptureOptions): Required<TraceNetworkCaptureOptions> {
     this.resources.clear();

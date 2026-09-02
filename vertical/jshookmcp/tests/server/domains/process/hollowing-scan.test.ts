@@ -56,13 +56,17 @@ function buildMinimalPE32(
   hex += uint32le(machine).substring(0, 4); // machine (2 bytes, LE)
   hex += uint32le(numSections).substring(0, 4); // numberOfSections (2 bytes, LE)
   hex += '00000000'; // timeDateStamp
-  hex += '000000000000'; // pointerToSymbolTable + numberOfSymbols
+  hex += '00000000'; // pointerToSymbolTable (4 bytes)
+  hex += '00000000'; // numberOfSymbols (4 bytes)
   hex += uint32le(0xe0).substring(0, 4); // sizeOfOptionalHeader (2 bytes)
   hex += '0200'; // characteristics = IMAGE_FILE_EXECUTABLE_IMAGE
 
-  // Optional header PE32 (96 bytes = 0x60)
+  // Optional header PE32 (96 bytes = 0x60 before data directories).
+  // NB: all version fields carry BOTH major+minor words — omitting the minor
+  // words (7 bytes total) shifts the section headers and parsePe then reads
+  // them misaligned (names come out empty, sections get garbage fields).
   hex += '0b01'; // magic PE32
-  hex += '00'; // linker version
+  hex += '0000'; // linker major+minor version
   hex += '00000000'; // sizeOfCode
   hex += '00000000'; // sizeOfInitializedData
   hex += '00000000'; // sizeOfUninitializedData
@@ -72,9 +76,9 @@ function buildMinimalPE32(
   hex += uint32le(imageBase); // imageBase
   hex += '00100000'; // sectionAlignment = 0x1000
   hex += '00020000'; // fileAlignment = 0x200
-  hex += '0000'; // OS version
-  hex += '0000'; // image version
-  hex += '0400'; // subsystemVersion
+  hex += '00000000'; // OS version (major+minor)
+  hex += '00000000'; // image version (major+minor)
+  hex += '00000400'; // subsystemVersion (major=0, minor=4)
   hex += '00000000'; // win32VersionValue
   hex += uint32le(sizeOfImage);
   hex += uint32le(0x400); // sizeOfHeaders = 0x400
@@ -431,5 +435,68 @@ describe('scanHollowingIndicators', () => {
 
     expect(result.findings.some((f) => f.type === 'deleted_backing_file')).toBe(true);
     expect(result.isSuspicious).toBe(true);
+  });
+
+  // Confidence tiers: severity weights (critical=100/high=60/medium=30/low=10) →
+  // score thresholds (200/100/50) → confidence (95/80/50/20). Weights come from
+  // @src/constants/process (PROCESS_HOLLOWING_* env-overridable).
+  it('reports strong confidence (95) for two critical indicators', () => {
+    const result = scanHollowingIndicators({
+      pid: 11,
+      exeLink: '/usr/bin/trojan (deleted)',
+      mapsContent: '7fff00000000-7fff00001000 rwxp 00000000 00:00 0\n',
+    });
+
+    const criticalCount = result.findings.filter((f) => f.severity === 'critical').length;
+    expect(criticalCount).toBeGreaterThanOrEqual(2);
+    expect(result.confidence).toBe(95);
+    expect(result.isSuspicious).toBe(true);
+  });
+
+  it('reports high confidence (80) for a single critical indicator', () => {
+    const result = scanHollowingIndicators({
+      pid: 12,
+      exeLink: '/usr/bin/trojan (deleted)',
+    });
+
+    expect(result.confidence).toBe(80);
+    expect(result.isSuspicious).toBe(true);
+  });
+
+  it('reports medium confidence (50) for two medium indicators', () => {
+    const pe = buildMinimalPE32();
+    // Corrupt the first section-name byte so it is non-printable → medium finding.
+    // First section header starts at e_lfanew(0x40) + PE sig(4) + COFF(20) + opt(0xe0) = 0x138.
+    pe[0x138] = 0x01;
+    const peHex = Array.from(pe)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+
+    const result = scanHollowingIndicators({
+      pid: 13,
+      peHex,
+      expectedImagePath: 'C:\\Windows\\System32\\svchost.exe',
+    });
+
+    const severities = result.findings.map((f) => f.severity);
+    expect(severities).toContain('medium'); // system-path spoof
+    expect(severities).toContain('medium'); // non-printable section name
+    expect(result.confidence).toBe(50);
+    expect(result.isSuspicious).toBe(true);
+  });
+
+  it('reports low confidence (20) for low-severity indicators only', () => {
+    const pe = buildMinimalPE32({ numberOfSections: 6 }); // .sec4/.sec5 non-standard names
+    const peHex = Array.from(pe)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+
+    const result = scanHollowingIndicators({ pid: 14, peHex });
+
+    const severities = result.findings.map((f) => f.severity);
+    expect(severities.length).toBeGreaterThan(0);
+    expect(severities.every((s) => s === 'low')).toBe(true);
+    expect(result.confidence).toBe(20);
+    expect(result.isSuspicious).toBe(false);
   });
 });

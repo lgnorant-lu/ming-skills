@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { InstrumentationSessionManager } from '@server/instrumentation/InstrumentationSession';
+import {
+  InstrumentationSessionManager,
+  MAX_ARCHIVED_SESSIONS,
+  MAX_SESSIONS,
+} from '@server/instrumentation/InstrumentationSession';
 import { InstrumentationType } from '@server/instrumentation/types';
 import type { ToolResponse } from '@server/types';
 import { TEST_URLS, withPath } from '@tests/shared/test-urls';
@@ -47,11 +51,12 @@ describe('InstrumentationSession', () => {
       expect(sessions.every((s) => s.status === 'active')).toBe(true);
     });
 
-    it('destroys session and marks it destroyed', () => {
+    it('destroys session and archives it (removed from active registry)', () => {
       const session = manager.createSession();
-      manager.destroySession(session.id);
-      const info = manager.getSession(session.id);
-      expect(info?.status).toBe('destroyed');
+      const result = manager.destroySession(session.id);
+      expect(result.archived).toBe(true);
+      expect(manager.getSession(session.id)?.status).toBe('destroyed');
+      expect(manager.listSessions()).toHaveLength(0);
     });
 
     it('destroyed sessions are excluded from listSessions', () => {
@@ -66,7 +71,65 @@ describe('InstrumentationSession', () => {
       manager.destroySession(session.id);
       expect(() =>
         manager.registerOperation(session.id, InstrumentationType.RUNTIME_HOOK, 'window.fetch', {}),
-      ).toThrow(/destroyed/i);
+      ).toThrow(/not found/i);
+    });
+  });
+
+  // ── Read-only archive on destroy ──
+
+  describe('archiving', () => {
+    it('keeps a destroyed session readable via getSessionSnapshot so export still works', () => {
+      const s = manager.createSession('audit');
+      const op = manager.registerOperation(s.id, InstrumentationType.RUNTIME_HOOK, 'x', {});
+      manager.recordArtifact(op.id, { args: [1] });
+
+      const result = manager.destroySession(s.id);
+
+      expect(result.archived).toBe(true);
+      expect(result.unexportedArtifactCount).toBe(1);
+
+      const snapshot = manager.getSessionSnapshot(s.id);
+      expect(snapshot).toBeDefined();
+      expect(snapshot!.session.status).toBe('destroyed');
+      expect(snapshot!.operations).toHaveLength(1);
+      expect(snapshot!.artifacts).toHaveLength(1);
+    });
+
+    it('reports zero unexported artifacts when a session had none', () => {
+      const s = manager.createSession('empty');
+      const result = manager.destroySession(s.id);
+      expect(result.unexportedArtifactCount).toBe(0);
+    });
+
+    it('evicts the oldest archived session once the cap is exceeded', () => {
+      const ids: string[] = [];
+      for (let i = 0; i < MAX_ARCHIVED_SESSIONS + 1; i++) {
+        const s = manager.createSession(`s${i}`);
+        ids.push(s.id);
+        manager.destroySession(s.id);
+      }
+
+      expect((manager as any).archivedSessions.size).toBe(MAX_ARCHIVED_SESSIONS);
+      // First destroyed is the oldest → evicted.
+      expect(manager.getSessionSnapshot(ids[0]!)).toBeUndefined();
+      // Latest destroyed is retained.
+      expect(manager.getSessionSnapshot(ids[ids.length - 1]!)).toBeDefined();
+    });
+
+    it('getSession falls back to the archive for destroyed sessions', () => {
+      const s = manager.createSession('status-probe');
+      manager.destroySession(s.id);
+      const session = manager.getSession(s.id);
+      expect(session).toBeDefined();
+      expect(session!.status).toBe('destroyed');
+    });
+
+    it('getSessionStats reads counts from the archived session', () => {
+      const s = manager.createSession('stats-probe');
+      const op = manager.registerOperation(s.id, InstrumentationType.RUNTIME_HOOK, 'x', {});
+      manager.recordArtifact(op.id, { args: [] });
+      manager.destroySession(s.id);
+      expect(manager.getSessionStats(s.id)).toEqual({ operationCount: 1, artifactCount: 1 });
     });
   });
 
@@ -434,15 +497,39 @@ describe('InstrumentationSession', () => {
       expect(() => manager.destroySession('nope')).toThrow();
     });
 
-    it('marks active operations as completed when session destroyed', async () => {
+    it('clears operations, artifacts, and the reverse index when session destroyed', async () => {
       const s = manager.createSession();
-      manager.registerOperation(s.id, InstrumentationType.RUNTIME_HOOK, 'x', {});
-      const op2 = manager.registerOperation(s.id, InstrumentationType.RUNTIME_HOOK, 'y', {});
-      (manager as any).setOperationStatus(op2.id, 'failed'); // make it non-active
+      const op = manager.registerOperation(s.id, InstrumentationType.RUNTIME_HOOK, 'x', {});
+      manager.recordArtifact(op.id, { args: [1] });
 
       manager.destroySession(s.id);
-      expect(manager.getSessionOperations(s.id)[0]!.status).toBe('completed');
-      expect(manager.getSessionOperations(s.id)[1]!.status).toBe('failed');
+
+      expect(manager.getSessionOperations(s.id)).toEqual([]);
+      expect(manager.getArtifacts(s.id)).toEqual([]);
+      // Reverse index entry removed → stale operation can no longer record.
+      expect(() => manager.recordArtifact(op.id, {})).toThrow(/not found/i);
+    });
+
+    it('releases every live internal Map on destroy, retaining a bounded archive (a3-04)', () => {
+      const s = manager.createSession();
+      const op = manager.registerOperation(s.id, InstrumentationType.RUNTIME_HOOK, 'x', {});
+      manager.recordArtifact(op.id, { args: [] });
+
+      manager.destroySession(s.id);
+
+      expect((manager as any).sessions.size).toBe(0);
+      expect((manager as any).operations.size).toBe(0);
+      expect((manager as any).artifacts.size).toBe(0);
+      expect((manager as any).operationIndex.size).toBe(0);
+      // The destroyed session is retained read-only, bounded by the archive cap.
+      expect((manager as any).archivedSessions.size).toBe(1);
+    });
+
+    it('rejects creating more than MAX_SESSIONS sessions', () => {
+      for (let i = 0; i < MAX_SESSIONS; i++) {
+        manager.createSession();
+      }
+      expect(() => manager.createSession()).toThrow(/limit/i);
     });
 
     it('throws when recording artifact for non-existent operation', () => {

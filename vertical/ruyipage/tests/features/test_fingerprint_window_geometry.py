@@ -73,8 +73,12 @@ def _fixed_geo():
 
 @pytest.mark.feature
 @pytest.mark.browser
-def test_smart_fingerprint_public_flow_preserves_native_window_geometry(tmp_path):
+def test_smart_fingerprint_public_flow_preserves_native_window_geometry(
+    tmp_path, test_browser_path
+):
     opts = FirefoxOptions()
+    if test_browser_path:
+        opts.set_browser_path(test_browser_path)
     fingerprint = _fixed_1366_fingerprint()
 
     with mock.patch.object(builder, "fetch_geo_info", return_value=_fixed_geo()), \

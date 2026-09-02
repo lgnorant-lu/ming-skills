@@ -12,8 +12,16 @@ async function yieldToEventLoop(): Promise<void> {
   await waitForImmediate();
 }
 
-export async function startCPUProfiling(cdp: CDPSession): Promise<{ profilerEnabled: true }> {
+export async function startCPUProfiling(
+  cdp: CDPSession,
+  options?: { samplingInterval?: number },
+): Promise<{ profilerEnabled: true }> {
   await cdp.send('Profiler.enable');
+  if (options?.samplingInterval !== undefined) {
+    // The sampling interval must be set before Profiler.start; it cannot be
+    // changed mid-session. Default is 1000µs (1ms); 30-100µs for high-res.
+    await cdp.send('Profiler.setSamplingInterval', { interval: options.samplingInterval });
+  }
   await cdp.send('Profiler.start');
 
   logger.info('CPU profiling started');

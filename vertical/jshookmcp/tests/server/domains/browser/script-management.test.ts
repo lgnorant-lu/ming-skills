@@ -109,7 +109,7 @@ describe('ScriptManagementHandlers', () => {
     expect(body.hint).toContain('startLine/endLine');
   });
 
-  it('wraps full script responses with smartHandle and size limit', async () => {
+  it('wraps full script responses with smartHandle (threshold from config default)', async () => {
     const script = {
       scriptId: 'script-3',
       url: buildTestUrl('example', { suffix: 'test', path: 'full.js' }),
@@ -125,7 +125,7 @@ describe('ScriptManagementHandlers', () => {
       await handlers.handleGetScriptSource({ scriptId: 'script-3', preview: false }),
     );
 
-    expect(detailedDataManager.smartHandle).toHaveBeenCalledWith(script, 51200);
+    expect(detailedDataManager.smartHandle).toHaveBeenCalledWith(script);
     expect(body.success).toBe(true);
     expect(body.detailId).toBe('detail-123');
     expect(body.truncated).toBe(true);

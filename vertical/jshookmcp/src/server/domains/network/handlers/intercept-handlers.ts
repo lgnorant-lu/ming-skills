@@ -29,7 +29,10 @@ export interface InterceptHandlerDeps {
 }
 
 export class InterceptHandlers {
-  constructor(private deps: InterceptHandlerDeps) {}
+  private deps: InterceptHandlerDeps;
+  constructor(deps: InterceptHandlerDeps) {
+    this.deps = deps;
+  }
 
   async handleNetworkInterceptResponse(args: Record<string, unknown>) {
     try {

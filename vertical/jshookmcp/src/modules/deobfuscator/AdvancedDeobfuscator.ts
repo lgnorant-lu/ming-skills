@@ -5,8 +5,9 @@ import type {
   DeobfuscateSavedArtifact,
 } from '@internal-types/deobfuscator';
 import { runWebcrack } from '@modules/deobfuscator/webcrack';
+import type { WebcrackPool } from '@modules/deobfuscator/webcrack-worker';
 import { detectObfuscationType as detectObfuscationTypeUtil } from '@modules/deobfuscator/Deobfuscator.utils';
-import crypto from 'crypto';
+import crypto from 'node:crypto';
 
 export interface AdvancedDeobfuscateOptions {
   code: string;
@@ -62,7 +63,10 @@ export class AdvancedDeobfuscator {
     return crypto.createHash('md5').update(key).digest('hex');
   }
 
-  async deobfuscate(options: AdvancedDeobfuscateOptions): Promise<AdvancedDeobfuscateResult> {
+  async deobfuscate(
+    options: AdvancedDeobfuscateOptions,
+    pool?: WebcrackPool,
+  ): Promise<AdvancedDeobfuscateResult> {
     const cacheKey = this.generateCacheKey(options);
     const cached = this.resultCache.get(cacheKey);
     if (cached) {
@@ -93,17 +97,21 @@ export class AdvancedDeobfuscator {
       return { ...result, cached: false };
     }
 
-    const webcrackResult = await runWebcrack(options.code, {
-      unpack: options.unpack,
-      unminify: options.unminify,
-      jsx: options.jsx,
-      mangle: options.mangle,
-      mappings: options.mappings,
-      includeModuleCode: options.includeModuleCode,
-      maxBundleModules: options.maxBundleModules,
-      outputDir: options.outputDir,
-      forceOutput: options.forceOutput,
-    });
+    const webcrackResult = await runWebcrack(
+      options.code,
+      {
+        unpack: options.unpack,
+        unminify: options.unminify,
+        jsx: options.jsx,
+        mangle: options.mangle,
+        mappings: options.mappings,
+        includeModuleCode: options.includeModuleCode,
+        maxBundleModules: options.maxBundleModules,
+        outputDir: options.outputDir,
+        forceOutput: options.forceOutput,
+      },
+      pool,
+    );
 
     if (!webcrackResult.applied) {
       const reason = webcrackResult.reason ?? 'webcrack did not return a result';

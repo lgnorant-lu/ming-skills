@@ -6,6 +6,7 @@ import {
   argBool,
   argStringArray,
   argObject,
+  argEnum,
 } from '@server/domains/shared/parse-args';
 import { type PageNavigationWaitUntil } from '@modules/browser/navigation-wait-until';
 import { parsePageNavigationWaitUntil } from '@server/domains/browser/page-navigation-wait-until';
@@ -17,7 +18,7 @@ function extractCamoufoxConfig(args: Record<string, unknown>): CamoufoxBrowserCo
   const fonts = argStringArray(args, 'fonts');
   return {
     headless: argBool(args, 'headless', true),
-    os: argString(args, 'os', 'windows') as 'windows' | 'macos' | 'linux',
+    os: argEnum(args, 'os', new Set(['windows', 'macos', 'linux'] as const), 'windows'),
     geoip: argBool(args, 'geoip', false),
     humanize: argBool(args, 'humanize', false),
     proxy: argString(args, 'proxy') || undefined,
@@ -29,8 +30,8 @@ function extractCamoufoxConfig(args: Record<string, unknown>): CamoufoxBrowserCo
     fonts: fonts.length > 0 ? fonts : undefined,
     excludeAddons: excludeAddons.length > 0 ? excludeAddons : undefined,
     customFontsOnly: argBool(args, 'customFontsOnly', false),
-    screen: args.screen as { width: number; height: number } | undefined,
-    window: args.window as { width: number; height: number } | undefined,
+    screen: argObject(args, 'screen') as { width: number; height: number } | undefined,
+    window: argObject(args, 'window') as { width: number; height: number } | undefined,
     fingerprint: argObject(args, 'fingerprint'),
     webglConfig: argObject(args, 'webglConfig'),
     firefoxUserPrefs: argObject(args, 'firefoxUserPrefs'),

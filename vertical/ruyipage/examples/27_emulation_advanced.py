@@ -41,12 +41,12 @@ def main() -> None:
         add_result(results, "页面加载", "成功", "example.com 已加载")
 
         # 1. 强制颜色模式
-        forced_active = page.emulation.set_forced_colors_mode("active")
+        forced_dark = page.emulation.set_forced_colors_mode("dark")
         add_result(
             results,
-            "emulation.setForcedColorsModeThemeOverride active",
-            "成功" if forced_active else "不支持",
-            "标准命令已实现" if forced_active else "当前 Firefox 未实现该命令",
+            "emulation.setForcedColorsModeThemeOverride dark",
+            "成功" if forced_dark else "不支持",
+            "标准命令已实现" if forced_dark else "当前 Firefox 未实现该命令",
         )
 
         forced_none = page.emulation.set_forced_colors_mode("none")
@@ -188,20 +188,20 @@ def main() -> None:
         )
 
         # 5. 滚动条类型
-        sb_none = page.emulation.set_scrollbar_type("none")
+        sb_reset = page.emulation.set_scrollbar_type(None)
         add_result(
             results,
-            "emulation.setScrollbarTypeOverride none",
-            "成功" if sb_none else "不支持",
-            "标准命令已实现" if sb_none else "当前 Firefox 未实现该命令",
+            "emulation.setScrollbarTypeOverride reset",
+            "成功" if sb_reset else "不支持",
+            "标准命令已实现" if sb_reset else "当前 Firefox 未实现该命令",
         )
 
-        sb_standard = page.emulation.set_scrollbar_type("standard")
+        sb_classic = page.emulation.set_scrollbar_type("classic")
         add_result(
             results,
-            "emulation.setScrollbarTypeOverride standard",
-            "成功" if sb_standard else "不支持",
-            "标准命令已实现" if sb_standard else "当前 Firefox 未实现该命令",
+            "emulation.setScrollbarTypeOverride classic",
+            "成功" if sb_classic else "不支持",
+            "标准命令已实现" if sb_classic else "当前 Firefox 未实现该命令",
         )
 
         sb_overlay = page.emulation.set_scrollbar_type("overlay")

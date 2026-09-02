@@ -41,6 +41,21 @@ describe('CrossDomainConfig', () => {
     expect(config.fridaServerPort).toBe(27043);
   });
 
+  it('should reject partial or out-of-range ports and trim host values', () => {
+    process.env.FRIDA_SERVER_HOST = ' 192.168.1.100 ';
+    process.env.FRIDA_SERVER_PORT = '27043tcp';
+
+    resetConfigCache();
+    expect(getCrossDomainConfig()).toMatchObject({
+      fridaServerHost: '192.168.1.100',
+      fridaServerPort: 27042,
+    });
+
+    process.env.FRIDA_SERVER_PORT = '70000';
+    resetConfigCache();
+    expect(getCrossDomainConfig().fridaServerPort).toBe(27042);
+  });
+
   it('should enable Ghidra when path is set', async () => {
     process.env.GHIDRA_HEADLESS_PATH = '/opt/ghidra/support/analyzeHeadless';
 

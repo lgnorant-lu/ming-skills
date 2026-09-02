@@ -26,6 +26,7 @@ import {
 import type { BrowserFetchResult } from '@server/domains/graphql/handlers.impl.core.runtime.shared';
 import { argString, argBool } from '@server/domains/shared/parse-args';
 import { evaluateWithTimeout } from '@modules/collector/PageController';
+import { fetchWithTimeout } from '@utils/network/fetch';
 
 interface BrowserIntrospectionFetchResult extends BrowserFetchResult {
   federation?: BrowserFetchResult;
@@ -98,7 +99,10 @@ function buildFederationPayload(result: BrowserFetchResult | undefined): Record<
 }
 
 export class IntrospectionHandlers {
-  constructor(private collector: CodeCollector) {}
+  private collector: CodeCollector;
+  constructor(collector: CodeCollector) {
+    this.collector = collector;
+  }
 
   async handleGraphqlIntrospect(args: Record<string, unknown>) {
     try {
@@ -142,19 +146,16 @@ export class IntrospectionHandlers {
     let response: Response;
     let responseText: string;
     try {
-      const ac = new AbortController();
-      const t = setTimeout(() => ac.abort(), 10_000);
-      try {
-        response = await fetch(endpoint, {
+      response = await fetchWithTimeout(
+        endpoint,
+        {
           method: 'POST',
           headers: requestHeaders,
           body: JSON.stringify({ query, operationName }),
-          signal: ac.signal,
-        });
-        responseText = await response.text();
-      } finally {
-        clearTimeout(t);
-      }
+        },
+        10_000,
+      );
+      responseText = await response.text();
     } catch (error) {
       return {
         ok: false,

@@ -97,9 +97,7 @@ describe('CoreAnalysisHandlers', () => {
         code: 'a()',
       }),
     );
-    expect(deps.deobfuscator.deobfuscate).toHaveBeenCalledWith({
-      code: 'a()',
-    });
+    expect(deps.deobfuscator.deobfuscate).toHaveBeenCalledWith({ code: 'a()' }, undefined);
     expect(body.success).toBe(true);
   });
 
@@ -121,20 +119,23 @@ describe('CoreAnalysisHandlers', () => {
       ],
     });
 
-    expect(deps.deobfuscator.deobfuscate).toHaveBeenCalledWith({
-      code: 'bundle',
-      unpack: false,
-      unminify: false,
-      jsx: false,
-      mangle: true,
-      outputDir: 'artifacts/deobf',
-      forceOutput: true,
-      includeModuleCode: true,
-      maxBundleModules: 10,
-      mappings: [
-        { path: './main.js', pattern: 'bootstrap', matchType: 'includes', target: 'code' },
-      ],
-    });
+    expect(deps.deobfuscator.deobfuscate).toHaveBeenCalledWith(
+      {
+        code: 'bundle',
+        unpack: false,
+        unminify: false,
+        jsx: false,
+        mangle: true,
+        outputDir: 'artifacts/deobf',
+        forceOutput: true,
+        includeModuleCode: true,
+        maxBundleModules: 10,
+        mappings: [
+          { path: './main.js', pattern: 'bootstrap', matchType: 'includes', target: 'code' },
+        ],
+      },
+      undefined,
+    );
   });
 
   it('creates hook with default action in manage hooks', async () => {
@@ -178,11 +179,14 @@ describe('CoreAnalysisHandlers', () => {
       }),
     );
 
-    expect(deps.advancedDeobfuscator.deobfuscate).toHaveBeenCalledWith({
-      code: 'obf',
-      detectOnly: true,
-      unpack: false,
-    });
+    expect(deps.advancedDeobfuscator.deobfuscate).toHaveBeenCalledWith(
+      {
+        code: 'obf',
+        detectOnly: true,
+        unpack: false,
+      },
+      undefined,
+    );
     expect(body.code).toBe('raw');
     expect(body.astOptimized).toBe(false);
   });
@@ -192,9 +196,7 @@ describe('CoreAnalysisHandlers', () => {
 
     await handlers.handleDeobfuscate({ code: 'obf' });
 
-    expect(deps.deobfuscator.deobfuscate).toHaveBeenCalledWith({
-      code: 'obf',
-    });
+    expect(deps.deobfuscator.deobfuscate).toHaveBeenCalledWith({ code: 'obf' }, undefined);
   });
 
   it('runs webcrack_unpack directly and returns bundle details', async () => {
@@ -209,14 +211,18 @@ describe('CoreAnalysisHandlers', () => {
     expect(response.success).toBe(true);
     expect(response.engine).toBe('webcrack');
     expect(response.optionsUsed).toBeDefined();
-    expect(webcrackState.runWebcrack).toHaveBeenCalledWith('bundle', {
-      unpack: true,
-      unminify: true,
-      jsx: true,
-      mangle: false,
-      includeModuleCode: true,
-      maxBundleModules: 5,
-    });
+    expect(webcrackState.runWebcrack).toHaveBeenCalledWith(
+      'bundle',
+      {
+        unpack: true,
+        unminify: true,
+        jsx: true,
+        mangle: false,
+        includeModuleCode: true,
+        maxBundleModules: 5,
+      },
+      undefined,
+    );
   });
 
   it('returns structured error when webcrack_unpack fails', async () => {
@@ -278,9 +284,10 @@ describe('CoreAnalysisHandlers', () => {
       }),
     );
 
-    expect(deps.jscramblerDeobfuscator.deobfuscate).toHaveBeenCalledWith({
-      code: 'jscrambler-obfuscated',
-    });
+    expect(deps.jscramblerDeobfuscator.deobfuscate).toHaveBeenCalledWith(
+      { code: 'jscrambler-obfuscated' },
+      undefined,
+    );
     expect(body.success).toBe(true);
     expect(body.code).toBe('jscrambler-cleaned');
     expect(body.transformations).toEqual(['control-flow-restored']);
@@ -375,11 +382,14 @@ describe('CoreAnalysisHandlers', () => {
       }),
     );
 
-    expect(deps.advancedDeobfuscator.deobfuscate).toHaveBeenCalledWith({
-      code: 'obf',
-      detectOnly: true,
-      unpack: false,
-    });
+    expect(deps.advancedDeobfuscator.deobfuscate).toHaveBeenCalledWith(
+      {
+        code: 'obf',
+        detectOnly: true,
+        unpack: false,
+      },
+      undefined,
+    );
     expect(body.code).toBe('raw');
   });
 });

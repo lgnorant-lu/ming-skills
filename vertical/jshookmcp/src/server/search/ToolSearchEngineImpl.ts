@@ -1,4 +1,4 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import { allTools, getToolDomain } from '@server/ToolCatalog';
 import type { ToolProfile } from '@server/ToolCatalog';
 import type { SearchConfig } from '@internal-types/config';
@@ -7,7 +7,10 @@ import {
   SEARCH_BM25_K1,
   SEARCH_CACHE_VECTOR_WEIGHT_TOLERANCE,
   SEARCH_COVERAGE_PRECISION_FACTOR,
+  SEARCH_DESC_TOKEN_WEIGHT,
+  SEARCH_DOMAIN_TOKEN_WEIGHT,
   SEARCH_EXACT_NAME_MATCH_MULTIPLIER,
+  SEARCH_NAME_TOKEN_WEIGHT,
   SEARCH_PARAM_TOKEN_WEIGHT,
   SEARCH_PREFIX_MATCH_MULTIPLIER,
   SEARCH_QUERY_CACHE_CAPACITY,
@@ -255,19 +258,19 @@ export class ToolSearchEngine {
       for (const token of nameTokens) {
         const entry = termFreqs.get(token) ?? { tf: 0, weight: 0 };
         entry.tf++;
-        entry.weight = Math.max(entry.weight, 3);
+        entry.weight = Math.max(entry.weight, SEARCH_NAME_TOKEN_WEIGHT);
         termFreqs.set(token, entry);
       }
       for (const token of domainTokens) {
         const entry = termFreqs.get(token) ?? { tf: 0, weight: 0 };
         entry.tf++;
-        entry.weight = Math.max(entry.weight, 2);
+        entry.weight = Math.max(entry.weight, SEARCH_DOMAIN_TOKEN_WEIGHT);
         termFreqs.set(token, entry);
       }
       for (const token of descTokens) {
         const entry = termFreqs.get(token) ?? { tf: 0, weight: 0 };
         entry.tf++;
-        entry.weight = Math.max(entry.weight, 1);
+        entry.weight = Math.max(entry.weight, SEARCH_DESC_TOKEN_WEIGHT);
         termFreqs.set(token, entry);
       }
       for (const token of paramTokens) {
@@ -302,13 +305,11 @@ export class ToolSearchEngine {
     // ── Re-ranker: build domain keywords from tool metadata ──
     this.reRanker = new ReRanker();
     this.reRanker.buildFromTools(
-      this.docs.map(
-        (d): ToolMetadata => ({
-          name: d.name,
-          domain: d.domain ?? '',
-          description: d.description,
-        }),
-      ),
+      this.docs.map((d): ToolMetadata => ({
+        name: d.name,
+        domain: d.domain ?? '',
+        description: d.description,
+      })),
     );
 
     // ── Tool affinity graph (§4.1.4 dependency hull expansion) ──

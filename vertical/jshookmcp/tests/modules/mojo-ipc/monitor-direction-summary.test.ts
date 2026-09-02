@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { MojoMonitor, deriveDirectionFromPayload, type MojoMessage } from '@modules/mojo-ipc';
+import {
+  MojoMonitor,
+  deriveDirectionFromPayload,
+  MOJO_MAX_MESSAGES,
+  type MojoMessage,
+} from '@modules/mojo-ipc';
 
 /**
  * These tests exercise the pure, CI-verifiable parts of the monitor:
@@ -301,5 +306,36 @@ describe('MojoMonitor — summarizeMessages', () => {
     const summary = await inactive.summarizeMessages();
     expect(summary.total).toBe(0);
     expect(summary.filtered).toBe(false);
+  });
+});
+
+describe('MojoMonitor — bounded message buffer', () => {
+  let monitor: MojoMonitor;
+
+  beforeEach(() => {
+    monitor = new MojoMonitor();
+    activate(monitor);
+  });
+
+  it('caps the buffer to a fixed ring and reports dropped messages', async () => {
+    const total = MOJO_MAX_MESSAGES + 5;
+    for (let i = 0; i < total; i++) {
+      record(monitor, {
+        interfaceName: 'network.mojom.URLLoaderFactory',
+        messageType: 'Method',
+        size: i,
+        direction: 'request',
+      });
+    }
+
+    const result = await monitor.getMessages({ limit: MOJO_MAX_MESSAGES });
+
+    // Buffer must be bounded to MOJO_MAX_MESSAGES (b6-01): the oldest 5 were
+    // evicted, so the first surviving message is the 6th recorded (size 5).
+    expect(result.messages).toHaveLength(MOJO_MAX_MESSAGES);
+    expect(result.totalAvailable).toBe(MOJO_MAX_MESSAGES);
+    expect(result.dropped).toBe(5);
+    expect(result.messages[0]?.size).toBe(5);
+    expect(monitor.getDroppedMessageCount()).toBe(5);
   });
 });

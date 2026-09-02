@@ -4,7 +4,7 @@ const state = vi.hoisted(() => ({
   executePowerShellScript: vi.fn(),
   execAsync: vi.fn(),
   nativeWriteMemory: vi.fn(),
-  isKoffiAvailable: vi.fn(),
+  isKoffiBindingUsable: vi.fn(),
   createPlatformProvider: vi.fn(),
 }));
 
@@ -20,7 +20,7 @@ vi.mock('@src/native/NativeMemoryManager', () => ({
 }));
 
 vi.mock('@src/native/Win32API', () => ({
-  isKoffiAvailable: state.isKoffiAvailable,
+  isKoffiBindingUsable: state.isKoffiBindingUsable,
 }));
 
 vi.mock('@native/platform/factory.js', () => ({
@@ -47,7 +47,7 @@ describe('memory/writer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetLinuxProviderCache();
-    state.isKoffiAvailable.mockReturnValue(false);
+    state.isKoffiBindingUsable.mockReturnValue(false);
   });
 
   it('returns validation error for invalid address', async () => {
@@ -64,7 +64,7 @@ describe('memory/writer', () => {
   });
 
   it('uses native Windows writer when koffi path succeeds', async () => {
-    state.isKoffiAvailable.mockReturnValue(true);
+    state.isKoffiBindingUsable.mockReturnValue(true);
     state.nativeWriteMemory.mockResolvedValue({ success: true, bytesWritten: 4 });
 
     const result = await writeMemory('win32', 2, '0x10', 'DEADBEEF', 'hex', vi.fn());
@@ -75,7 +75,7 @@ describe('memory/writer', () => {
   });
 
   it('falls back to PowerShell when native Windows writer fails', async () => {
-    state.isKoffiAvailable.mockReturnValue(true);
+    state.isKoffiBindingUsable.mockReturnValue(true);
     state.nativeWriteMemory.mockResolvedValue({ success: false, error: 'native-fail' });
     state.executePowerShellScript.mockResolvedValue({
       stdout: '{"success":true,"bytesWritten":4}',
@@ -88,7 +88,7 @@ describe('memory/writer', () => {
   });
 
   it('falls back to PowerShell when the native Windows writer throws', async () => {
-    state.isKoffiAvailable.mockReturnValue(true);
+    state.isKoffiBindingUsable.mockReturnValue(true);
     state.nativeWriteMemory.mockRejectedValueOnce(new Error('native-crash'));
     state.executePowerShellScript.mockResolvedValue({
       stdout: '{"success":true,"bytesWritten":2}',

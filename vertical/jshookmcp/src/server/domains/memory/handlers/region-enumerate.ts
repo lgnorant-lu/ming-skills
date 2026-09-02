@@ -6,6 +6,7 @@
  */
 import { handleSafe } from '@server/domains/shared/ResponseBuilder';
 import { argEnum, argNumber, argString } from '@server/domains/shared/parse-args';
+import { resolveMemoryDomainPid } from '@server/domains/memory/pid-resolver';
 import { createPlatformProvider } from '@native/platform/factory';
 import type {
   PlatformMemoryAPI,
@@ -88,15 +89,10 @@ export class RegionHandlers {
 
   async handleRegionEnumerate(args: Record<string, unknown>) {
     return handleSafe(async () => {
-      // Resolve PID (validates it's a positive integer)
-      const pidValue = args.pid;
-      const numericPid = Number(pidValue);
-      if (!Number.isInteger(numericPid) || numericPid <= 0) {
-        throw new Error(
-          `Invalid PID: ${JSON.stringify(pidValue)} (expected a positive integer). Provide an explicit pid.`,
-        );
-      }
-      const pid = numericPid;
+      // Resolve PID (validates it's a positive integer) via the shared memory
+      // resolver so undefined/"abc"/NaN never reach the native FFI layer —
+      // same contract as every other memory handler.
+      const pid = await resolveMemoryDomainPid(args.pid, undefined);
 
       const moduleNameFilter = argString(args, 'moduleName');
       const protectionFilter = argEnum(args, 'protection', PROTECTION_OPTIONS);

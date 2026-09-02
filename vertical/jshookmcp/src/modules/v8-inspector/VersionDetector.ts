@@ -48,7 +48,10 @@ function readBooleanResult(value: unknown): boolean {
 }
 
 export class VersionDetector {
-  constructor(private readonly getPage?: () => Promise<unknown>) {}
+  private readonly getPage?: () => Promise<unknown>;
+  constructor(getPage?: () => Promise<unknown>) {
+    this.getPage = getPage;
+  }
 
   async detectV8Version(): Promise<V8Version | null> {
     const browserVersion = await this.detectBrowserVersion();

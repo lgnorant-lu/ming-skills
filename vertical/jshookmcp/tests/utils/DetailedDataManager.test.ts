@@ -24,9 +24,9 @@ describe('DetailedDataManager', () => {
     expect(third).not.toBe(first);
   });
 
-  it('stores and retrieves data with path and updates access stats', () => {
+  it('stores and retrieves data with path and updates access stats', async () => {
     const manager = DetailedDataManager.getInstance();
-    const detailId = manager.store({ nested: { value: 42 } });
+    const detailId = await manager.store({ nested: { value: 42 } });
 
     expect(manager.retrieve(detailId)).toEqual({ nested: { value: 42 } });
     expect(manager.retrieve(detailId, 'nested.value')).toBe(42);
@@ -35,19 +35,19 @@ describe('DetailedDataManager', () => {
     expect(detailed?.accessCount).toBe(2);
   });
 
-  it('throws for missing and expired detail ids', () => {
+  it('throws for missing and expired detail ids', async () => {
     const manager = DetailedDataManager.getInstance();
     expect(() => manager.retrieve('detail_missing')).toThrow('not found or expired');
 
-    const detailId = manager.store({ hello: 'world' }, 10);
+    const detailId = await manager.store({ hello: 'world' }, 10);
     vi.advanceTimersByTime(11);
     expect(() => manager.retrieve(detailId)).toThrow('expired');
   });
 
-  it('cleans up expired entries via cleanup routine', () => {
+  it('cleans up expired entries via cleanup routine', async () => {
     const manager = DetailedDataManager.getInstance();
-    manager.store({ a: 1 }, 5);
-    manager.store({ b: 2 }, 30_000);
+    await manager.store({ a: 1 }, 5);
+    await manager.store({ b: 2 }, 30_000);
 
     vi.advanceTimersByTime(6);
     (manager as any).cleanup();
@@ -55,29 +55,29 @@ describe('DetailedDataManager', () => {
     expect(manager.getStats().cacheSize).toBe(1);
   });
 
-  it('evicts least-recently-used entry when cache reaches limit', () => {
+  it('evicts least-recently-used entry when cache reaches limit', async () => {
     const manager = DetailedDataManager.getInstance();
     const ids: string[] = [];
 
     for (let index = 0; index < 100; index++) {
-      ids.push(manager.store({ index }));
+      ids.push(await manager.store({ index }));
       vi.advanceTimersByTime(1);
     }
 
     manager.retrieve(ids[99]!);
     vi.advanceTimersByTime(1);
-    const overflowId = manager.store({ overflow: true });
+    const overflowId = await manager.store({ overflow: true });
 
     expect(manager.getStats().cacheSize).toBe(100);
     expect(() => manager.retrieve(ids[0]!)).toThrow('not found or expired');
     expect(manager.retrieve(overflowId)).toEqual({ overflow: true });
   });
 
-  it('returns detailed response for oversized payload in smartHandle', () => {
+  it('returns detailed response for oversized payload in smartHandle', async () => {
     const manager = DetailedDataManager.getInstance();
     const large = { payload: 'x'.repeat(5000) };
 
-    const result = manager.smartHandle(large, 100) as {
+    const result = (await manager.smartHandle(large, 100)) as {
       detailId: string;
       summary: { size: number; type: string };
     };
@@ -98,30 +98,30 @@ describe('DetailedDataManager', () => {
     manager.shutdown();
   });
 
-  it('returns primitives directly from smartHandle', () => {
+  it('returns primitives directly from smartHandle', async () => {
     const manager = DetailedDataManager.getInstance();
-    expect(manager.smartHandle(null)).toBe(null);
-    expect(manager.smartHandle('string')).toBe('string');
-    expect(manager.smartHandle({ small: true })).toEqual({ small: true });
+    expect(await manager.smartHandle(null)).toBe(null);
+    expect(await manager.smartHandle('string')).toBe('string');
+    expect(await manager.smartHandle({ small: true })).toEqual({ small: true });
   });
 
-  it('uses serialization memoization for identical object references', () => {
+  it('uses serialization memoization for identical object references', async () => {
     const manager = DetailedDataManager.getInstance();
     const obj = { shared: true };
-    const id1 = manager.store(obj);
-    const id2 = manager.store(obj); // hits memo cache
+    const id1 = await manager.store(obj);
+    const id2 = await manager.store(obj); // hits memo cache
     expect(id1).not.toBe(id2);
   });
 
-  it('throws when getByPath hits undefined traversal', () => {
+  it('throws when getByPath hits undefined traversal', async () => {
     const manager = DetailedDataManager.getInstance();
-    const id = manager.store({ nested: {} });
+    const id = await manager.store({ nested: {} });
     expect(() => manager.retrieve(id, 'nested.missing.deep')).toThrow('Path not found');
   });
 
-  it('extends TTL and throws on missing/expired extension', () => {
+  it('extends TTL and throws on missing/expired extension', async () => {
     const manager = DetailedDataManager.getInstance();
-    const id = manager.store({ a: 1 }, 1000);
+    const id = await manager.store({ a: 1 }, 1000);
 
     expect(() => manager.extend('missing')).toThrow('not found');
 
@@ -133,36 +133,36 @@ describe('DetailedDataManager', () => {
     expect(() => manager.extend(id)).toThrow('already expired');
   });
 
-  it('clears all cached data', () => {
+  it('clears all cached data', async () => {
     const manager = DetailedDataManager.getInstance();
-    manager.store({ a: 1 });
+    await manager.store({ a: 1 });
     manager.clear();
     expect(manager.getStats().cacheSize).toBe(0);
   });
 
-  it('auto-extends TTL when retrieved within 5 minutes of expiration', () => {
+  it('auto-extends TTL when retrieved within 5 minutes of expiration', async () => {
     const manager = DetailedDataManager.getInstance();
-    const id = manager.store({ a: 1 }, 360000); // 6 mins TTL
+    const id = await manager.store({ a: 1 }, 360000); // 6 mins TTL
     vi.advanceTimersByTime(120000); // advance 2 mins -> 4 mins remaining (< 5 mins)
     manager.retrieve(id); // triggers AUTO_EXTEND_ON_ACCESS
     const stats = manager.getDetailedStats().find((s) => s.detailId === id);
     expect(stats?.remainingSeconds).toBeGreaterThan(300); // verify extended
   });
 
-  it('generates summary array length correctly for oversized arrays', () => {
+  it('generates summary array length correctly for oversized arrays', async () => {
     const manager = DetailedDataManager.getInstance();
     const largeArray = Array.from({ length: 5000 }).fill('x');
-    const result = manager.smartHandle(largeArray, 100) as any;
+    const result = (await manager.smartHandle(largeArray, 100)) as any;
     expect(result.summary.type).toBe('array');
     expect(result.summary.structure.length).toBe(5000);
   });
 
-  it('sorts detailed stats by lastAccessedAt descending', () => {
+  it('sorts detailed stats by lastAccessedAt descending', async () => {
     const manager = DetailedDataManager.getInstance();
     manager.clear();
-    const id1 = manager.store({ first: true });
+    const id1 = await manager.store({ first: true });
     vi.advanceTimersByTime(1000);
-    const id2 = manager.store({ second: true });
+    const id2 = await manager.store({ second: true });
     vi.advanceTimersByTime(1000);
 
     // Access id1 so its lastAccessedAt becomes newest
@@ -182,7 +182,7 @@ describe('DetailedDataManager', () => {
     // A data: URI is offloaded regardless of size; a small one keeps the test cheap.
     const dataUri =
       'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-    const id = manager.store([{ url: dataUri, method: 'GET', requestId: 'r1' }]);
+    const id = await manager.store([{ url: dataUri, method: 'GET', requestId: 'r1' }]);
 
     const retrieved = manager.retrieve(id) as Array<{ url: { _offload?: { path?: string } } }>;
     // The url field is now a structured placeholder, NOT a raw base64 string.
@@ -195,10 +195,10 @@ describe('DetailedDataManager', () => {
     if (path) await rm(join(getProjectRoot(), path), { force: true });
   });
 
-  it('leaves normal payloads as the same value through store/retrieve (no-op path)', () => {
+  it('leaves normal payloads as the same value through store/retrieve (no-op path)', async () => {
     const manager = DetailedDataManager.getInstance();
     const payload = { requests: [{ url: 'https://example.com', method: 'GET' }] };
-    const id = manager.store(payload);
+    const id = await manager.store(payload);
     expect(manager.retrieve(id)).toEqual(payload);
   });
 });

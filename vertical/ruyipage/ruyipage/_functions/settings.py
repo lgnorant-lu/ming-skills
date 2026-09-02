@@ -35,6 +35,10 @@ class Settings(object):
     # 响应体读取默认超时（秒）
     response_body_timeout = 10
 
+    # page.listen 历史缓冲区最大数据包数，超出后丢弃最旧的包。
+    # 长时间监听高流量站点时，该上限决定了内存占用的天花板。
+    listen_max_packets = 1000
+
     # ── 诊断与追踪 ──
 
     # 是否启用 debug trace 记录（默认关闭，零开销）

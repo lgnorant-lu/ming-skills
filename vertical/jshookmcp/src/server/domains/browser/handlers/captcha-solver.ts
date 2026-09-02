@@ -7,7 +7,14 @@
 import type { CodeCollector } from '@server/domains/shared/modules/collector';
 import { argString, argNumber, argBool } from '@server/domains/shared/parse-args';
 import { logger } from '@utils/logger';
+import { fetchWithTimeout } from '@utils/network/fetch';
 import { R, type ToolResponse } from '@server/domains/shared/ResponseBuilder';
+import type { ElicitationBridge } from '@server/ElicitationBridge';
+import type {
+  ElicitRequestFormParams,
+  PrimitiveSchemaDefinition,
+} from '@modelcontextprotocol/server';
+import { readEnvNullableString, readEnvString } from '@src/config/environment';
 import {
   CAPTCHA_SOLVER_BASE_URL,
   CAPTCHA_SUBMIT_TIMEOUT_MS,
@@ -18,6 +25,7 @@ import {
   CAPTCHA_MAX_TIMEOUT_MS,
   CAPTCHA_MAX_RETRIES,
   CAPTCHA_DEFAULT_RETRIES,
+  CAPTCHA_HOOK_TIMEOUT_MAX_MS,
 } from '@src/constants';
 
 // ── Helpers ──
@@ -114,23 +122,23 @@ function resolveLegacyServiceOverride(rawProvider: unknown): string | undefined 
 
 function resolveExternalServiceName(args: Record<string, unknown>): string {
   const legacyOverride = resolveLegacyServiceOverride(args.provider);
-  const configured = (process.env.CAPTCHA_PROVIDER || '').trim().toLowerCase();
+  const configured = readEnvString('CAPTCHA_PROVIDER', '', { trim: true }).toLowerCase();
   return legacyOverride || configured || '2captcha';
 }
 
 function getSolverBaseUrl(service: string): string {
   if (service === '2captcha') {
     return (
-      process.env.CAPTCHA_SOLVER_BASE_URL?.trim() ||
-      process.env.CAPTCHA_2CAPTCHA_BASE_URL?.trim() ||
+      readEnvNullableString('CAPTCHA_SOLVER_BASE_URL', { trim: true }) ||
+      readEnvNullableString('CAPTCHA_2CAPTCHA_BASE_URL', { trim: true }) ||
       CAPTCHA_SOLVER_BASE_URL
     );
   }
   if (service === 'anticaptcha') {
-    return process.env.CAPTCHA_ANTICAPTCHA_BASE_URL?.trim() || '';
+    return readEnvNullableString('CAPTCHA_ANTICAPTCHA_BASE_URL', { trim: true }) || '';
   }
   if (service === 'capsolver') {
-    return process.env.CAPTCHA_CAPSOLVER_BASE_URL?.trim() || '';
+    return readEnvNullableString('CAPTCHA_CAPSOLVER_BASE_URL', { trim: true }) || '';
   }
   return '';
 }
@@ -138,13 +146,17 @@ function getSolverBaseUrl(service: string): string {
 function mapProviderTaskKind(service: string, taskKind: SolverTaskKind): string {
   if (service === 'anticaptcha') {
     if (taskKind === 'recaptcha_v2') return 'RecaptchaV2TaskProxyless';
+    if (taskKind === 'recaptcha_v3') return 'RecaptchaV3TaskProxyless';
     if (taskKind === 'hcaptcha') return 'HCaptchaTaskProxyless';
+    if (taskKind === 'funcaptcha') return 'FunCaptchaTaskProxyless';
     if (taskKind === 'turnstile') return 'TurnstileTaskProxyless';
     return 'ImageToTextTask';
   }
   if (service === 'capsolver') {
     if (taskKind === 'recaptcha_v2') return 'ReCaptchaV2TaskProxyLess';
+    if (taskKind === 'recaptcha_v3') return 'ReCaptchaV3TaskProxyLess';
     if (taskKind === 'hcaptcha') return 'HCaptchaTaskProxyLess';
+    if (taskKind === 'funcaptcha') return 'FunCaptchaTaskProxyLess';
     if (taskKind === 'turnstile') return 'AntiTurnstileTaskProxyLess';
     return 'ImageToTextTask';
   }
@@ -181,15 +193,18 @@ async function solveWithJsonTaskApi(
           websiteKey: params.siteKey,
         };
 
-  const createRes = await fetch(`${baseUrl}/createTask`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      clientKey: apiKey,
-      task,
-    }),
-    signal: AbortSignal.timeout(CAPTCHA_SUBMIT_TIMEOUT_MS),
-  });
+  const createRes = await fetchWithTimeout(
+    `${baseUrl}/createTask`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientKey: apiKey,
+        task,
+      }),
+    },
+    CAPTCHA_SUBMIT_TIMEOUT_MS,
+  );
   const createData = (await createRes.json()) as Record<string, unknown>;
   if ((createData.errorId as number | undefined) && createData.errorId !== 0) {
     throw new Error(
@@ -203,20 +218,22 @@ async function solveWithJsonTaskApi(
   }
 
   while (true) {
-    const remaining = timeoutMs - (Date.now() - start);
-    if (remaining <= 0) break;
-    await sleep(Math.min(CAPTCHA_POLL_INTERVAL_MS, remaining));
-    if (Date.now() - start >= timeoutMs) break;
+    const elapsed = Date.now() - start;
+    if (elapsed >= timeoutMs) break;
+    await sleep(Math.min(CAPTCHA_POLL_INTERVAL_MS, timeoutMs - elapsed));
 
-    const resultRes = await fetch(`${baseUrl}/getTaskResult`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        clientKey: apiKey,
-        taskId,
-      }),
-      signal: AbortSignal.timeout(CAPTCHA_RESULT_TIMEOUT_MS),
-    });
+    const resultRes = await fetchWithTimeout(
+      `${baseUrl}/getTaskResult`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientKey: apiKey,
+          taskId,
+        }),
+      },
+      CAPTCHA_RESULT_TIMEOUT_MS,
+    );
     const resultData = (await resultRes.json()) as Record<string, unknown>;
     if ((resultData.errorId as number | undefined) && resultData.errorId !== 0) {
       throw new Error(
@@ -281,6 +298,13 @@ function normalizeBase64Payload(rawValue: unknown): string | undefined {
     return commaIndex >= 0 ? trimmed.slice(commaIndex + 1) : undefined;
   }
   return trimmed;
+}
+
+/** Reject prototype/constructor keys and dotted paths before writing to `window`. */
+function isSafeCallbackName(name: string): boolean {
+  return (
+    /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) && !(name in Object.prototype) && name !== 'prototype'
+  );
 }
 
 function normalizeTokenInjectionConfig(args: Record<string, unknown>): {
@@ -378,12 +402,15 @@ async function solveWith2Captcha(
     submitBody.body = params.imageBase64;
   }
 
-  const submitRes = await fetch(`${baseUrl}/in.php`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(submitBody),
-    signal: AbortSignal.timeout(CAPTCHA_SUBMIT_TIMEOUT_MS),
-  });
+  const submitRes = await fetchWithTimeout(
+    `${baseUrl}/in.php`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(submitBody),
+    },
+    CAPTCHA_SUBMIT_TIMEOUT_MS,
+  );
   const submitData = (await submitRes.json()) as Record<string, unknown>;
 
   if (submitData.status !== 1) {
@@ -395,21 +422,16 @@ async function solveWith2Captcha(
   // Poll with bounded dynamic sleep to avoid timeout drift while reducing request pressure.
   const pollInterval = CAPTCHA_POLL_INTERVAL_MS;
   while (true) {
-    const remaining = timeoutMs - (Date.now() - start);
-    if (remaining <= 0) break;
-    await sleep(Math.min(pollInterval, remaining));
-
-    // Check again after sleep
-    if (Date.now() - start >= timeoutMs) break;
+    const elapsed = Date.now() - start;
+    if (elapsed >= timeoutMs) break;
+    await sleep(Math.min(pollInterval, timeoutMs - elapsed));
 
     const resultUrl = new URL(`${baseUrl}/res.php`);
     resultUrl.searchParams.set('key', apiKey);
     resultUrl.searchParams.set('action', 'get');
     resultUrl.searchParams.set('id', taskId);
     resultUrl.searchParams.set('json', '1');
-    const resultRes = await fetch(resultUrl.toString(), {
-      signal: AbortSignal.timeout(CAPTCHA_RESULT_TIMEOUT_MS),
-    });
+    const resultRes = await fetchWithTimeout(resultUrl.toString(), {}, CAPTCHA_RESULT_TIMEOUT_MS);
     const resultData = (await resultRes.json()) as Record<string, unknown>;
 
     if (resultData.status === 1) {
@@ -434,13 +456,17 @@ async function solveWith2Captcha(
 export async function handleCaptchaVisionSolve(
   args: Record<string, unknown>,
   collector: CodeCollector,
+  elicitationBridge?: ElicitationBridge,
 ): Promise<ToolResponse> {
   const page = await collector.getActivePage();
   if (!page) return R.fail('No active page.').build();
 
-  const mode = normalizeSolverMode(args.mode ?? args.provider ?? process.env.CAPTCHA_PROVIDER);
+  const mode = normalizeSolverMode(
+    args.mode ?? args.provider ?? readEnvNullableString('CAPTCHA_PROVIDER', { trim: true }),
+  );
   const externalService = resolveExternalServiceName(args);
-  const apiKey = argString(args, 'apiKey', '') || process.env.CAPTCHA_API_KEY || '';
+  const apiKey =
+    argString(args, 'apiKey', '') || readEnvString('CAPTCHA_API_KEY', '', { trim: true });
   const challengeTypeHint = normalizeChallengeTypeHint(args.challengeType ?? args.typeHint);
   const taskKind = resolveTaskKind(args.taskKind, challengeTypeHint);
   const timeoutMs = Math.min(
@@ -456,11 +482,103 @@ export async function handleCaptchaVisionSolve(
   const siteKey = argString(args, 'siteKey');
   const pageUrl = argString(args, 'pageUrl', '') || page.url();
 
-  if (requiresWidgetContext(taskKind) && !siteKey) {
+  // Widget solving needs a siteKey for external providers, but manual mode
+  // delegates the solving to the user in-browser, so it may proceed without one.
+  if (requiresWidgetContext(taskKind) && !siteKey && mode !== 'manual') {
     return R.fail('Widget solving requires an explicit siteKey.').build();
   }
 
   if (mode === 'manual') {
+    // ── Resume path (MRTR round-trip): the client re-calls this tool with the
+    // requestState token returned by a previous suspension + user responses.
+    const resumeToken = argString(args, 'resumeToken');
+    if (resumeToken && elicitationBridge) {
+      const decoded = elicitationBridge.resumeFromState<{
+        pageUrl?: string;
+        challengeType?: string;
+      }>(resumeToken, 'captcha_manual');
+      if (!decoded) {
+        return R.fail(
+          'resumeToken is invalid, expired or from a different flow. Restart with a fresh captcha_vision_solve call.',
+        ).build();
+      }
+      const responses = (args.resumeResponses ?? {}) as Record<string, unknown>;
+      if (responses.solved !== true) {
+        return R.fail('User indicated the CAPTCHA is not solved.')
+          .set('inputResult', responses.solved === false ? 'declined' : 'incomplete')
+          .build();
+      }
+      return R.ok().build({
+        mode: 'manual',
+        resumed: true,
+        solved: true,
+        token: typeof responses.token === 'string' ? responses.token : undefined,
+        challengeType: decoded.state.data.challengeType ?? challengeType,
+        pageUrl: decoded.state.data.pageUrl ?? pageUrl,
+      });
+    }
+
+    // ── Suspend path: interactive elicitation when the client supports it,
+    // otherwise an InputRequiredResult suspension with an encrypted
+    // requestState (plan Task 3.2 — CAPTCHA ↔ ElicitationBridge linkage).
+    if (elicitationBridge) {
+      const manualForm: ElicitRequestFormParams = {
+        message: [
+          `🛡️ CAPTCHA detected: **${challengeType}**`,
+          '',
+          `Page: ${pageUrl}`,
+          '',
+          'Please solve the CAPTCHA in your browser, then confirm below.',
+          'If a response token was generated, paste it in the token field.',
+        ].join('\n'),
+        requestedSchema: {
+          type: 'object',
+          properties: {
+            solved: {
+              type: 'boolean',
+              description: 'Have you solved the CAPTCHA?',
+              title: 'CAPTCHA Solved',
+              default: false,
+            } satisfies PrimitiveSchemaDefinition,
+            token: {
+              type: 'string',
+              description: 'CAPTCHA response token (if available)',
+              title: 'Response Token',
+            } satisfies PrimitiveSchemaDefinition,
+          },
+          required: ['solved'],
+        },
+      };
+
+      return elicitationBridge.requestInputAndAwait(
+        manualForm,
+        async (responses) => {
+          if (responses.solved !== true) {
+            return R.fail('User indicated the CAPTCHA is not solved.')
+              .set('inputResult', 'declined')
+              .build();
+          }
+          return R.ok().build({
+            mode: 'manual',
+            resumed: true,
+            solved: true,
+            token: typeof responses.token === 'string' ? responses.token : undefined,
+            challengeType,
+            pageUrl,
+          });
+        },
+        {
+          stateKind: 'captcha_manual',
+          stateTtlMs: 10 * 60_000,
+          state: { challengeType, pageUrl },
+          instruction:
+            'Re-call captcha_vision_solve with mode=manual, resumeToken=<requestState> and ' +
+            'resumeResponses={ solved: true, token? } after the user solves the CAPTCHA.',
+        },
+      );
+    }
+
+    // Legacy behavior — no elicitation bridge available (e.g. unit tests).
     return R.ok().build({
       mode: 'manual',
       challengeType,
@@ -468,6 +586,13 @@ export async function handleCaptchaVisionSolve(
       instruction: 'Please solve the CAPTCHA manually in the browser, then continue.',
       hint: 'Configure an external solver service and CAPTCHA_API_KEY to automate this flow.',
     });
+  }
+
+  if (challengeType === 'browser_check') {
+    return R.fail(
+      'browser_check challenges are not supported by external solvers — use ' +
+        'widget_challenge_solve with hook or manual mode.',
+    ).build();
   }
 
   // External provider solving
@@ -541,11 +666,22 @@ export async function handleWidgetChallengeSolve(
   const page = await collector.getActivePage();
   if (!page) return R.fail('No active page.').build();
 
-  const mode = normalizeSolverMode(args.mode ?? args.provider ?? process.env.CAPTCHA_PROVIDER);
+  const mode = normalizeSolverMode(
+    args.mode ?? args.provider ?? readEnvNullableString('CAPTCHA_PROVIDER', { trim: true }),
+  );
   const externalService = resolveExternalServiceName(args);
-  const apiKey = argString(args, 'apiKey', '') || process.env.CAPTCHA_API_KEY || '';
-  const timeoutMs = Math.min(Math.max(argNumber(args, 'timeoutMs', 120_000), 5_000), 600_000);
+  const apiKey =
+    argString(args, 'apiKey', '') || readEnvString('CAPTCHA_API_KEY', '', { trim: true });
+  const timeoutMs = Math.min(
+    Math.max(argNumber(args, 'timeoutMs', CAPTCHA_DEFAULT_TIMEOUT_MS), CAPTCHA_MIN_TIMEOUT_MS),
+    CAPTCHA_MAX_TIMEOUT_MS,
+  );
   const injectConfig = normalizeTokenInjectionConfig(args);
+  if (injectConfig.callbackName && !isSafeCallbackName(injectConfig.callbackName)) {
+    return R.fail(
+      'callbackName must be a plain JS identifier (no dotted paths or prototype keys).',
+    ).build();
+  }
   const taskKind = resolveTaskKind(args.taskKind, 'widget');
   const siteKey = argString(args, 'siteKey');
   const pageUrl = argString(args, 'pageUrl', '') || page.url();
@@ -554,7 +690,7 @@ export async function handleWidgetChallengeSolve(
     if (!siteKey) {
       return R.fail('Widget solving requires an explicit siteKey.').build();
     }
-    const hookTimeoutMs = Math.min(timeoutMs, 30_000);
+    const hookTimeoutMs = Math.min(timeoutMs, CAPTCHA_HOOK_TIMEOUT_MAX_MS);
     const callbackName = argString(args, 'callbackName', '').trim();
     if (!callbackName) {
       return R.fail('Hook mode requires an explicit callbackName.').build();

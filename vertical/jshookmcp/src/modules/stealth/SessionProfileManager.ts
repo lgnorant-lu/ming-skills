@@ -58,21 +58,19 @@ export class SessionProfileManager {
     const origin = options.origin ?? this.safeOrigin(page.url());
     const ttlSec = options.ttlSec ?? SessionProfileManager.DEFAULT_TTL_SEC;
     const profile: SessionProfile = {
-      cookies: cookies.map(
-        (c): SessionProfileCookie => ({
-          name: c.name,
-          value: c.value,
-          domain: c.domain,
-          path: c.path,
-          expires: c.expires,
-          size: c.size,
-          httpOnly: c.httpOnly,
-          secure: c.secure,
-          session: c.session,
-          sameSite: c.sameSite,
-          sourceScheme: c.sourceScheme,
-        }),
-      ),
+      cookies: cookies.map((c): SessionProfileCookie => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        path: c.path,
+        expires: c.expires,
+        size: c.size,
+        httpOnly: c.httpOnly,
+        secure: c.secure,
+        session: c.session,
+        sameSite: c.sameSite,
+        sourceScheme: c.sourceScheme,
+      })),
       userAgent: pageMeta.userAgent,
       acceptLanguage: pageMeta.acceptLanguage,
       referer: options.referer ?? pageMeta.referer,

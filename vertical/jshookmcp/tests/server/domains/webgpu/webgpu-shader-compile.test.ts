@@ -199,6 +199,22 @@ describe('webgpu_shader_compile', () => {
       expect(result.metadata.format).toBe('spirv');
     });
 
+    it('should include a costEstimate with opcode histogram for SPIR-V', async () => {
+      const response = await handlers.webgpu_shader_compile({
+        shaderCode: minimalSpirvHex(),
+        format: 'spirv',
+      });
+      const result = ResponseBuilder.parse(response);
+
+      expect(result.success).toBe(true);
+      expect(result.costEstimate).toBeDefined();
+      expect(result.costEstimate.basis).toBe('spirv-opcode');
+      expect(result.costEstimate.totalInstructions).toBeGreaterThan(0);
+      expect(result.costEstimate.byOpcode.OpEntryPoint).toBe(1);
+      expect(typeof result.costEstimate.costScore).toBe('number');
+      expect(result.costEstimate.textureSamples).toBe(0);
+    });
+
     it('should reject non-SPIR-V input in spirv format', async () => {
       const response = await handlers.webgpu_shader_compile({
         shaderCode: 'this-is-not-hex-or-spirv!!',

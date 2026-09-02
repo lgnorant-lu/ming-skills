@@ -348,7 +348,7 @@ function getOverrides(ctx: E2EContext, cfg: E2EConfig): Record<string, Record<st
     network_traceroute: { target: '1.1.1.1', maxHops: 5, timeout: 2000 },
     network_icmp_probe: { target: '1.1.1.1', ttl: 5, timeout: 2000 },
     performance_get_metrics: {},
-    performance_take_heap_snapshot: {},
+    v8_heap_snapshot_capture: {},
     sse_monitor_enable: {},
     ws_get_frames: {},
     ws_get_connections: {},
@@ -628,10 +628,10 @@ function getOverrides(ctx: E2EContext, cfg: E2EConfig): Record<string, Record<st
         }
       : {}),
     // ── Profiling aliases ──
-    performance_coverage: { action: 'start' },
+    page_coverage_start: {},
     performance_trace: { action: 'start' },
     profiler_cpu: { action: 'start' },
-    profiler_heap_sampling: { action: 'start' },
+    v8_heap_sampling: { durationMs: 2000, topN: 5 },
     // ── Network tools ──
     network_monitor: { action: 'status' },
     network_rtt_measure: { url: targetUrl, probeType: 'http', iterations: 1 },
@@ -876,7 +876,7 @@ function createLaneRuntime(laneKey: string, options: LaneRuntimeOptions = {}): L
               'sse_monitor_enable',
               'sse_get_events',
               'performance_get_metrics',
-              'performance_coverage',
+              'page_coverage_start',
             ].includes(toolName);
             const timeout =
               getToolTimeoutOverride(toolName) ??

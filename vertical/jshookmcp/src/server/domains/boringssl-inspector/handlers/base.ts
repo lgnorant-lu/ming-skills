@@ -23,13 +23,16 @@ import {
 } from './shared';
 
 export class BoringsslInspectorBaseHandlers {
+  protected keyLogExtractor: TLSKeyLogExtractor;
   protected extensionInvoke?: (...args: unknown[]) => Promise<unknown>;
   protected eventBus?: EventBus<ServerEventMap>;
   protected readonly tcpSessions = new Map<string, TcpSession>();
   protected readonly tlsSessions = new Map<string, TlsSession>();
   protected readonly websocketSessions = new Map<string, WebSocketSession>();
 
-  constructor(protected keyLogExtractor: TLSKeyLogExtractor = new TLSKeyLogExtractor()) {}
+  constructor(keyLogExtractor: TLSKeyLogExtractor = new TLSKeyLogExtractor()) {
+    this.keyLogExtractor = keyLogExtractor;
+  }
 
   setExtensionInvoke(invoke: (...args: unknown[]) => Promise<unknown>): void {
     this.extensionInvoke = invoke;

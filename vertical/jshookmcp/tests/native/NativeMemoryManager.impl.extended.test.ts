@@ -94,9 +94,9 @@ describe('scanRegionInChunks', () => {
     vi.clearAllMocks();
   });
 
-  it('returns empty when patternBytes is empty', () => {
+  it('returns empty when patternBytes is empty', async () => {
     const readChunk = vi.fn();
-    const result = scanRegionInChunks(
+    const result = await scanRegionInChunks(
       { baseAddress: 0x1000n, regionSize: 1024 },
       [],
       [],
@@ -106,9 +106,9 @@ describe('scanRegionInChunks', () => {
     expect(readChunk).not.toHaveBeenCalled();
   });
 
-  it('returns empty when region is smaller than pattern', () => {
+  it('returns empty when region is smaller than pattern', async () => {
     const readChunk = vi.fn();
-    const result = scanRegionInChunks(
+    const result = await scanRegionInChunks(
       { baseAddress: 0x1000n, regionSize: 2 },
       [0xaa, 0xbb, 0xcc],
       [1, 1, 1],
@@ -117,9 +117,9 @@ describe('scanRegionInChunks', () => {
     expect(result).toEqual([]);
   });
 
-  it('returns empty when chunkSize is zero or negative', () => {
+  it('returns empty when chunkSize is zero or negative', async () => {
     const readChunk = vi.fn();
-    const result = scanRegionInChunks(
+    const result = await scanRegionInChunks(
       { baseAddress: 0x1000n, regionSize: 1024 },
       [0xaa],
       [1],
@@ -129,11 +129,11 @@ describe('scanRegionInChunks', () => {
     expect(result).toEqual([]);
   });
 
-  it('finds a single match in a small region', () => {
+  it('finds a single match in a small region', async () => {
     const data = Buffer.from([0x00, 0xaa, 0xbb, 0x00]);
     const readChunk = vi.fn().mockReturnValue(data);
 
-    const result = scanRegionInChunks(
+    const result = await scanRegionInChunks(
       { baseAddress: 0x1000n, regionSize: 4 },
       [0xaa, 0xbb],
       [1, 1],
@@ -144,7 +144,7 @@ describe('scanRegionInChunks', () => {
     expect(result).toEqual([0x1001n]);
   });
 
-  it('finds matches spanning multiple chunks with carry-over', () => {
+  it('finds matches spanning multiple chunks with carry-over', async () => {
     // Pattern is [0xCC, 0xDD], chunkSize=3, region has [0xAA, 0xBB, 0xCC, 0xDD, 0xEE]
     // Chunk 1: [0xAA, 0xBB, 0xCC] — no full match
     // Chunk 2: [0xDD, 0xEE] — with carry-over [0xCC], the scan buffer is [0xCC, 0xDD, 0xEE]
@@ -152,7 +152,7 @@ describe('scanRegionInChunks', () => {
     const chunk2 = Buffer.from([0xdd, 0xee]);
     const readChunk = vi.fn().mockReturnValueOnce(chunk1).mockReturnValueOnce(chunk2);
 
-    const result = scanRegionInChunks(
+    const result = await scanRegionInChunks(
       { baseAddress: 0x2000n, regionSize: 5 },
       [0xcc, 0xdd],
       [1, 1],
@@ -163,12 +163,12 @@ describe('scanRegionInChunks', () => {
     expect(result).toEqual([0x2002n]);
   });
 
-  it('finds multiple matches across the region', () => {
+  it('finds multiple matches across the region', async () => {
     // Region: [AA, BB, 00, AA, BB]
     const data = Buffer.from([0xaa, 0xbb, 0x00, 0xaa, 0xbb]);
     const readChunk = vi.fn().mockReturnValue(data);
 
-    const result = scanRegionInChunks(
+    const result = await scanRegionInChunks(
       { baseAddress: 0x3000n, regionSize: 5 },
       [0xaa, 0xbb],
       [1, 1],
@@ -179,12 +179,12 @@ describe('scanRegionInChunks', () => {
     expect(result).toEqual([0x3000n, 0x3003n]);
   });
 
-  it('supports wildcard mask matches', () => {
+  it('supports wildcard mask matches', async () => {
     // Pattern: [AA, ??, CC] where ?? is wildcard (mask=0)
     const data = Buffer.from([0xaa, 0xff, 0xcc]);
     const readChunk = vi.fn().mockReturnValue(data);
 
-    const result = scanRegionInChunks(
+    const result = await scanRegionInChunks(
       { baseAddress: 0x4000n, regionSize: 3 },
       [0xaa, 0x00, 0xcc],
       [1, 0, 1],
@@ -195,10 +195,10 @@ describe('scanRegionInChunks', () => {
     expect(result).toEqual([0x4000n]);
   });
 
-  it('handles single-byte patterns without carry-over', () => {
+  it('handles single-byte patterns without carry-over', async () => {
     const readChunk = vi.fn().mockReturnValue(Buffer.from([0xaa]));
 
-    const result = scanRegionInChunks(
+    const result = await scanRegionInChunks(
       { baseAddress: 0x5000n, regionSize: 3 },
       [0xaa],
       [1],

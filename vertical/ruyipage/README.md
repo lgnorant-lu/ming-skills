@@ -19,6 +19,7 @@
 > - 自带 **HTTP / SOCKS5 密码代理**支持，支持**一个 tab 一个密码代理**
 > - 基于 **Firefox + WebDriver BiDi**
 > - 可以直接获取 **closed shadow root** 节点
+> - 内置 **JS 断点调试**（`page.debugger`）：断点 / 条件断点 / 单步 / 调用栈 / 作用域 / 读源码 / 异常暂停
 > - 更适合**高风控场景**
 
 [![PyPI version](https://img.shields.io/pypi/v/ruyiPage.svg)](https://pypi.org/project/ruyiPage/)
@@ -27,19 +28,22 @@
 [![GitHub stars](https://img.shields.io/github/stars/LoseNine/ruyipage?style=social)](https://github.com/LoseNine/ruyipage/stargazers)
 [![Downloads](https://static.pepy.tech/badge/ruyipage)](https://pepy.tech/project/ruyipage)
 
+## ❤️ 赞助商
+
+> [想出现在这里？](mailto:losenine@163.com)
+
 <table>
-  <tr>
-    <td width="180" align="center">
-      <a href="https://fastaitoken.com/">
-        <img src="images/fastaitoken.svg" width="160" alt="FastAIToken" />
-      </a>
-    </td>
-    <td>
-      <sub>赞助商</sub><br>
-      <a href="https://fastaitoken.com/"><b>FastAIToken</b></a><br>
-      低价实惠的 AI Token 中转站，包含 GPT 5.4 / 5.5 全系列，以及 Claude Opus 4.6 / 4.7 / 4.8 的 Kiro 和 Max 渠道，包纯度，实用耐蹬，如意自用：<a href="https://fastaitoken.com/">https://fastaitoken.com/</a>。
-    </td>
-  </tr>
+
+<tr>
+<td width="180"><a href="http://www.fastaitoken.com/register"><img src="images/fastaitoken.svg" alt="FastAIToken" width="150"></a></td>
+<td>🎉 感谢 FastAIToken 对本项目的赞助！<a href="http://www.fastaitoken.com/register">FastAIToken</a> 是面向开发者的 AI API 聚合平台，支持 OpenAI、Claude、Gemini 等主流大模型，充值 1:1，1 元 = 1 美元 API 额度，让开发者以更低成本、更便捷地使用全球领先的大模型服务。<br>
+
+🚀 平台提供多种渠道自由选择：超级低价的 0.02x OpenAI 福利分组（限时）、低至 0.25x OpenAI 分组、0.7x Claude 95% 固定缓存、1.2x Claude Max 渠道；同时提供公开状态页，实时展示各分组的可用率、延迟及运行状态，服务透明可靠，并提供 7×24 小时真人技术支持（非机器人），快速响应开发者需求。<br>
+
+🦊 包含 GPT 5.4 / 5.5 全系列，以及 Claude Opus 4.6 / 4.7 / 4.8 的 Kiro 和 Max 渠道，包纯度，实用耐蹬，如意自用：<a href="http://www.fastaitoken.com/register">http://www.fastaitoken.com/register</a>
+</td>
+</tr>
+
 </table>
 
 ## 实战展示
@@ -569,6 +573,22 @@ print(page.url)
 - **支持 user context 隔离**，适合同浏览器多账号、多会话并行
 - **高层 API 可直接上手**，更适合新手和团队统一维护
 
+### BiDi 规范同步
+
+仓库内维护了可复现的 W3C Editor's Draft 快照和源码覆盖报告：
+
+- [规范快照](examples/w3c_bidi/w3c_bidi_apis.json)
+- [覆盖报告](examples/w3c_bidi/W3C_BIDI_COMPARISON.md)
+
+当前核心规范快照中的 67 个命令均有 `_bidi` 底层封装，24 个事件均可通过
+`page.events` 通用入口订阅。Bluetooth、Permissions 等外部扩展规范单独统计；
+浏览器是否实现某个新命令仍取决于 Firefox 版本。
+
+```bash
+python examples/w3c_bidi/extract_w3c_bidi.py --check
+python examples/w3c_bidi/generate_comparison.py --check
+```
+
 ### 高风控场景推荐
 
 如果你的目标站点对自动化非常敏感，优先推荐使用本项目提供的 Firefox 内核方案，或配合任意 Firefox 指纹浏览器使用：
@@ -597,10 +617,11 @@ print(page.url)
 | 导航事件 | `page.navigation` | navigationStarted、load、historyUpdated 等 |
 | 通用事件 | `page.events` | browsingContext / network / script / input / log 事件 |
 | 网络控制 | `page.capture` / `page.network` / `page.intercept` | 被动抓包、请求头、缓存控制、拦截、mock、fail、collector |
-| 浏览上下文 | `page.contexts` | getTree、create tab/window、reload、viewport |
+| 浏览上下文 | `page.contexts` | getTree、create tab/window、reload、viewport、screencast |
 | 浏览器级能力 | `page.browser_tools` | user context、client window |
 | 脚本能力 | `page.get_realms()` / `page.eval_handle()` / `page.disown_handles()` | realms、远程对象句柄、preload script |
-| Emulation | `page.emulation` | UA、viewport、screen、orientation、JS 开关 |
+| Emulation | `page.emulation` | UA、viewport、screen、orientation、媒体特征、viewport meta、JS 开关 |
+| JS 断点调试 | `page.debugger` | 断点、条件断点、事件/XHR 断点、单步、调用栈、作用域、读源码、对象展开、异常暂停、黑盒化 |
 | WebExtension | `page.extensions` | 安装目录扩展、安装 xpi、卸载 |
 | 本地存储 | `page.local_storage` / `page.session_storage` | 读写本地存储和会话存储 |
 
@@ -1430,7 +1451,6 @@ page.network.set_cache_behavior("bypass")
 
 ```python
 collector = page.network.add_data_collector(
-    ["responseCompleted"],
     data_types=["response"],
 )
 
@@ -1685,7 +1705,220 @@ page.extensions.uninstall(ext_id)
 
 ---
 
-## 15. 代表性示例
+## 15. JS 断点调试
+
+高层入口：`page.debugger`
+
+WebDriver BiDi 规范里**没有** debugger 模块，Firefox 也在 141 版彻底移除了 CDP，所以断点级调试在 BiDi 框架里本来是做不到的。`ruyiPage` 额外接了一条 Firefox 自己的 DevTools 远程调试通道（RDP），与 BiDi 连接**并行工作、互不干扰**。
+
+### 启用
+
+调试通道需要 Firefox 以 devtools server 启动，所以要在创建页面前配置：
+
+```python
+from ruyipage import FirefoxOptions, FirefoxPage
+
+opts = FirefoxOptions()
+opts.enable_debugger()          # 写入所需 pref 并加 --start-debugger-server
+page = FirefoxPage(opts)
+
+page.debugger.start()           # 连接并 attach 当前标签页
+```
+
+`enable_debugger(port=6000)` 可以指定端口。`start(auto_resume_after=30)` 可以开启暂停看门狗（见下文注意事项）。
+
+### 读源码
+
+```python
+for s in page.debugger.sources():
+    print(s.url)
+
+code = page.debugger.source_text('app.js')          # 也接受 Source 对象
+lines = page.debugger.breakable_lines('app.js')     # 哪些行可以下断点
+```
+
+`source_text()` 返回的是**JS 引擎正在执行的那份文本**，行号与断点位置、调用栈里的 `line` 完全对齐。这一点自己下载 URL 做不到：
+
+- `eval` / `new Function` / blob 脚本根本没有可下载的地址
+- 内联 `<script>` 的行号是相对整个 HTML 文档的
+
+### 下断点
+
+```python
+bp = page.debugger.set_breakpoint('app.js', 42)
+bp = page.debugger.set_breakpoint('app.js', 42, condition='quantity > 3')  # 条件断点
+
+page.debugger.remove_breakpoint(bp)
+page.debugger.clear_breakpoints()
+```
+
+`column` 省略时会自动查询该行的有效列。Firefox 会**静默忽略**落在无效位置的断点（不报错也不触发），所以不要自己猜列号。
+
+断点按 URL 记录，页面导航后服务端会自动重新应用，不需要重新下。
+
+### 暂停与单步
+
+```python
+state = page.debugger.wait_paused(timeout=30)   # -> PausedState
+print(state.why, state.url, state.line)
+
+page.debugger.step_over()
+page.debugger.step_into()
+page.debugger.step_out()
+page.debugger.resume()
+
+page.debugger.pause()                            # 立即暂停
+page.debugger.on_paused(lambda s: print(s))      # 回调方式
+```
+
+### 读调用栈与作用域
+
+```python
+for f in page.debugger.frames():
+    print(f.display_name, f.url, f.line, f.arguments)
+
+scope = page.debugger.scope()                    # 局部变量 + 函数参数
+scope = page.debugger.scope(include_parents=True)  # 继续读闭包与全局
+```
+
+`scope()` 默认沿作用域链读到**函数边界**为止（当前块 + 所属函数），不越过全局。只读最内层块的话，断点停在 `const x = ...` 上时只能看到一个尚未初始化的变量，函数参数会全部缺失。
+
+### 展开对象
+
+作用域里的对象是 `RemoteObject`，已经把协议内嵌的 preview 解码成可读内容（数组变 `list`，普通对象变 `dict`），这一层**零额外请求**：
+
+```python
+items = scope['items']
+print(items.class_name, items.value, items.truncated)
+```
+
+preview 最多带十项，装不下时 `truncated` 为 `True`。要看完整内容：
+
+```python
+page.debugger.expand(obj, depth=3)          # 递归展开
+page.debugger.get_property(obj, 'probe')    # 按名字定向取（大对象用这个）
+page.debugger.constructor_name(obj)         # 取真实类名，例如 'Cart'
+```
+
+> `class_name` 反映的是 JS 的 `[[Class]]`，普通类实例统一是 `'Object'`；真实类名要用 `constructor_name()` 从原型链派生。
+>
+> `window` 有上千个属性，全量 `expand()` 会被 `max_items` 截断（会打警告），这种情况用 `get_property()`。
+
+`RemoteObject` 的相等性只比较类名和内容，**不比较 actor id**。对象 actor 每次 resume 都会重建，否则「单步后哪些变量变了」这类对比会把所有对象都误报成变化。
+
+### 异常时自动暂停
+
+不用先猜出错位置再下断点，直接让页面跑到抛异常的现场停下：
+
+```python
+page.debugger.pause_on_exceptions(True, ignore_caught=True)
+
+state = page.debugger.wait_paused(timeout=30)
+if state.is_exception:
+    print(state.exception)      # 已解码的 TypeError 等，含 message 与 stack
+```
+
+`ignore_caught=True`（默认）会忽略被 `catch` 接住的异常，否则页面正常的 try/catch 流程会不停触发暂停。
+
+另有 `pause_on_debugger_statement()` 控制是否在 JS 的 `debugger` 语句处暂停。
+
+### 事件断点与 XHR 断点
+
+不需要预先知道处理器写在哪个文件哪一行，直接按行为下断点：
+
+```python
+# 看看内核支持哪些事件（分组名 -> 事件 id 列表）
+print(page.debugger.available_event_breakpoints())
+
+# 任何 click 处理器执行时暂停
+page.debugger.set_event_breakpoints(['event.mouse.click'])
+
+state = page.debugger.wait_paused(timeout=30)
+if state.is_event_breakpoint:
+    print(state.event_breakpoint)      # 'event.mouse.click'
+    print(page.debugger.frames())      # 处理器在哪，一目了然
+
+page.debugger.set_event_breakpoints([])   # 传空列表清除
+```
+
+```python
+# 请求 URL 含 /api/ 时暂停
+page.debugger.set_xhr_breakpoint('/api/', method='GET')
+
+state = page.debugger.wait_paused(timeout=30)
+if state.is_xhr:
+    print(page.debugger.frames())      # 是谁发起的这个请求
+
+page.debugger.remove_xhr_breakpoint('/api/', method='GET')
+```
+
+`path` 传空串、`method` 传 `'ANY'` 即匹配所有请求。这两类断点对「点了没反应」「这个请求哪来的」这种排查特别有效。
+
+### 黑盒化框架代码
+
+真实页面里不做黑盒化，`step_into` 会一头扎进 React / jQuery 内部，很难走回自己的代码：
+
+```python
+page.debugger.blackbox('https://cdn.example.com/react.min.js')
+page.debugger.blackbox('vendor.js', start_line=1, end_line=5000)   # 也可只黑盒某个行区间
+
+print(page.debugger.blackboxed())      # 当前被标记的源
+page.debugger.unblackbox('vendor.js')
+```
+
+同一个 HTML 里的多段内联脚本共用 URL，会被一并标记。
+
+### 其他执行控制
+
+```python
+page.debugger.skip_breakpoints(True)    # 临时忽略全部断点，不必逐个删除
+page.debugger.restart_frame()           # 回到当前帧入口重新执行（副作用不会撤销）
+page.debugger.include_async_frames()    # 调用栈包含异步父帧
+```
+
+`include_async_frames()` 对现代页面很有必要——大量 async/await 之下同步栈往往只剩一层，看不出是谁发起的。打开后帧上的 `asyncCause` 会说明它是被什么衔接过来的。
+
+### ⚠️ 必读注意事项
+
+**JS 暂停期间，所有依赖 JS 线程的 BiDi 调用都会阻塞到超时**（`run_js`、点击、取元素文本等）。所以触发断点的调用必须放在后台线程：
+
+```python
+import threading
+
+page.debugger.set_breakpoint('app.js', 42)
+
+threading.Thread(
+    target=lambda: page.run_js('return window.doWork();', timeout=60),
+    daemon=True,
+).start()
+
+state = page.debugger.wait_paused(timeout=30)
+# ... 检查现场，只用 page.debugger 的接口 ...
+page.debugger.resume()
+```
+
+无人值守的脚本建议开看门狗兜底，避免漏调 `resume()` 让页面永久卡死：
+
+```python
+page.debugger.start(auto_resume_after=30)
+```
+
+`stop()` 在断开前会自动恢复执行，不会把页面留在暂停状态。
+
+### 当前限制
+
+- **暂停时无法求任意表达式**。这是协议限制而非未实现：Firefox 的 `evaluateJSAsync` 在暂停期间不投递结果，`frame` actor 也没有 eval 方法。替代做法是用 `scope()` + `expand()` + `get_property()` 读状态。
+- **无法修改变量值**。`environment` actor 的 spec 里 `methods` 是空的，只能读不能写。
+- **无法热替换脚本源码**。Firefox 从未实现 CDP 的 `setScriptSource` 那类 live edit。
+- **只覆盖顶层标签页**，iframe 和 Worker 里的 JS 调试不到。
+- **不做 source map 解析**，服务端只提供 `sourceMapURL` 元数据，压缩代码的行号需要自行映射。
+- RDP 是 Firefox 私有协议，没有跨大版本兼容承诺。
+
+参考示例：`examples/50_js_debugger.py`、`examples/51_ai_autonomous_debug.py`（后者演示只给页面地址、由程序自己发现代码并定位断点的完整闭环）。
+
+---
+
+## 16. 代表性示例
 
 仓库里已经包含大量示例，建议按编号学习。
 
@@ -1737,6 +1970,8 @@ page.extensions.uninstall(ext_id)
 - `42_3_debug_px_context_probe.py` 直接打开 `debug_px.html`，打印 PX challenge iframe 的 browsing context 树，并尝试 attach 到 child context 做最小 DOM / canvas 诊断
 - `46_human_behavior_showcase.py` 演示 bezier / windmouse 两套拟人轨迹算法，并开启鼠标行为可视化
 - `48_smart_fingerprint.py` 演示 `apply_smart_fingerprint()` 一站式智能指纹（geo 探测 + 内核 fpfile + BiDi 仿真）
+- `50_js_debugger.py` 演示 `page.debugger` 断点调试：读源码、下断点、读调用栈与作用域、单步
+- `51_ai_autonomous_debug.py` 自主调试闭环：只给页面地址，由程序自己发现 JS 源、读代码、定位断点行、检查现场
 - `52_per_tab_socks5_proxy_browserscan.py` 单浏览器创建多个 container tabs，并让每个 tab 走不同 SOCKS5 密码代理
 - `53_duckai_eventstream_capture.py` 使用 Firefox 打开 Duck.ai，提交聊天内容，并拦截 `POST /duckchat/v1/chat` 的 EventStream 响应体
 - `54_bing_passive_capture.py` 使用 `page.capture` 先启动被动抓包，再打开 Bing 搜索页，抓自动加载请求的请求头/请求体/响应头/响应体

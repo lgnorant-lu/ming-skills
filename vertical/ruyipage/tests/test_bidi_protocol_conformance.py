@@ -28,8 +28,12 @@ def test_subscribe_supports_user_contexts():
 
 def test_unsubscribe_attributes_do_not_send_nonstandard_contexts():
     driver = DummyDriver()
-    session.unsubscribe(driver, events=["network.beforeRequestSent"], contexts=["ctx-1"])
-    assert driver.calls[-1][1] == {"events": ["network.beforeRequestSent"]}
+    with pytest.raises(ValueError, match="does not accept contexts"):
+        session.unsubscribe(
+            driver,
+            events=["network.beforeRequestSent"],
+            contexts=["ctx-1"],
+        )
 
 
 def test_set_bypass_csp_uses_standard_parameter_and_scope():
@@ -46,14 +50,33 @@ def test_start_screencast_flattens_media_options():
 
 def test_emulation_fields_match_latest_schema():
     driver = DummyDriver()
-    emulation.set_user_agent_override(driver, "UA", platform="ignored")
-    assert "platform" not in driver.calls[-1][1]
-    emulation.set_screen_orientation_override(driver, "landscape-primary", angle=90)
-    assert driver.calls[-1][1] == {"screenOrientation": {"type": "landscape-primary", "natural": "landscape"}}
+    with pytest.raises(ValueError, match="platform"):
+        emulation.set_user_agent_override(driver, "UA", platform="ignored")
+    emulation.set_user_agent_override(driver, "UA")
+    emulation.set_screen_orientation_override(
+        driver,
+        "landscape-primary",
+        angle=90,
+        contexts=["context-1"],
+    )
+    assert driver.calls[-1][1] == {
+        "screenOrientation": {
+            "type": "landscape-primary",
+            "natural": "portrait",
+        },
+        "contexts": ["context-1"],
+    }
     emulation.set_network_conditions(driver, offline=False)
     assert driver.calls[-1][1] == {"networkConditions": None}
-    emulation.set_scripting_enabled(driver, enabled=True)
-    assert driver.calls[-1][1] == {"enabled": None}
+    emulation.set_scripting_enabled(
+        driver,
+        enabled=True,
+        contexts=["context-1"],
+    )
+    assert driver.calls[-1][1] == {
+        "enabled": None,
+        "contexts": ["context-1"],
+    }
     emulation.set_scrollbar_type_override(driver, "overlay")
     assert driver.calls[-1][1] == {"scrollbarType": "overlay"}
     emulation.set_forced_colors_mode_theme_override(driver, "none")
@@ -97,7 +120,7 @@ def test_viewport_meta_override_exists_and_supports_scope():
 
 def test_data_collector_uses_latest_parameters():
     driver = DummyDriver()
-    network.add_data_collector(driver, events=["responseCompleted"], data_types=["response"], user_contexts=["uc-1"])
+    network.add_data_collector(driver, data_types=["response"], user_contexts=["uc-1"])
     assert driver.calls[-1][1] == {"dataTypes": ["response"], "maxEncodedDataSize": 10485760, "collectorType": "blob", "userContexts": ["uc-1"]}
 
 

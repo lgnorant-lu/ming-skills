@@ -34,7 +34,10 @@ function textResult(payload: unknown) {
 }
 
 export class DisassembleHandlers {
-  constructor(private deps: DisassembleHandlersDeps) {}
+  private deps: DisassembleHandlersDeps;
+  constructor(deps: DisassembleHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handleDebuggerDisassemble(args: Record<string, unknown>) {
     const explicitScriptId = argString(args, 'scriptId');

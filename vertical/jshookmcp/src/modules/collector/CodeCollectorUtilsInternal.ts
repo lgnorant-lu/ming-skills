@@ -29,7 +29,7 @@ export async function navigateWithRetryImpl(
       await page.goto(url, options);
       return;
     } catch (error) {
-      lastError = error as Error;
+      lastError = error instanceof Error ? error : new Error(String(error));
       logger.warn(`Navigation attempt ${i + 1}/${maxRetries} failed: ${error}`);
       if (i < maxRetries - 1) {
         await new Promise((resolve) => setTimeout(resolve, 1000 * (i + 1)));

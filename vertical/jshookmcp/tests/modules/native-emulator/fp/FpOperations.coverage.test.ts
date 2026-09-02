@@ -6,8 +6,15 @@
 
 import { describe, expect, it } from 'vitest';
 import { FpContext } from '@modules/native-emulator/fp/FpOperations';
+import { FPCR_FZ, FPCR_IDE, FPSR_IDC } from '@modules/native-emulator/fp/FpConstants';
 
 const ctx = () => new FpContext();
+
+/** A float64 denormal (below FLOAT64_MIN_NORMAL) — flushes to ±0 with FZ=1. */
+const DENORMAL = Number.MIN_VALUE;
+
+const FZ = 1 << FPCR_FZ;
+const FZ_PLUS_IDE = (1 << FPCR_FZ) | (1 << FPCR_IDE);
 
 describe('FpContext — register/flag accessors', () => {
   it('FPSR get/set round-trip + starts at 0', () => {
@@ -83,6 +90,65 @@ describe('FpContext — fmax / fmin', () => {
   it('fmax with NaN propagates per IEEE754', () => {
     const r = ctx().fmax(NaN, 5);
     expect(Number.isNaN(r) || r === 5).toBe(true); // implementation-defined / NaN-propagation
+  });
+});
+
+describe('FpContext — IDC flush + IDE trap (inlined slow paths)', () => {
+  // Regression: fsqrt once wrote `flags |= 32` (undefined FPSR bit 5) instead of
+  // `1 << FPSR_IDC` — the IDC cumulative flag was never set and FPSR was polluted.
+  it('fsqrt(FZ=1) on a denormal sets the IDC flag without polluting bit 5', () => {
+    const c = ctx();
+    c.setFPCR(FZ);
+    expect(c.fsqrt(DENORMAL)).toBe(0);
+    expect(c.getFPSR() & (1 << FPSR_IDC)).toBe(1 << FPSR_IDC);
+    expect(c.getFPSR() & (1 << 5)).toBe(0); // no undefined-bit pollution (RES0 bit 5)
+  });
+
+  it('every inlined op (FZ=1) sets the IDC flag on a denormal input', () => {
+    const ops: Array<[string, (c: FpContext) => void]> = [
+      ['fadd', (c) => void c.fadd(DENORMAL, 0)],
+      ['fsub', (c) => void c.fsub(DENORMAL, 0)],
+      ['fmul', (c) => void c.fmul(DENORMAL, 1)],
+      ['fdiv', (c) => void c.fdiv(DENORMAL, 1)],
+      ['fsqrt', (c) => void c.fsqrt(DENORMAL)],
+    ];
+    for (const [name, run] of ops) {
+      const c = ctx();
+      c.setFPCR(FZ);
+      run(c);
+      expect(c.getFPSR() & (1 << FPSR_IDC), `${name} should set IDC`).toBe(1 << FPSR_IDC);
+    }
+  });
+
+  // Regression: `(fpcr >> 8) & 0x3f` dropped FPCR_IDE (bit 15) — the FP Input
+  // Denormal trap never fired here while the checkAndSetFlags path honored it.
+  it('FZ|IDE raises FP Input Denormal trap on a denormal input (all inlined ops)', () => {
+    const ops: Array<[string, (c: FpContext) => void]> = [
+      ['fadd', (c) => void c.fadd(DENORMAL, 0)],
+      ['fsub', (c) => void c.fsub(DENORMAL, 0)],
+      ['fmul', (c) => void c.fmul(DENORMAL, 1)],
+      ['fdiv', (c) => void c.fdiv(DENORMAL, 1)],
+      ['fsqrt', (c) => void c.fsqrt(DENORMAL)],
+    ];
+    for (const [name, run] of ops) {
+      const c = ctx();
+      c.setFPCR(FZ_PLUS_IDE);
+      expect(() => run(c), `${name} should trap on IDC`).toThrow('FP Input Denormal');
+    }
+  });
+
+  it('FZ|IDE does not trap when the input is a normal number', () => {
+    const c = ctx();
+    c.setFPCR(FZ_PLUS_IDE);
+    expect(c.fadd(1, 2)).toBe(3);
+    expect(c.getFPSR()).toBe(0);
+  });
+
+  it('IDE alone without FZ does not raise IDC (no denormal flushing occurs)', () => {
+    const c = ctx();
+    c.setFPCR(1 << FPCR_IDE);
+    expect(c.fadd(DENORMAL, 0)).toBe(DENORMAL);
+    expect(c.getFPSR() & (1 << FPSR_IDC)).toBe(0);
   });
 });
 

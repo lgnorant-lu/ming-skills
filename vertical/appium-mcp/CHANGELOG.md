@@ -1,3 +1,51 @@
+## [1.92.12](https://github.com/appium/appium-mcp/compare/v1.92.11...v1.92.12) (2026-09-01)
+
+### Bug Fixes
+
+* **device-control:** shake remote iOS sessions ([#509](https://github.com/appium/appium-mcp/issues/509)) ([9c237f1](https://github.com/appium/appium-mcp/commit/9c237f16f88c5ae4f2f999f56f424905ed19b3dc))
+
+## [1.92.11](https://github.com/appium/appium-mcp/compare/v1.92.10...v1.92.11) (2026-08-29)
+
+### Bug Fixes
+
+* **command:** re-throw swallowed remote errors for execute and session commands ([#497](https://github.com/appium/appium-mcp/issues/497)) ([05c5b4a](https://github.com/appium/appium-mcp/commit/05c5b4aad1227dcad385aec7b7230e325af2256a))
+
+## [1.92.10](https://github.com/appium/appium-mcp/compare/v1.92.9...v1.92.10) (2026-08-29)
+
+### Miscellaneous Chores
+
+* bump support ([#498](https://github.com/appium/appium-mcp/issues/498)) ([badc62b](https://github.com/appium/appium-mcp/commit/badc62b2490d890150840e5b48b56ef422037ef0))
+
+## [1.92.9](https://github.com/appium/appium-mcp/compare/v1.92.8...v1.92.9) (2026-08-28)
+
+### Bug Fixes
+
+* followup for [#493](https://github.com/appium/appium-mcp/issues/493) ([#496](https://github.com/appium/appium-mcp/issues/496)) ([75aa0e1](https://github.com/appium/appium-mcp/commit/75aa0e1f987ef99503e3587978bd1be8aca0e7f6))
+
+## [1.92.8](https://github.com/appium/appium-mcp/compare/v1.92.7...v1.92.8) (2026-08-28)
+
+### Bug Fixes
+
+* **stdio:** keep Appium and WebDriver logs off JSON-RPC stdout ([#493](https://github.com/appium/appium-mcp/issues/493)) ([c9fb4ee](https://github.com/appium/appium-mcp/commit/c9fb4eeff50d4dfd820f6593510ccc894a0c9116))
+
+## [1.92.7](https://github.com/appium/appium-mcp/compare/v1.92.6...v1.92.7) (2026-08-27)
+
+### Bug Fixes
+
+* missing teen process ([#495](https://github.com/appium/appium-mcp/issues/495)) ([54da403](https://github.com/appium/appium-mcp/commit/54da40304902df0dc9c6cc93ab91a702b53cf9d3))
+
+## [1.92.6](https://github.com/appium/appium-mcp/compare/v1.92.5...v1.92.6) (2026-08-25)
+
+### Bug Fixes
+
+* **alert:** read W3C element id for Android custom button clicks ([#491](https://github.com/appium/appium-mcp/issues/491)) ([3500517](https://github.com/appium/appium-mcp/commit/3500517630c4aa951fab0e9379d388feef3dacca))
+
+## [1.92.5](https://github.com/appium/appium-mcp/compare/v1.92.4...v1.92.5) (2026-08-21)
+
+### Bug Fixes
+
+* **locator:** prefer accessibility id ([#490](https://github.com/appium/appium-mcp/issues/490)) ([026c016](https://github.com/appium/appium-mcp/commit/026c01612f316f860dcafb5b0b461c9ef1adb63a))
+
 ## [1.92.4](https://github.com/appium/appium-mcp/compare/v1.92.3...v1.92.4) (2026-08-16)
 
 ### Bug Fixes

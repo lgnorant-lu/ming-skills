@@ -1,5 +1,4 @@
 import {
-  createCodeCollectorMock,
   parseJson,
   // @ts-expect-error — auto-suppressed [TS1484]
   NetworkRequestsResponse,
@@ -60,11 +59,10 @@ vi.mock('@src/utils/logger', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
-import { AdvancedToolHandlersRuntime } from '@server/domains/network/handlers.impl.core.runtime.replay';
+import { ReplayHandlers } from '@server/domains/network/handlers/replay-handlers';
 import { TEST_URLS, withPath } from '@tests/shared/test-urls';
 
-describe('AdvancedToolHandlersRuntime', () => {
-  const collector = createCodeCollectorMock();
+describe('ReplayHandlers', () => {
   const consoleMonitor = {
     isNetworkEnabled: vi.fn(),
     enable: vi.fn(),
@@ -78,26 +76,11 @@ describe('AdvancedToolHandlersRuntime', () => {
     evaluate: vi.fn(),
   } as any;
 
-  let handler: AdvancedToolHandlersRuntime;
+  let handler: ReplayHandlers;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    // @ts-expect-error — auto-suppressed [TS2345]
-    handler = new AdvancedToolHandlersRuntime(collector, consoleMonitor);
-    // Inject a mock performance monitor to avoid real instantiation
-    (handler as any).performanceMonitor = {
-      getPerformanceMetrics: vi.fn(),
-      getPerformanceTimeline: vi.fn(),
-      startCoverage: vi.fn(),
-      stopCoverage: vi.fn(),
-      takeHeapSnapshot: vi.fn(),
-      startTracing: vi.fn(),
-      stopTracing: vi.fn(),
-      startCPUProfiling: vi.fn(),
-      stopCPUProfiling: vi.fn(),
-      startHeapSampling: vi.fn(),
-      stopHeapSampling: vi.fn(),
-    };
+    handler = new ReplayHandlers({ consoleMonitor });
   });
 
   // ---------- handleNetworkExtractAuth ----------

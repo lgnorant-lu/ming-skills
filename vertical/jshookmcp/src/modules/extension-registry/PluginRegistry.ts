@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { getExtensionRegistryDir, getProjectRoot } from '@utils/outputPaths';
+import { readEnvNullableString } from '@src/config/environment';
 
 export interface RegisteredPluginManifest {
   id: string;
@@ -136,12 +137,9 @@ export class PluginRegistry {
     this.rootDir = resolvedRootDir;
     this.registryFile = path.join(resolvedRootDir, 'plugins.json');
     this.moduleCacheDir = path.join(resolvedRootDir, 'modules');
+    const configuredLegacyRoot = readEnvNullableString('JSHOOKMCP_PLUGIN_ROOT', { trim: true });
     this.legacyPluginRoots =
-      pluginRoots.length > 0
-        ? pluginRoots
-        : process.env['JSHOOKMCP_PLUGIN_ROOT']
-          ? [process.env['JSHOOKMCP_PLUGIN_ROOT']]
-          : [];
+      pluginRoots.length > 0 ? pluginRoots : configuredLegacyRoot ? [configuredLegacyRoot] : [];
 
     if (this.useLegacyScanApi) {
       return;

@@ -199,6 +199,30 @@ describe('CodeCollector', () => {
     expect(collector.getCollectedFilesSummary()).toEqual([]);
   });
 
+  it('prunes the files cache in lockstep with collected URLs when the cap is exceeded', () => {
+    const collector = new TestCodeCollector({ ...defaultConfig, maxCollectedUrls: 4 });
+    const urls = Array.from({ length: 10 }, (_, i) => `${testUrls.TEST_URLS.root}/prune-${i}.js`);
+    (collector as any).collectedUrls = new Set(urls);
+    for (const url of urls) {
+      collector.getCollectedFilesCache().set(url, {
+        url,
+        content: 'x',
+        size: 1,
+        type: 'external',
+      });
+    }
+
+    collector.cleanupCollectedUrls();
+
+    // cleanupCollectedUrls keeps the last floor(4/2)=2 URLs; the files cache
+    // must shrink to the same retained set instead of growing unbounded (b1-05).
+    expect((collector as any).collectedUrls.size).toBe(2);
+    expect(collector.getCollectedFilesCache().size).toBe(2);
+    expect(collector.getCollectedFilesCache().has(urls[8]!)).toBe(true);
+    expect(collector.getCollectedFilesCache().has(urls[9]!)).toBe(true);
+    expect(collector.getCollectedFilesCache().has(urls[0]!)).toBe(false);
+  });
+
   it('filters URLs against wildcard rules', () => {
     const collector = new CodeCollector(defaultConfig);
 

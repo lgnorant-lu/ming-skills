@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { logger } from '@utils/logger';
 import {
   JSVMPOpcode,
   JSVMPSymbolicExecutor,
@@ -420,5 +421,75 @@ describe('JSVMPSymbolicExecutor', () => {
     const result = await executor.executeJSVMP({ instructions });
     // confidence = trace.length / instructions.length, capped at 1.0
     expect(result.confidence).toBeLessThanOrEqual(1.0);
+  });
+});
+
+describe('JSVMPSymbolicExecutor stack underflow', () => {
+  it('ADD on an empty stack logs a warning and keeps the stack empty', async () => {
+    const executor = new JSVMPSymbolicExecutor();
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const instructions: JSVMPInstruction[] = [
+        { opcode: JSVMPOpcode.ADD, operands: [], location: 0 },
+        { opcode: JSVMPOpcode.HALT, operands: [], location: 1 },
+      ];
+
+      const result = await executor.executeJSVMP({ instructions });
+      expect(result.finalState.stack.length).toBe(0);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('stack underflow'));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('ADD on a single-element stack preserves the operand instead of dropping it', async () => {
+    const executor = new JSVMPSymbolicExecutor();
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const instructions: JSVMPInstruction[] = [
+        { opcode: JSVMPOpcode.PUSH, operands: [5], location: 0 },
+        { opcode: JSVMPOpcode.ADD, operands: [], location: 1 },
+        { opcode: JSVMPOpcode.HALT, operands: [], location: 2 },
+      ];
+
+      const result = await executor.executeJSVMP({ instructions });
+      // Before the fix the operand was popped and then silently dropped.
+      expect(result.finalState.stack.length).toBe(1);
+      expect(result.finalState.stack[0]?.name).toBe('const_5');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('ADD requires 2 operands'));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('NOT on an empty stack logs a warning and keeps the stack empty', async () => {
+    const executor = new JSVMPSymbolicExecutor();
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    try {
+      const instructions: JSVMPInstruction[] = [
+        { opcode: JSVMPOpcode.NOT, operands: [], location: 0 },
+        { opcode: JSVMPOpcode.HALT, operands: [], location: 1 },
+      ];
+
+      const result = await executor.executeJSVMP({ instructions });
+      expect(result.finalState.stack.length).toBe(0);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('NOT requires 1 operand'));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('binary operations still produce results on a well-formed stack', async () => {
+    const executor = new JSVMPSymbolicExecutor();
+    const instructions: JSVMPInstruction[] = [
+      { opcode: JSVMPOpcode.PUSH, operands: [1], location: 0 },
+      { opcode: JSVMPOpcode.PUSH, operands: [2], location: 1 },
+      { opcode: JSVMPOpcode.XOR, operands: [], location: 2 },
+      { opcode: JSVMPOpcode.HALT, operands: [], location: 3 },
+    ];
+
+    const result = await executor.executeJSVMP({ instructions });
+    expect(result.finalState.stack.length).toBe(1);
+    expect(result.finalState.stack[0]?.name).toBe('const_1 ^ const_2');
   });
 });

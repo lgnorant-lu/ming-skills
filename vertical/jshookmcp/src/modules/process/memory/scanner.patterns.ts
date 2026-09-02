@@ -2,14 +2,34 @@
  * Pattern parsing helpers shared between platform scan implementations.
  */
 
+export interface PatternParseOptions {
+  /**
+   * Strict mode (macOS scanner contract): malformed tokens throw with a
+   * specific message instead of being skipped.
+   */
+  strict?: boolean;
+  /**
+   * Throw 'Invalid pattern' when no bytes were produced. Default true for the
+   * scanner path; BaseMemoryManager's legacy helper expects empty arrays.
+   */
+  throwOnEmpty?: boolean;
+}
+
 /**
  * Convert a pattern string + type into a byte array and bitmask.
- * Used by Windows (PowerShell) and Linux (direct memory read) scanners.
+ * Used by Windows (PowerShell), Linux (direct memory read) and macOS scanners.
+ *
+ * Lenient mode (default): malformed hex/numeric tokens are skipped; an empty
+ * result throws 'Invalid pattern'. Strict mode: each malformed token throws a
+ * specific message (macOS scanner contract). `throwOnEmpty: false` returns
+ * empty arrays instead of throwing (BaseMemoryManager legacy behavior).
  */
 export function buildPatternBytesAndMask(
   pattern: string,
   patternType: string,
+  options: PatternParseOptions = {},
 ): { patternBytes: number[]; mask: number[] } {
+  const { strict = false, throwOnEmpty = true } = options;
   let patternBytes: number[] = [];
   let mask: number[] = [];
 
@@ -25,8 +45,13 @@ export function buildPatternBytesAndMask(
           if (!isNaN(byte)) {
             patternBytes.push(byte);
             mask.push(1);
+          } else if (strict) {
+            throw new Error(`Invalid hex byte: ${part}`);
           }
         }
+      }
+      if (strict && patternBytes.length === 0) {
+        throw new Error('Pattern is empty');
       }
       break;
     }
@@ -37,6 +62,8 @@ export function buildPatternBytesAndMask(
         buf.writeInt32LE(int32Val, 0);
         patternBytes = Array.from(buf);
         mask = [1, 1, 1, 1];
+      } else if (strict) {
+        throw new Error('Invalid int32 value');
       }
       break;
     }
@@ -55,6 +82,8 @@ export function buildPatternBytesAndMask(
         bufFloat.writeFloatLE(floatVal, 0);
         patternBytes = Array.from(bufFloat);
         mask = [1, 1, 1, 1];
+      } else if (strict) {
+        throw new Error('Invalid float value');
       }
       break;
     }
@@ -65,6 +94,8 @@ export function buildPatternBytesAndMask(
         bufDouble.writeDoubleLE(doubleVal, 0);
         patternBytes = Array.from(bufDouble);
         mask = [1, 1, 1, 1, 1, 1, 1, 1];
+      } else if (strict) {
+        throw new Error('Invalid double value');
       }
       break;
     }
@@ -74,87 +105,28 @@ export function buildPatternBytesAndMask(
       mask = patternBytes.map(() => 1);
       break;
     }
+    default:
+      if (strict) {
+        throw new Error(`Unsupported pattern type: ${patternType}`);
+      }
+      break;
   }
 
-  if (patternBytes.length === 0) {
+  if (patternBytes.length === 0 && throwOnEmpty) {
     throw new Error('Invalid pattern');
   }
 
   return { patternBytes, mask };
 }
 
-/** Convert a pattern string to a byte array and mask for macOS with wildcard support. */
+/**
+ * Strict variant (macOS scanner contract): malformed tokens throw with a
+ * specific message. Thin wrapper over the shared core.
+ */
 export function patternToBytesMac(
   pattern: string,
   patternType: string,
 ): { bytes: number[]; mask: number[] } {
-  const bytes: number[] = [];
-  const mask: number[] = [];
-
-  switch (patternType) {
-    case 'hex': {
-      const parts = pattern.trim().split(/\s+/);
-      for (const part of parts) {
-        if (part === '??' || part === '?' || part === '**') {
-          bytes.push(0);
-          mask.push(0);
-        } else {
-          const b = parseInt(part, 16);
-          if (isNaN(b)) throw new Error(`Invalid hex byte: ${part}`);
-          bytes.push(b);
-          mask.push(1);
-        }
-      }
-      if (!bytes.length) throw new Error('Pattern is empty');
-      break;
-    }
-    case 'int32': {
-      const v = parseInt(pattern);
-      if (isNaN(v)) throw new Error('Invalid int32 value');
-      const buf = Buffer.allocUnsafe(4);
-      buf.writeInt32LE(v, 0);
-      const arr = Array.from(buf);
-      bytes.push(...arr);
-      mask.push(...arr.map(() => 1));
-      break;
-    }
-    case 'int64': {
-      const buf = Buffer.allocUnsafe(8);
-      buf.writeBigInt64LE(BigInt.asIntN(64, BigInt(pattern)), 0);
-      const arr = Array.from(buf);
-      bytes.push(...arr);
-      mask.push(...arr.map(() => 1));
-      break;
-    }
-    case 'float': {
-      const v = parseFloat(pattern);
-      if (isNaN(v)) throw new Error('Invalid float value');
-      const buf = Buffer.allocUnsafe(4);
-      buf.writeFloatLE(v, 0);
-      const arr = Array.from(buf);
-      bytes.push(...arr);
-      mask.push(...arr.map(() => 1));
-      break;
-    }
-    case 'double': {
-      const v = parseFloat(pattern);
-      if (isNaN(v)) throw new Error('Invalid double value');
-      const buf = Buffer.allocUnsafe(8);
-      buf.writeDoubleLE(v, 0);
-      const arr = Array.from(buf);
-      bytes.push(...arr);
-      mask.push(...arr.map(() => 1));
-      break;
-    }
-    case 'string': {
-      const arr = Array.from(Buffer.from(pattern, 'utf8'));
-      bytes.push(...arr);
-      mask.push(...arr.map(() => 1));
-      break;
-    }
-    default:
-      throw new Error(`Unsupported pattern type: ${patternType}`);
-  }
-
-  return { bytes, mask };
+  const { patternBytes, mask } = buildPatternBytesAndMask(pattern, patternType, { strict: true });
+  return { bytes: patternBytes, mask };
 }

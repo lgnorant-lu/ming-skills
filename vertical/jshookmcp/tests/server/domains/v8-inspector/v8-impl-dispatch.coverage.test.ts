@@ -65,13 +65,8 @@ describe('V8InspectorHandlers.handle — dispatch', () => {
     }
   });
 
-  it('routes v8_version_detect, v8_jit_inspect, v8_heap_find_leaks, v8_heap_retainers', async () => {
-    for (const tool of [
-      'v8_version_detect',
-      'v8_jit_inspect',
-      'v8_heap_find_leaks',
-      'v8_heap_retainers',
-    ]) {
+  it('routes v8_version_detect, v8_heap_find_leaks, v8_heap_retainers', async () => {
+    for (const tool of ['v8_version_detect', 'v8_heap_find_leaks', 'v8_heap_retainers']) {
       const r = await tryDispatch(tool, {});
       expect(r).toBeDefined();
     }

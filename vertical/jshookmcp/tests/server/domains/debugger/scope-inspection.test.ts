@@ -1,5 +1,6 @@
 import { parseJson } from '@tests/server/domains/shared/mock-factories';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ToolError } from '@errors/ToolError';
 import type { DebuggerManager, RuntimeInspector } from '@server/domains/shared/modules';
 import { ScopeInspectionHandlers } from '@server/domains/debugger/handlers/scope-inspection';
 
@@ -83,6 +84,34 @@ describe('ScopeInspectionHandlers', () => {
       message: 'scope failed',
       error: 'Error: scope failed',
     });
+  });
+
+  it('propagates ToolError instances from scope inspection', async () => {
+    debuggerManager.getScopeVariables.mockRejectedValueOnce(
+      new ToolError('PREREQUISITE', 'debugger not enabled'),
+    );
+    const handlers = new ScopeInspectionHandlers({
+      debuggerManager,
+      runtimeInspector,
+    } as any);
+
+    await expect(handlers.handleGetScopeVariablesEnhanced({})).rejects.toThrow(
+      'debugger not enabled',
+    );
+  });
+
+  it('propagates ToolError instances from object property reads', async () => {
+    debuggerManager.getObjectPropertiesById.mockRejectedValueOnce(
+      new ToolError('PREREQUISITE', 'debugger not enabled'),
+    );
+    const handlers = new ScopeInspectionHandlers({
+      debuggerManager,
+      runtimeInspector,
+    } as any);
+
+    await expect(handlers.handleGetObjectProperties({ objectId: 'obj-1' })).rejects.toThrow(
+      'debugger not enabled',
+    );
   });
 
   it('validates objectId before reading object properties', async () => {

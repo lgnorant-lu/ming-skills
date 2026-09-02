@@ -2,6 +2,7 @@ import type { UnresolvedPart, VMType } from '@internal-types/index';
 import { logger } from '@utils/logger';
 import { type ExecutionSandbox } from '@modules/security/ExecutionSandbox';
 import { int } from '@src/constants/helpers';
+import { DEOBF_JSFUCK_MAX_CODE_SIZE } from '@src/constants/transform';
 
 /**
  * Sandbox budget (ms) for statically evaluating an obfuscator.io string
@@ -25,7 +26,7 @@ const EVAL_SANDBOX_TIMEOUT_MS = int('JSVMP_EVAL_SANDBOX_TIMEOUT_MS', 5_000);
  * JSFuck payloads larger than this are not evaluated locally — decoding is
  * quadratic-ish in practice and risks long sandbox runs.
  */
-const JSFUCK_MAX_CODE_SIZE = 100_000;
+const JSFUCK_MAX_CODE_SIZE = DEOBF_JSFUCK_MAX_CODE_SIZE;
 
 type RestoreResult = {
   code: string;

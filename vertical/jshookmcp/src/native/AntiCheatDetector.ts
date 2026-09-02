@@ -22,6 +22,7 @@ import {
   GetModuleInformation,
 } from '@native/Win32API';
 import { PEAnalyzer } from '@native/PEAnalyzer';
+import { USERSPACE_MAX_ADDRESS } from '@src/constants';
 import type {
   AntiCheatDetection,
   AntiCheatMechanism,
@@ -305,7 +306,7 @@ export class AntiCheatDetector {
     try {
       const modules = this.enumerateModules(hProcess);
       let address = 0n;
-      const maxAddress = 0x7fffffffffffn; // User-mode address space
+      const maxAddress = USERSPACE_MAX_ADDRESS; // Windows x64 user-mode ceiling
 
       while (address < maxAddress) {
         if (this.isTimedOut(startedAt, stats.timeoutMs)) {
@@ -516,25 +517,9 @@ export class AntiCheatDetector {
   }
 
   private rvaToFileOffset(peData: Buffer, rva: number): number {
-    const e_lfanew = peData.readUInt32LE(60);
-    const numSections = peData.readUInt16LE(e_lfanew + 6);
-    const sizeOfOptionalHeader = peData.readUInt16LE(e_lfanew + 20);
-    const secStart = e_lfanew + 24 + sizeOfOptionalHeader;
-
-    for (let i = 0; i < numSections; i++) {
-      const off = secStart + i * 40;
-      if (off + 40 > peData.length) break;
-
-      const virtualAddr = peData.readUInt32LE(off + 12);
-      const virtualSize = peData.readUInt32LE(off + 8);
-      const rawOffset = peData.readUInt32LE(off + 20);
-
-      if (rva >= virtualAddr && rva < virtualAddr + virtualSize) {
-        return rawOffset + (rva - virtualAddr);
-      }
-    }
-
-    return -1;
+    // Delegate to PEAnalyzer's shared parser — section-header offsets are
+    // PE/COFF-spec constants owned there (single source of truth).
+    return this.peAnalyzer.rvaToFileOffset(peData, rva);
   }
 
   private isTimedOut(startedAt: number, timeoutMs: number): boolean {

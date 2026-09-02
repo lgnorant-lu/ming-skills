@@ -74,12 +74,7 @@ export async function runGraphqlWasmPhase(ctx) {
     },
     15000,
   );
-  report.trace.heapSnapshotAfter = await callTool(
-    client,
-    'performance_take_heap_snapshot',
-    {},
-    90000,
-  );
+  report.trace.heapSnapshotAfter = await callTool(client, 'v8_heap_snapshot_capture', {}, 90000);
   report.graphql.extract = await callTool(client, 'graphql_extract_queries', { limit: 10 }, 30000);
   report.wasm.hookPreset = await callTool(
     client,

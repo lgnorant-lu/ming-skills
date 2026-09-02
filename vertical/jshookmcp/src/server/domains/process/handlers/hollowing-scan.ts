@@ -26,6 +26,20 @@
  * hollowing-detection.ts and requires native OS APIs on Win32.
  */
 
+import {
+  PROCESS_HOLLOWING_CONFIDENCE_HIGH,
+  PROCESS_HOLLOWING_CONFIDENCE_LOW,
+  PROCESS_HOLLOWING_CONFIDENCE_MEDIUM,
+  PROCESS_HOLLOWING_CONFIDENCE_STRONG,
+  PROCESS_HOLLOWING_SCORE_HIGH,
+  PROCESS_HOLLOWING_SCORE_MEDIUM,
+  PROCESS_HOLLOWING_SCORE_STRONG,
+  PROCESS_HOLLOWING_SEVERITY_WEIGHT_CRITICAL,
+  PROCESS_HOLLOWING_SEVERITY_WEIGHT_HIGH,
+  PROCESS_HOLLOWING_SEVERITY_WEIGHT_LOW,
+  PROCESS_HOLLOWING_SEVERITY_WEIGHT_MEDIUM,
+} from '@src/constants';
+
 /** Severity level for a finding. */
 export type FindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
@@ -982,17 +996,29 @@ export function scanHollowingIndicators(input: HollowingScanInput): HollowingSca
   }
 
   // ── Assemble verdict ──
+  // Weighted score: severity weights (critical=100/high=60/medium=30/low=10) map
+  // to confidence tiers (95/80/50/20). All weights/thresholds come from
+  // @src/constants/process (PROCESS_HOLLOWING_* env-overridable).
   const criticalCount = findings.filter((f) => f.severity === 'critical').length;
   const highCount = findings.filter((f) => f.severity === 'high').length;
   const mediumCount = findings.filter((f) => f.severity === 'medium').length;
   const lowCount = findings.filter((f) => f.severity === 'low').length;
-  const totalWeighted = criticalCount * 100 + highCount * 60 + mediumCount * 30 + lowCount * 10;
+  const totalWeighted =
+    criticalCount * PROCESS_HOLLOWING_SEVERITY_WEIGHT_CRITICAL +
+    highCount * PROCESS_HOLLOWING_SEVERITY_WEIGHT_HIGH +
+    mediumCount * PROCESS_HOLLOWING_SEVERITY_WEIGHT_MEDIUM +
+    lowCount * PROCESS_HOLLOWING_SEVERITY_WEIGHT_LOW;
 
   let confidence = 0;
-  if (totalWeighted >= 200) confidence = 95;
-  else if (totalWeighted >= 100) confidence = 80;
-  else if (totalWeighted >= 50) confidence = 50;
-  else if (findings.length > 0) confidence = 20;
+  if (totalWeighted >= PROCESS_HOLLOWING_SCORE_STRONG) {
+    confidence = PROCESS_HOLLOWING_CONFIDENCE_STRONG;
+  } else if (totalWeighted >= PROCESS_HOLLOWING_SCORE_HIGH) {
+    confidence = PROCESS_HOLLOWING_CONFIDENCE_HIGH;
+  } else if (totalWeighted >= PROCESS_HOLLOWING_SCORE_MEDIUM) {
+    confidence = PROCESS_HOLLOWING_CONFIDENCE_MEDIUM;
+  } else if (findings.length > 0) {
+    confidence = PROCESS_HOLLOWING_CONFIDENCE_LOW;
+  }
 
   const isSuspicious = findings.some(
     (f) => f.severity === 'critical' || f.severity === 'high' || f.severity === 'medium',

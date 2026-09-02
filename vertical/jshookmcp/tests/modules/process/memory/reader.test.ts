@@ -6,7 +6,7 @@ const state = vi.hoisted(() => ({
   readFile: vi.fn(),
   unlink: vi.fn(),
   nativeReadMemory: vi.fn(),
-  isKoffiAvailable: vi.fn(),
+  isKoffiBindingUsable: vi.fn(),
   createPlatformProvider: vi.fn(),
 }));
 
@@ -29,7 +29,7 @@ vi.mock('@src/native/NativeMemoryManager', () => ({
 }));
 
 vi.mock('@src/native/Win32API', () => ({
-  isKoffiAvailable: state.isKoffiAvailable,
+  isKoffiBindingUsable: state.isKoffiBindingUsable,
 }));
 
 vi.mock('@native/platform/factory.js', () => ({
@@ -52,7 +52,7 @@ describe('memory/reader', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetLinuxProviderCache();
-    state.isKoffiAvailable.mockReturnValue(false);
+    state.isKoffiBindingUsable.mockReturnValue(false);
   });
 
   it('returns validation error for invalid address format', async () => {
@@ -69,7 +69,7 @@ describe('memory/reader', () => {
   });
 
   it('uses native Windows reader when koffi is available and succeeds', async () => {
-    state.isKoffiAvailable.mockReturnValue(true);
+    state.isKoffiBindingUsable.mockReturnValue(true);
     state.nativeReadMemory.mockResolvedValue({ success: true, data: 'AA BB' });
 
     const result = await readMemory('win32', 2, '0x10', 2, vi.fn());
@@ -80,7 +80,7 @@ describe('memory/reader', () => {
   });
 
   it('falls back to PowerShell on native Windows read failure', async () => {
-    state.isKoffiAvailable.mockReturnValue(true);
+    state.isKoffiBindingUsable.mockReturnValue(true);
     state.nativeReadMemory.mockResolvedValue({ success: false, error: 'native-fail' });
     state.executePowerShellScript.mockResolvedValue({
       stdout: '{"success":true,"data":"DE AD BE EF"}',

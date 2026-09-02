@@ -18,7 +18,7 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
 
   // ── serialize() unreachable-type guard fallbacks ─────────────────────────
 
-  it('falls back from large-array when data is not an array (v8 ignore next 4)', () => {
+  it('falls back from large-array when data is not an array (v8 ignore next 4)', async () => {
     // detectType() returns 'large-array' when Array.isArray(data) but data is NOT an array.
     // This would only happen via a type assertion that bypasses the type guard.
     // We reach the fallback by calling serialize() through a path that skips the
@@ -29,7 +29,7 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
     // .length > 100. The only way to reach the Array.isArray guard false
     // branch is to call the private method directly, or through type coercion.
     // We exercise it via direct invocation of the private serializeLargeArray path.
-    const result = (serializer as any).serializeLargeArray([1, 2, 3], {
+    const result = await (serializer as any).serializeLargeArray([1, 2, 3], {
       maxDepth: 3,
       maxArrayLength: 10,
       maxStringLength: 1000,
@@ -40,11 +40,11 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
     expect(typeof result).toBe('string');
   });
 
-  it('falls back from code-string when data is not a string (v8 ignore next 4)', () => {
+  it('falls back from code-string when data is not a string (v8 ignore next 4)', async () => {
     // serializeCodeString guards for typeof data === 'string' — this branch is
     // unreachable via the public API because detectType only returns 'code-string'
     // when data IS a string. We invoke the private method directly.
-    const result = (serializer as any).serializeCodeString(42 as unknown as string, {
+    const result = await (serializer as any).serializeCodeString(42 as unknown as string, {
       maxDepth: 3,
       maxArrayLength: 10,
       maxStringLength: 1000,
@@ -55,11 +55,11 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
     expect(result).toBe('42');
   });
 
-  it('falls back from network-requests when not a request array (v8 ignore next 4)', () => {
+  it('falls back from network-requests when not a request array (v8 ignore next 4)', async () => {
     // serializeNetworkRequests guards for isNetworkRequestArray(data) — unreachable
     // via public API because detectType only returns 'network-requests' when the
     // array passes isNetworkRequestArray. Invoking the private method directly.
-    const result = (serializer as any).serializeNetworkRequests({ not: 'an array' } as any, {
+    const result = await (serializer as any).serializeNetworkRequests({ not: 'an array' } as any, {
       maxDepth: 3,
       maxArrayLength: 10,
       maxStringLength: 1000,
@@ -222,9 +222,9 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
 
   // ── serializeDefault ───────────────────────────────────────────────────────
 
-  it('serializeDefault returns JSON directly when under threshold', () => {
+  it('serializeDefault returns JSON directly when under threshold', async () => {
     const smallObj = { a: 1, b: 2 };
-    const result = (serializer as any).serializeDefault(smallObj, {
+    const result = await (serializer as any).serializeDefault(smallObj, {
       maxDepth: 3,
       maxArrayLength: 10,
       maxStringLength: 1000,
@@ -234,10 +234,10 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
     expect(result).toBe(JSON.stringify(smallObj));
   });
 
-  it('serializeDefault stores data when over threshold', () => {
+  it('serializeDefault stores data when over threshold', async () => {
     const largeObj = { text: 'x'.repeat(100_000) };
     const result = JSON.parse(
-      (serializer as any).serializeDefault(largeObj, {
+      await (serializer as any).serializeDefault(largeObj, {
         maxDepth: 3,
         maxArrayLength: 10,
         maxStringLength: 1000,
@@ -335,7 +335,7 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
 
   // ── serializeLargeArray ────────────────────────────────────────────────────
 
-  it('serializeLargeArray returns full JSON when within maxArrayLength', () => {
+  it('serializeLargeArray returns full JSON when within maxArrayLength', async () => {
     const smallArr = [1, 2, 3];
     const ctx = {
       maxDepth: 3,
@@ -344,11 +344,11 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
       maxObjectKeys: 20,
       threshold: 50 * 1024,
     };
-    const result = (serializer as any).serializeLargeArray(smallArr, ctx);
+    const result = await (serializer as any).serializeLargeArray(smallArr, ctx);
     expect(result).toBe(JSON.stringify(smallArr));
   });
 
-  it('serializeLargeArray stores detail for arrays exceeding maxArrayLength', () => {
+  it('serializeLargeArray stores detail for arrays exceeding maxArrayLength', async () => {
     const bigArr = Array.from({ length: 150 }, (_, i) => i);
     const ctx = {
       maxDepth: 3,
@@ -357,7 +357,7 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
       maxObjectKeys: 20,
       threshold: 50 * 1024,
     };
-    const result = JSON.parse((serializer as any).serializeLargeArray(bigArr, ctx)) as {
+    const result = JSON.parse(await (serializer as any).serializeLargeArray(bigArr, ctx)) as {
       type: string;
       length: number;
       detailId: string;
@@ -372,7 +372,7 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
 
   // ── serializeCodeString ────────────────────────────────────────────────────
 
-  it('serializeCodeString returns full JSON for short code (<=100 lines)', () => {
+  it('serializeCodeString returns full JSON for short code (<=100 lines)', async () => {
     const shortCode = Array.from({ length: 50 }, (_, i) => `const x${i}=${i};`).join('\n');
     const ctx = {
       maxDepth: 3,
@@ -381,11 +381,11 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
       maxObjectKeys: 20,
       threshold: 50 * 1024,
     };
-    const result = (serializer as any).serializeCodeString(shortCode, ctx);
+    const result = await (serializer as any).serializeCodeString(shortCode, ctx);
     expect(result).toBe(JSON.stringify(shortCode));
   });
 
-  it('serializeCodeString stores detail for long code (>100 lines)', () => {
+  it('serializeCodeString stores detail for long code (>100 lines)', async () => {
     const longCode = Array.from({ length: 150 }, (_, i) => `const x${i}=${i};`).join('\n');
     const ctx = {
       maxDepth: 3,
@@ -394,7 +394,7 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
       maxObjectKeys: 20,
       threshold: 50 * 1024,
     };
-    const result = JSON.parse((serializer as any).serializeCodeString(longCode, ctx)) as {
+    const result = JSON.parse(await (serializer as any).serializeCodeString(longCode, ctx)) as {
       type: string;
       totalLines: number;
       preview: string;
@@ -408,7 +408,7 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
 
   // ── serializeNetworkRequests ────────────────────────────────────────────────
 
-  it('serializeNetworkRequests returns full JSON when within maxArrayLength', () => {
+  it('serializeNetworkRequests returns full JSON when within maxArrayLength', async () => {
     const requests = [
       { requestId: '1', url: 'http://x.com', method: 'GET', type: 'xhr', timestamp: 1 },
     ];
@@ -419,11 +419,11 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
       maxObjectKeys: 20,
       threshold: 50 * 1024,
     };
-    const result = (serializer as any).serializeNetworkRequests(requests, ctx);
+    const result = await (serializer as any).serializeNetworkRequests(requests, ctx);
     expect(result).toBe(JSON.stringify(requests));
   });
 
-  it('serializeNetworkRequests stores detail for large request arrays', () => {
+  it('serializeNetworkRequests stores detail for large request arrays', async () => {
     const requests = Array.from({ length: 20 }, (_, i) => ({
       requestId: `r${i}`,
       url: `http://x.com/${i}`,
@@ -439,7 +439,9 @@ describe('AdaptiveDataSerializer – v8 ignore branch coverage', () => {
       maxObjectKeys: 20,
       threshold: 50 * 1024,
     };
-    const result = JSON.parse((serializer as any).serializeNetworkRequests(requests, ctx)) as {
+    const result = JSON.parse(
+      await (serializer as any).serializeNetworkRequests(requests, ctx),
+    ) as {
       type: string;
       count: number;
       summary: unknown[];

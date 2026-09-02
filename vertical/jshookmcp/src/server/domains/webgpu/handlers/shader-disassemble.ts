@@ -2,8 +2,13 @@ import { handleSafe, type ToolResponse } from '@server/domains/shared/ResponseBu
 import { argString } from '@server/domains/shared/parse-args';
 import { DetailedDataManager } from '@utils/DetailedDataManager';
 import { getShaderDisassemblyCache } from '@modules/webgpu/ShaderCache';
-import { extractShaderAst } from '@modules/webgpu/WgslParser';
-import { isSpirv, decodeSpirvInput, parseSpirv } from '@modules/webgpu/SpirvParser';
+import { extractShaderAst, extractShaderCostEstimate } from '@modules/webgpu/WgslParser';
+import {
+  isSpirv,
+  decodeSpirvInput,
+  parseSpirv,
+  computeSpirvStats,
+} from '@modules/webgpu/SpirvParser';
 import type { MCPServerContext } from '@server/domains/shared/registry';
 import type { WebGPUDomainDependencies, ShaderMetadata } from '../types';
 
@@ -24,13 +29,12 @@ interface ShaderAst {
  * with a human-readable disassembly of entry points, bindings, and structs).
  */
 export class ShaderDisassembleHandler {
+  private ctx: MCPServerContext;
   private ddm: DetailedDataManager;
   private disassemblyCache = getShaderDisassemblyCache();
 
-  constructor(
-    private ctx: MCPServerContext,
-    _deps: WebGPUDomainDependencies,
-  ) {
+  constructor(ctx: MCPServerContext, _deps: WebGPUDomainDependencies) {
+    this.ctx = ctx;
     this.ddm = DetailedDataManager.getInstance();
   }
 
@@ -64,7 +68,7 @@ export class ShaderDisassembleHandler {
         this.reportProgress(progressToken, 0.1, 'Parsing shader AST...');
       }
 
-      let result: { ast: ShaderAst; disassembly: string };
+      let result: { ast: ShaderAst; disassembly: string; costEstimate: unknown };
 
       if (format === 'spirv') {
         result = this.disassembleSpirv(shaderCode);
@@ -76,7 +80,19 @@ export class ShaderDisassembleHandler {
         }
 
         const disassembly = this.generateDisassembly(shaderCode);
-        result = { ast, disassembly };
+        // Instruction-cost estimate (Fix 3) — static analysis, no GPU needed.
+        const wgslCost = extractShaderCostEstimate(shaderCode);
+        result = {
+          ast,
+          disassembly,
+          costEstimate: {
+            totalInstructions: wgslCost.totalInstructions,
+            textureSamples: wgslCost.textureSamples,
+            controlFlowComplexity: wgslCost.controlFlowComplexity,
+            costScore: wgslCost.costScore,
+            basis: 'wgsl-estimate',
+          },
+        };
       }
 
       if (progressToken && shaderCode.length > 10000) {
@@ -94,7 +110,11 @@ export class ShaderDisassembleHandler {
    * Disassemble a SPIR-V binary: reflect metadata and produce a human-readable
    * text dump of entry points, bindings, structs, and locations.
    */
-  private disassembleSpirv(input: string): { ast: ShaderAst; disassembly: string } {
+  private disassembleSpirv(input: string): {
+    ast: ShaderAst;
+    disassembly: string;
+    costEstimate: unknown;
+  } {
     const decoded = decodeSpirvInput(input);
     if (decoded.format === 'invalid') {
       throw new Error(
@@ -154,7 +174,18 @@ export class ShaderDisassembleHandler {
       }
     }
 
-    return { ast, disassembly: lines.join('\n') };
+    // Instruction stats + cost estimate (Fix 3) from the decoded module.
+    const stats = computeSpirvStats(reflect.instructions ?? []);
+    const costEstimate = {
+      totalInstructions: stats.totalInstructions,
+      byOpcode: stats.byOpcode,
+      textureSamples: stats.textureSamples,
+      controlFlowComplexity: stats.controlFlowComplexity,
+      costScore: stats.costScore,
+      basis: 'spirv-opcode',
+    };
+
+    return { ast, disassembly: lines.join('\n'), costEstimate };
   }
 
   private generateDisassembly(shaderCode: string): string {

@@ -27,6 +27,7 @@ import {
  * Uses page.on('request'/'response') instead of CDP Network domain.
  */
 export class PlaywrightNetworkMonitor {
+  private page: PlaywrightLikePage | null;
   private networkEnabled = false;
   private requests: Map<string, NetworkRequest> = new Map();
   private responses: Map<string, NetworkResponse> = new Map();
@@ -53,7 +54,8 @@ export class PlaywrightNetworkMonitor {
   private boundOnRequest: ((req: unknown) => void) | null = null;
   private boundOnResponse: ((res: unknown) => void) | null = null;
 
-  constructor(private page: PlaywrightLikePage | null) {
+  constructor(page: PlaywrightLikePage | null) {
+    this.page = page;
     this.responseBodyCache = new ResponseBodyCache(
       NETWORK_BODY_CACHE_MAX_ENTRIES,
       NETWORK_BODY_CACHE_MAX_TOTAL_BYTES,

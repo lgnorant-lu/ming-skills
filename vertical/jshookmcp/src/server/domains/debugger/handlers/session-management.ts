@@ -17,7 +17,10 @@ function getErrorMessage(error: unknown): string {
 }
 
 export class SessionManagementHandlers {
-  constructor(private deps: SessionManagementHandlersDeps) {}
+  private deps: SessionManagementHandlersDeps;
+  constructor(deps: SessionManagementHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handleSaveSession(args: Record<string, unknown>) {
     const filePath = argString(args, 'filePath');

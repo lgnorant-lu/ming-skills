@@ -69,6 +69,22 @@ export interface GPUCommand {
   bindGroups?: number[];
   /** True when `setIndexBuffer` was called (render passes only). */
   indexBufferSet?: boolean;
+  /** Vertex count of the last `draw`/`drawIndexed` call in this pass. */
+  vertexCount?: number;
+  /** Instance count of the last `draw`/`drawIndexed` call (default 1). */
+  instanceCount?: number;
+  /** True when the last draw was `drawIndirect`/`drawIndexedIndirect`. */
+  indirect?: boolean;
+  /** Indirect buffer size in bytes (best-effort; undefined for direct draws). */
+  indirectBufferSize?: number;
+  /** Sum of vertex counts across all direct draws in this pass. */
+  totalVertexCount?: number;
+  /** GPU timestamp for pass start in ns (timestamp-query mode only). */
+  gpuStartNs?: number;
+  /** GPU timestamp for pass end in ns (timestamp-query mode only). */
+  gpuEndNs?: number;
+  /** GPU pass duration in ns (timestamp-query mode only). */
+  gpuElapsedNs?: number;
 }
 
 export interface GPUMemoryAllocation {

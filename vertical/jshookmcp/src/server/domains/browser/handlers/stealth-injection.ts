@@ -65,7 +65,10 @@ export function resetFingerprintCacheForTesting(): void {
 }
 
 export class StealthInjectionHandlers {
-  constructor(private deps: StealthInjectionHandlersDeps) {}
+  private deps: StealthInjectionHandlersDeps;
+  constructor(deps: StealthInjectionHandlersDeps) {
+    this.deps = deps;
+  }
 
   private getDefaultUserAgent(os: 'windows' | 'mac' | 'linux'): string {
     const userAgents = {

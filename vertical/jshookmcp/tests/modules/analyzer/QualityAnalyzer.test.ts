@@ -216,3 +216,37 @@ ${longBody}
     expect(loggerState.warn).toHaveBeenCalled();
   });
 });
+
+describe('QualityAnalyzer scoring constants (FP batch B28)', () => {
+  it('exposes env-overridable scoring weights with stable defaults', async () => {
+    const constants = await import('@src/constants');
+    expect(constants.QUALITY_WEIGHT_SECURITY).toBe(0.4);
+    expect(constants.QUALITY_WEIGHT_COMPLEXITY).toBe(0.25);
+    expect(constants.QUALITY_WEIGHT_MAINTAINABILITY).toBe(0.2);
+    expect(constants.QUALITY_WEIGHT_CODE_SMELL).toBe(0.15);
+  });
+
+  it('exposes severity penalties and complexity bands with stable defaults', async () => {
+    const constants = await import('@src/constants');
+    expect(constants.QUALITY_SECURITY_PENALTY_CRITICAL).toBe(20);
+    expect(constants.QUALITY_SECURITY_PENALTY_HIGH).toBe(10);
+    expect(constants.QUALITY_SECURITY_PENALTY_MEDIUM).toBe(5);
+    expect(constants.QUALITY_SECURITY_PENALTY_LOW).toBe(2);
+    expect(constants.QUALITY_SMELL_PENALTY_HIGH).toBe(10);
+    expect(constants.QUALITY_SMELL_PENALTY_MEDIUM).toBe(5);
+    expect(constants.QUALITY_SMELL_PENALTY_LOW).toBe(2);
+    expect(constants.QUALITY_COMPLEXITY_BAND_HIGH).toBe(20);
+    expect(constants.QUALITY_COMPLEXITY_PENALTY_HIGH).toBe(30);
+    expect(constants.QUALITY_COMPLEXITY_BAND_MEDIUM).toBe(10);
+    expect(constants.QUALITY_COMPLEXITY_PENALTY_MEDIUM).toBe(15);
+    expect(constants.QUALITY_COMPLEXITY_BAND_LOW).toBe(5);
+    expect(constants.QUALITY_COGNITIVE_BAND_HIGH).toBe(15);
+    expect(constants.QUALITY_COGNITIVE_PENALTY_HIGH).toBe(20);
+    expect(constants.QUALITY_COGNITIVE_BAND_LOW).toBe(10);
+    expect(constants.QUALITY_AVG_COMPLEXITY_BAND_HIGH).toBe(10);
+    expect(constants.QUALITY_AVG_COMPLEXITY_PENALTY_HIGH).toBe(20);
+    expect(constants.QUALITY_AVG_COMPLEXITY_BAND_LOW).toBe(5);
+    expect(constants.QUALITY_DEFAULT_MAINTAINABILITY).toBe(70);
+    expect(constants.QUALITY_DEFAULT_AI_SCORE).toBe(70);
+  });
+});

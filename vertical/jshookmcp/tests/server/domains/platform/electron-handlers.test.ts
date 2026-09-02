@@ -16,12 +16,10 @@ const mocks = vi.hoisted(() => {
     writeFile: vi.fn(async () => undefined),
     stat: vi.fn(),
     parseAsarBuffer: vi.fn(),
-    parseBrowserWindowHints: vi.fn(
-      (): BrowserWindowHints => ({
-        preloadScripts: [],
-        devToolsEnabled: null,
-      }),
-    ),
+    parseBrowserWindowHints: vi.fn((): BrowserWindowHints => ({
+      preloadScripts: [],
+      devToolsEnabled: null,
+    })),
     readAsarEntryText: vi.fn(),
     findFilesystemPreloadScripts: vi.fn(async () => []),
   };

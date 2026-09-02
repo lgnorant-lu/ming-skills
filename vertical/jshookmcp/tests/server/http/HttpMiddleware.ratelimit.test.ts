@@ -221,4 +221,21 @@ describe('HttpMiddleware rate-limit and proxy tests', () => {
     const latestRes = mockRes();
     expect(checkRateLimit(latestReq, latestRes)).toBe(true);
   });
+
+  it('bounds per-IP rate-limit storage to a fixed bucket ring regardless of burst size', async () => {
+    const { checkRateLimit, rateLimitTrackedBuckets, RATE_LIMIT_BUCKET_COUNT } =
+      await import('@server/http/HttpMiddleware');
+    const ip = '203.0.113.77';
+
+    for (let i = 0; i < 5000; i++) {
+      const req = mockReq({ socket: { remoteAddress: ip } } as any);
+      const res = mockRes();
+      checkRateLimit(req, res);
+    }
+
+    // Per-IP storage must stay at the fixed ring size (a1-09), not grow with
+    // the request count — 5000 requests must not yield 5000 tracked slots.
+    expect(rateLimitTrackedBuckets(ip)).toBe(RATE_LIMIT_BUCKET_COUNT);
+    expect(rateLimitTrackedBuckets(ip)).toBeLessThan(5000);
+  });
 });

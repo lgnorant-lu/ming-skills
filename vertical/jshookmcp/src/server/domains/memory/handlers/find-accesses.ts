@@ -89,13 +89,24 @@ export type DisassemblerFn = (
 ) => Promise<string>;
 
 export class FindAccessesHandlers {
+  private readonly bpEngine: HardwareBreakpointEngine | null;
+  private readonly memoryReader: MemoryReaderFn | null;
+  private readonly disassembler: DisassemblerFn | null;
+  private readonly processManager?: UnifiedProcessManager;
+  private readonly ctx?: MCPServerContext;
   constructor(
-    private readonly bpEngine: HardwareBreakpointEngine | null,
-    private readonly memoryReader: MemoryReaderFn | null,
-    private readonly disassembler: DisassemblerFn | null,
-    private readonly processManager?: UnifiedProcessManager,
-    private readonly ctx?: MCPServerContext,
-  ) {}
+    bpEngine: HardwareBreakpointEngine | null,
+    memoryReader: MemoryReaderFn | null,
+    disassembler: DisassemblerFn | null,
+    processManager?: UnifiedProcessManager,
+    ctx?: MCPServerContext,
+  ) {
+    this.bpEngine = bpEngine;
+    this.memoryReader = memoryReader;
+    this.disassembler = disassembler;
+    this.processManager = processManager;
+    this.ctx = ctx;
+  }
 
   private async resolvePid(value: unknown): Promise<number> {
     return await resolveMemoryDomainPid(value, this.processManager, this.ctx);

@@ -173,6 +173,23 @@ describe('activation/ActivationController', () => {
     controller.dispose();
   });
 
+  it('stores only a lightweight toolName summary in event history payload', async () => {
+    const { ActivationController } = await import('@server/activation/ActivationController');
+    const controller = new ActivationController(eventBus, mockCtx as never);
+
+    await eventBus.emit('tool:called', {
+      toolName: 'page_click',
+      domain: 'browser',
+      timestamp: new Date().toISOString(),
+      success: true,
+    });
+
+    // Only the toolName is retained from the payload; full event payloads are
+    // dropped so the bounded sliding window stays memory-light.
+    expect(controller.getEventHistory()[0]!.payload).toEqual({ toolName: 'page_click' });
+    controller.dispose();
+  });
+
   it('returns early from attemptBoost if disposed', async () => {
     const { ActivationController } = await import('@server/activation/ActivationController');
     const controller = new ActivationController(eventBus, mockCtx as never);

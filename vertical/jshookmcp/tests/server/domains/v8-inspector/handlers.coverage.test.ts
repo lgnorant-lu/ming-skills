@@ -9,13 +9,11 @@ const mockExtractBytecode = vi.fn();
 const mockAttemptNativeBytecodeExtraction = vi.fn();
 const mockDisassembleBytecode = vi.fn();
 const mockFindHiddenClasses = vi.fn();
-const mockInspectJIT = vi.fn();
 const mockTakeHeapSnapshot = vi.fn();
 const mockGetObjectByObjectId = vi.fn();
 const mockGetHeapUsage = vi.fn();
 const mockDetectV8Version = vi.fn();
 const bytecodeExtractorGetPages: Array<(() => Promise<unknown>) | undefined> = [];
-const jitInspectorGetPages: Array<(() => Promise<unknown>) | undefined> = [];
 const versionDetectorGetPages: Array<(() => Promise<unknown>) | undefined> = [];
 
 vi.mock('@modules/v8-inspector', () => {
@@ -26,10 +24,6 @@ vi.mock('@modules/v8-inspector', () => {
       this.extractBytecode = mockExtractBytecode;
       this.disassembleBytecode = mockDisassembleBytecode;
       this.findHiddenClasses = mockFindHiddenClasses;
-    }),
-    JITInspector: vi.fn(function (this: any, getPage?: () => Promise<unknown>) {
-      jitInspectorGetPages.push(getPage);
-      this.inspectJIT = mockInspectJIT;
     }),
   };
 });
@@ -60,10 +54,8 @@ vi.mock('@modules/v8-inspector/VersionDetector', () => {
 // ---------------------------------------------------------------------------
 
 import { handleBytecodeExtract } from '../../../../src/server/domains/v8-inspector/handlers/bytecode-extract';
-import { handleJitInspect } from '../../../../src/server/domains/v8-inspector/handlers/jit-inspect';
 import {
   handleHeapSnapshotCapture,
-  handleHeapSearch,
   clearSnapshotCache,
   getSnapshotCache,
   storeSnapshot,
@@ -134,7 +126,6 @@ describe('v8-inspector handler coverage', () => {
     vi.clearAllMocks();
     clearSnapshotCache();
     bytecodeExtractorGetPages.length = 0;
-    jitInspectorGetPages.length = 0;
     versionDetectorGetPages.length = 0;
   });
 
@@ -284,67 +275,6 @@ describe('v8-inspector handler coverage', () => {
           },
           disassembly: [{ offset: 0, opcode: 'Evaluate', operands: ['x'] }],
         },
-      });
-    });
-  });
-
-  // =========================================================================
-  // jit-inspect.ts
-  // =========================================================================
-  describe('handleJitInspect', () => {
-    it('should return error when scriptId is empty', async () => {
-      const result = await handleJitInspect({});
-      expect(result).toMatchObject({
-        success: false,
-        error: 'scriptId is required',
-      });
-    });
-
-    it('should return error when scriptId is whitespace-only', async () => {
-      const result = await handleJitInspect({ scriptId: '\t\n' });
-      expect(result).toMatchObject({
-        success: false,
-        error: 'scriptId is required',
-      });
-    });
-
-    it('should return functions on success', async () => {
-      const functions = [
-        { functionName: 'foo', optimized: true, tier: 'turbofan' },
-        { functionName: 'bar', optimized: false, tier: 'interpreted' },
-      ];
-      mockInspectJIT.mockResolvedValueOnce({
-        functions,
-        supportsNativesSyntax: true,
-        inspectionMode: 'native-status',
-      });
-
-      const result = await handleJitInspect(
-        { scriptId: 'script-7' },
-        { getPage: vi.fn().mockResolvedValue({}) },
-      );
-
-      expect(result).toMatchObject({
-        success: true,
-        scriptId: 'script-7',
-        inspectionMode: 'native-status',
-        supportsNativesSyntax: true,
-        functions,
-      });
-    });
-
-    it('should work without runtime', async () => {
-      mockInspectJIT.mockResolvedValueOnce({
-        functions: [],
-        supportsNativesSyntax: false,
-        inspectionMode: 'heuristic',
-      });
-      const result = await handleJitInspect({ scriptId: 'abc' });
-      expect(result).toMatchObject({
-        success: true,
-        scriptId: 'abc',
-        inspectionMode: 'heuristic',
-        supportsNativesSyntax: false,
       });
     });
   });
@@ -509,101 +439,6 @@ describe('v8-inspector handler coverage', () => {
       expect(result.success).toBe(true);
       expect(result.simulated).toBe(true);
       expect(result.sizeBytes).toBe(0);
-    });
-  });
-
-  // =========================================================================
-  // heap-snapshot.ts — handleHeapSearch
-  // =========================================================================
-  describe('handleHeapSearch', () => {
-    function makeSearchOptions(overrides?: Record<string, unknown>) {
-      return {
-        getPage: vi.fn().mockResolvedValue({}),
-        getSnapshot: vi.fn().mockReturnValue(null),
-        setSnapshot: vi.fn(),
-        ...overrides,
-      };
-    }
-
-    it('should throw when snapshotId is missing and no current snapshot', async () => {
-      const opts = makeSearchOptions();
-      await expect(handleHeapSearch({}, opts)).rejects.toThrow('snapshotId is required');
-    });
-
-    it('should throw when specified snapshotId is not found', async () => {
-      const opts = makeSearchOptions();
-      await expect(
-        handleHeapSearch({ snapshotId: 'missing-snap', query: 'test' }, opts),
-      ).rejects.toThrow('Snapshot missing-snap not found');
-    });
-
-    it('should return matching chunks for a valid snapshot', async () => {
-      storeSnapshot({
-        id: 'snap-search',
-        chunks: ['{"name":"foo"}', '{"name":"bar"}', '{"name":"foobar"}'],
-        capturedAt: '2026-01-01',
-        sizeBytes: 300,
-      });
-      const opts = makeSearchOptions();
-
-      const result = await handleHeapSearch({ snapshotId: 'snap-search', query: 'foo' }, opts);
-
-      expect(result.success).toBe(true);
-      expect(result.snapshotId).toBe('snap-search');
-      expect(result.query).toBe('foo');
-      // Chunks that include "foo": the first and third
-      expect(result.matches).toHaveLength(2);
-    });
-
-    it('should default query to ".*" when not provided', async () => {
-      // handleHeapSearch uses chunk.includes(query) — literal string match
-      // Chunks containing the literal substring ".*" will match
-      storeSnapshot({
-        id: 'snap-wildcard',
-        chunks: ['has-.*-inside', 'no-wildcard'],
-        capturedAt: '2026-01-01',
-        sizeBytes: 100,
-      });
-      const opts = makeSearchOptions();
-
-      const result = await handleHeapSearch({ snapshotId: 'snap-wildcard' }, opts);
-
-      expect(result.query).toBe('.*');
-      // Only the first chunk contains the literal substring ".*"
-      expect(result.matches).toHaveLength(1);
-      expect(result.matches[0]).toBe('has-.*-inside');
-    });
-
-    it('should use getSnapshot() as fallback for snapshotId', async () => {
-      storeSnapshot({
-        id: 'snap-fallback',
-        chunks: ['data'],
-        capturedAt: '2026-01-01',
-        sizeBytes: 50,
-      });
-      const opts = makeSearchOptions({
-        getSnapshot: vi.fn().mockReturnValue('snap-fallback'),
-      });
-
-      const result = await handleHeapSearch({ query: 'data' }, opts);
-
-      expect(result.success).toBe(true);
-      expect(result.snapshotId).toBe('snap-fallback');
-    });
-
-    it('should return empty matches when no chunks match query', async () => {
-      storeSnapshot({
-        id: 'snap-nomatch',
-        chunks: ['alpha', 'beta'],
-        capturedAt: '2026-01-01',
-        sizeBytes: 100,
-      });
-      const opts = makeSearchOptions();
-
-      const result = await handleHeapSearch({ snapshotId: 'snap-nomatch', query: 'gamma' }, opts);
-
-      expect(result.success).toBe(true);
-      expect(result.matches).toHaveLength(0);
     });
   });
 
@@ -1106,39 +941,6 @@ describe('v8-inspector handler coverage', () => {
           success: true,
           version: { major: 12, minor: 4, patch: 100, commit: 'abc' },
           features: { nativesSyntax: false },
-        });
-        expect(typeof getPage).toBe('function');
-        await expect(getPage?.()).resolves.toEqual({});
-        expect((deps.ctx.pageController as any).getPage).toHaveBeenCalledOnce();
-      });
-    });
-
-    describe('v8_jit_inspect', () => {
-      it('should return error when scriptId is empty', async () => {
-        const handlers = new V8InspectorHandlers(createMockDeps());
-        const result = await handlers.v8_jit_inspect({});
-        expect(result).toMatchObject({ success: false, error: 'scriptId is required' });
-      });
-
-      it('should return functions on success', async () => {
-        const functions = [{ functionName: 'fn1', optimized: true, tier: 'turbofan' }];
-        mockInspectJIT.mockResolvedValueOnce({
-          functions,
-          supportsNativesSyntax: true,
-          inspectionMode: 'native-status',
-        });
-        const deps = createMockDeps();
-        const handlers = new V8InspectorHandlers(deps);
-
-        const result = await handlers.v8_jit_inspect({ scriptId: 'jit-1' });
-        const getPage = jitInspectorGetPages.at(-1);
-
-        expect(result).toMatchObject({
-          success: true,
-          scriptId: 'jit-1',
-          inspectionMode: 'native-status',
-          supportsNativesSyntax: true,
-          functions,
         });
         expect(typeof getPage).toBe('function');
         await expect(getPage?.()).resolves.toEqual({});

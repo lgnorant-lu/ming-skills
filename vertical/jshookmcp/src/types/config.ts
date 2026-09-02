@@ -1,13 +1,67 @@
 export interface Config {
   puppeteer: PuppeteerConfig;
+  server: ServerConfig;
   mcp: MCPConfig;
   cache: CacheConfig;
   paths: PathsConfig;
   performance: PerformanceConfig;
   search: SearchConfig;
   reverseEngineering: ReverseEngineeringConfig;
+  extensions: ExtensionRuntimeConfig;
+  captcha: CaptchaRuntimeConfig;
   /** Large-data response offloading (LargeDataOffloader). Optional — omitted in tests. */
   offloader?: OffloaderConfig;
+}
+
+export type MCPTransportMode = 'stdio' | 'http';
+
+/** Typed startup and HTTP transport configuration. */
+export interface ServerConfig {
+  transport: MCPTransportMode;
+  host: string;
+  port: number;
+  /** Sensitive value; callers must never serialize the full config to logs. */
+  authToken?: string;
+  allowInsecure: boolean;
+  healthVerbose: boolean;
+  logging: {
+    enabled: boolean;
+    level: 'debug' | 'info' | 'warning' | 'error';
+    fileDir?: string;
+  };
+  http: {
+    requestTimeoutMs: number;
+    headersTimeoutMs: number;
+    keepAliveTimeoutMs: number;
+    forceCloseTimeoutMs: number;
+    maxBodyBytes: number;
+    rateLimitEnabled: boolean;
+    rateLimitWindowMs: number;
+    rateLimitMax: number;
+    trustProxy: boolean;
+    maxInFlight: number;
+    maxSseInFlight: number;
+  };
+}
+
+/** Extension discovery and pre-import trust-boundary configuration. */
+export interface ExtensionRuntimeConfig {
+  registryBaseUrl?: string;
+  pluginRoots: string[];
+  workflowRoots: string[];
+  allowedDigests: string[];
+  signatureRequired: boolean;
+  strictLoad: boolean;
+}
+
+/** External CAPTCHA service configuration. */
+export interface CaptchaRuntimeConfig {
+  provider: string;
+  /** Sensitive value; callers must never serialize the full config to logs. */
+  apiKey?: string;
+  solverBaseUrl?: string;
+  antiCaptchaBaseUrl?: string;
+  capSolverBaseUrl?: string;
 }
 
 /**
@@ -42,6 +96,8 @@ export interface PuppeteerConfig {
 export interface MCPConfig {
   name: string;
   version: string;
+  toolProfile: 'search' | 'workflow' | 'full';
+  toolDomains: string[];
   browserSessionQueueMaxPending: number;
   browserSessionQueueMaxPendingPerSession: number;
   browserSessionQueueWaitTimeoutMs: number;

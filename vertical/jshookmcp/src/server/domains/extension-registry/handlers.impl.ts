@@ -97,12 +97,14 @@ function toManifestCandidate(record: Record<string, unknown>): Partial<Registere
 }
 
 export class ExtensionRegistryHandlers {
+  private registry?: PluginRegistry;
+  private webhook?: WebhookBridge;
   private webhookServer?: WebhookServer;
 
-  constructor(
-    private registry?: PluginRegistry,
-    private webhook?: WebhookBridge,
-  ) {}
+  constructor(registry?: PluginRegistry, webhook?: WebhookBridge) {
+    this.registry = registry;
+    this.webhook = webhook;
+  }
 
   async handleInstallTool(args: ToolArgs): Promise<ToolResponse> {
     return handleSafe(async () => await this.handleInstall(args));
@@ -458,17 +460,23 @@ export class ExtensionRegistryHandlers {
     exportsRecord: Record<string, unknown>,
     contextName: string,
   ): ((input: unknown) => unknown) | null {
-    const directContext = exportsRecord[contextName];
+    // hasOwn guards: 'constructor'/'__proto__' must not resolve through the
+    // prototype chain to Object built-ins and get executed as a context.
+    const directContext = Object.hasOwn(exportsRecord, contextName)
+      ? exportsRecord[contextName]
+      : undefined;
     if (isCallable(directContext)) {
       return directContext;
     }
 
-    const defaultExport = exportsRecord.default;
+    const defaultExport = Object.hasOwn(exportsRecord, 'default')
+      ? exportsRecord['default']
+      : undefined;
     if (contextName === 'default' && isCallable(defaultExport)) {
       return defaultExport;
     }
 
-    if (isRecord(defaultExport)) {
+    if (isRecord(defaultExport) && Object.hasOwn(defaultExport, contextName)) {
       const nestedContext = defaultExport[contextName];
       if (isCallable(nestedContext)) {
         return nestedContext;

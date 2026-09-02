@@ -136,4 +136,112 @@ describe('webgpu_capture_commands', () => {
     expect(computeCmd).toBeDefined();
     expect(computeCmd.dispatches).toMatchObject({ x: 4, y: 4, z: 1 });
   });
+
+  it('passes through draw statistics (vertexCount/instanceCount/indirect) from the hook trace', async () => {
+    const mockPage = {
+      url: () => 'https://example.com/',
+      evaluate: vi.fn().mockImplementation(async (fn: any, ..._args: any[]) => {
+        if (typeof fn === 'function' && String(fn).includes('webgpuHookState')) {
+          return {
+            commands: [
+              {
+                type: 'render',
+                drawCalls: 3,
+                vertexCount: 1024,
+                instanceCount: 2,
+                indirect: false,
+                totalVertexCount: 4096,
+                timestamp: 1.0,
+              },
+              {
+                type: 'render',
+                drawCalls: 1,
+                indirect: true,
+                indirectBufferSize: 64,
+                timestamp: 1.1,
+              },
+            ],
+            totalSubmissions: 1,
+            captureStartTime: 1.0,
+            captureEndTime: 2.0,
+          };
+        }
+        return undefined;
+      }),
+      evaluateOnNewDocument: vi.fn().mockResolvedValue(undefined),
+      createCDPSession: vi.fn().mockResolvedValue({
+        send: vi.fn().mockResolvedValue({ metrics: [] }),
+        detach: vi.fn().mockResolvedValue(undefined),
+      }),
+    };
+
+    handlers = makeHandlers(mockPage);
+
+    const response = await handlers.webgpu_capture_commands({ captureCount: 2 });
+    const result = ResponseBuilder.parse(response);
+
+    expect(result.success).toBe(true);
+    const direct = result.commands.find((c: any) => c.indirect === false);
+    const indirect = result.commands.find((c: any) => c.indirect === true);
+
+    expect(direct).toMatchObject({ vertexCount: 1024, instanceCount: 2, totalVertexCount: 4096 });
+    expect(indirect).toMatchObject({ indirect: true, indirectBufferSize: 64 });
+    expect(indirect.vertexCount).toBeUndefined();
+  });
+
+  it('attaches GPU timestamp timings and capability metadata to captured commands', async () => {
+    const mockPage = {
+      url: () => 'https://example.com/',
+      evaluate: vi.fn().mockImplementation(async (fn: any, ..._args: any[]) => {
+        if (typeof fn === 'function' && String(fn).includes('webgpuHookState')) {
+          return {
+            commands: [
+              {
+                type: 'render',
+                drawCalls: 1,
+                timestamp: 1.0,
+                gpuStartNs: 1000,
+                gpuEndNs: 3500000,
+                gpuElapsedNs: 3499000,
+              },
+            ],
+            totalSubmissions: 1,
+            captureStartTime: 1.0,
+            captureEndTime: 2.0,
+            timestampQuery: {
+              supported: true,
+              timestampPeriod: 1,
+              resolvedPasses: 1,
+              pendingPasses: 0,
+              overflow: false,
+            },
+          };
+        }
+        return undefined;
+      }),
+      evaluateOnNewDocument: vi.fn().mockResolvedValue(undefined),
+      createCDPSession: vi.fn().mockResolvedValue({
+        send: vi.fn().mockResolvedValue({ metrics: [] }),
+        detach: vi.fn().mockResolvedValue(undefined),
+      }),
+    };
+
+    handlers = makeHandlers(mockPage);
+
+    const response = await handlers.webgpu_capture_commands({ captureCount: 1 });
+    const result = ResponseBuilder.parse(response);
+
+    expect(result.success).toBe(true);
+    const renderCmd = result.commands[0];
+    expect(renderCmd).toMatchObject({
+      gpuStartNs: 1000,
+      gpuEndNs: 3500000,
+      gpuElapsedNs: 3499000,
+    });
+    expect(result.timestampQuery).toMatchObject({
+      supported: true,
+      resolvedPasses: 1,
+      overflow: false,
+    });
+  });
 });

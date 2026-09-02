@@ -1,10 +1,4 @@
-import type {
-  CDPSessionLike,
-  DebuggerManager,
-  EvidenceStore,
-  PageController,
-  TraceRecorder,
-} from './dependencies';
+import type { CDPSessionLike, PageController } from './dependencies';
 
 export type CanvasContextType = '2d' | 'webgl' | 'webgl2' | 'webgpu';
 export type CanvasTraceBreakpointType = 'click' | 'mousedown' | 'pointerdown';
@@ -22,11 +16,6 @@ export interface CanvasEngineAdapter {
   detect(env: CanvasProbeEnv): Promise<CanvasDetection | null>;
   dumpScene(env: CanvasProbeEnv, opts: DumpOpts): Promise<CanvasSceneDump>;
   pickAt(env: CanvasProbeEnv, opts: PickOpts): Promise<CanvasPickResult>;
-  traceClick?(
-    env: CanvasProbeEnv,
-    opts: TraceOpts,
-    services: TraceServices,
-  ): Promise<CanvasTraceResult>;
   dumpGpuResources?(env: CanvasProbeEnv, opts: DumpOpts): Promise<CanvasGpuResources | null>;
 }
 
@@ -60,21 +49,6 @@ export interface PickOpts {
   x: number;
   y: number;
   canvasId?: string;
-}
-
-export interface TraceOpts {
-  targetNodeId?: string;
-  breakpointType?: CanvasTraceBreakpointType;
-  maxFrames?: number;
-}
-
-/**
- * Cross-domain services used during click tracing.
- */
-export interface TraceServices {
-  debuggerManager: DebuggerManager;
-  traceRecorder: TraceRecorder;
-  evidenceStore: EvidenceStore;
 }
 
 /**

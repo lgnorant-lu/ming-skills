@@ -64,7 +64,7 @@ vi.mock('node:http', () => ({
   createServer: mocks.createServer,
 }));
 
-vi.mock('@modelcontextprotocol/sdk/server/stdio.js', () => ({
+vi.mock('@modelcontextprotocol/server/stdio', () => ({
   // StdioServerTransport uses `onclose` as a callback property, not addEventListener.
   // eslint-disable-next-line unicorn/prefer-add-event-listener
   StdioServerTransport: function MockStdioServerTransport(this: {
@@ -396,6 +396,106 @@ describe('MCPServer.transport', () => {
     expect(body.tier).toBe('search');
   });
 
+  it('includes loopLag in /health verbose when a sampler is active', async () => {
+    const constantsMod = await import('@src/constants');
+    (constantsMod as any).MCP_HEALTH_VERBOSE = true;
+    const ctx = createCtx({
+      loopLagSampler: {
+        getSummary: () => ({ p50Ms: 1.5, p90Ms: 3.25, p99Ms: 9.75, samples: 42 }),
+      },
+    });
+    await startHttpTransport(ctx);
+
+    const server = mocks.httpServers[0];
+    const res = createRes();
+    server.requestHandlerForTest({ url: '/health', method: 'GET' }, res);
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).loopLag).toEqual({
+      p50Ms: 1.5,
+      p90Ms: 3.25,
+      p99Ms: 9.75,
+      samples: 42,
+    });
+  });
+
+  it('omits loopLag from /health when verbose is disabled', async () => {
+    const constantsMod = await import('@src/constants');
+    (constantsMod as any).MCP_HEALTH_VERBOSE = false;
+    // Even with a live sampler, non-verbose responses stay minimal (no loopLag).
+    const ctx = createCtx({
+      loopLagSampler: {
+        getSummary: () => ({ p50Ms: 1.5, p90Ms: 3.25, p99Ms: 9.75, samples: 42 }),
+      },
+    });
+    await startHttpTransport(ctx);
+
+    const server = mocks.httpServers[0];
+    const res = createRes();
+    server.requestHandlerForTest({ url: '/health', method: 'GET' }, res);
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      status: 'ok',
+      uptime: expect.any(Number),
+    });
+  });
+
+  it('includes toolLatency in /health verbose when a tracker is active', async () => {
+    const constantsMod = await import('@src/constants');
+    (constantsMod as any).MCP_HEALTH_VERBOSE = true;
+    const ctx = createCtx({
+      toolLatencyTracker: {
+        getSummary: () => ({
+          top: [
+            { toolName: 'page_navigate', p50Ms: 400, p90Ms: 900, p99Ms: 1200, samples: 180 },
+            { toolName: 'debugger_evaluate', p50Ms: 5, p90Ms: 12, p99Ms: 30, samples: 500 },
+          ],
+          trackedTools: 42,
+        }),
+      },
+    });
+    await startHttpTransport(ctx);
+
+    const server = mocks.httpServers[0];
+    const res = createRes();
+    server.requestHandlerForTest({ url: '/health', method: 'GET' }, res);
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).toolLatency).toEqual({
+      top: [
+        { toolName: 'page_navigate', p50Ms: 400, p90Ms: 900, p99Ms: 1200, samples: 180 },
+        { toolName: 'debugger_evaluate', p50Ms: 5, p90Ms: 12, p99Ms: 30, samples: 500 },
+      ],
+      trackedTools: 42,
+    });
+  });
+
+  it('omits toolLatency from /health when verbose is disabled', async () => {
+    const constantsMod = await import('@src/constants');
+    (constantsMod as any).MCP_HEALTH_VERBOSE = false;
+    // Even with a live tracker, non-verbose responses stay minimal (no toolLatency).
+    const ctx = createCtx({
+      toolLatencyTracker: {
+        getSummary: () => ({
+          top: [{ toolName: 't', p50Ms: 1, p90Ms: 1, p99Ms: 1, samples: 1 }],
+          trackedTools: 1,
+        }),
+      },
+    });
+    await startHttpTransport(ctx);
+
+    const server = mocks.httpServers[0];
+    const res = createRes();
+    server.requestHandlerForTest({ url: '/health', method: 'GET' }, res);
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      status: 'ok',
+      uptime: expect.any(Number),
+    });
+  });
+
   it('returns 404 for non-MCP paths', async () => {
     const ctx = createCtx();
     await startHttpTransport(ctx);
@@ -458,6 +558,24 @@ describe('MCPServer.transport', () => {
 
     expect(mocks.readBodyWithLimit).toHaveBeenCalledWith(req, res);
     expect(transport.handleRequest).toHaveBeenCalledWith(req, res, '{"ok":true}');
+  });
+
+  it('applies the configured body limit to chunked modern requests', async () => {
+    const ctx = createCtx({
+      config: {
+        server: { host: '127.0.0.1', port: 3000, http: { maxBodyBytes: 2048 } },
+      },
+    });
+    await startHttpTransport(ctx);
+    const server = mocks.httpServers[0];
+    const req = { url: '/mcp/v2', method: 'POST', headers: {} };
+    const res = createRes();
+    mocks.readBodyWithLimit.mockReturnValueOnce(new Promise(() => undefined));
+
+    server.requestHandlerForTest(req, res);
+    await Promise.resolve();
+
+    expect(mocks.readBodyWithLimit).toHaveBeenCalledWith(req, res, 2048);
   });
 
   it('returns 405 for unsupported HTTP methods', async () => {
@@ -742,6 +860,28 @@ describe('MCPServer.transport', () => {
       'activationController cleanup failed:',
       expect.any(Error),
     );
+  });
+
+  it('disposes browserSessionCoordinator via getDomainInstance on closeServer', async () => {
+    const ctx = createCtx();
+    const dispose = vi.fn();
+    ctx.getDomainInstance = vi.fn((key: string) =>
+      key === 'browserSessionCoordinator' ? { dispose } : undefined,
+    );
+
+    await closeServer(ctx);
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips browserSessionCoordinator dispose when the instance is absent', async () => {
+    const ctx = createCtx();
+    const getDomainInstance = vi.fn().mockReturnValue(undefined);
+    ctx.getDomainInstance = getDomainInstance;
+
+    await closeServer(ctx);
+
+    expect(getDomainInstance).toHaveBeenCalledWith('browserSessionCoordinator');
   });
 
   it('forces socket destruction after MCP_HTTP_FORCE_CLOSE_TIMEOUT_MS', async () => {

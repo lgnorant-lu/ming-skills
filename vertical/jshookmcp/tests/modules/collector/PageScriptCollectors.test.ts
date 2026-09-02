@@ -497,7 +497,10 @@ describe('PageScriptCollectors', () => {
     expect(installTracking).toBeTypeOf('function');
 
     class OriginalWorker {
-      constructor(readonly scriptURL: string | URL) {}
+      readonly scriptURL: string | URL;
+      constructor(scriptURL: string | URL) {
+        this.scriptURL = scriptURL;
+      }
     }
 
     const existingUrls = ['/existing-worker.js'];

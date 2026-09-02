@@ -10,8 +10,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const state = vi.hoisted(() => ({
   openProcessForMemory: vi.fn(),
   CloseHandle: vi.fn(),
-  ReadProcessMemory: vi.fn(),
-  WriteProcessMemory: vi.fn(),
+  ReadProcessMemoryAsync: vi.fn(),
+  WriteProcessMemoryAsync: vi.fn(),
   VirtualQueryEx: vi.fn(),
   VirtualProtectEx: vi.fn(),
   VirtualAllocEx: vi.fn(),
@@ -20,7 +20,7 @@ const state = vi.hoisted(() => ({
   GetModuleBaseName: vi.fn(),
   GetModuleInformation: vi.fn(),
   isWindows: vi.fn(() => true),
-  isKoffiAvailable: vi.fn(() => true),
+  isKoffiBindingUsable: vi.fn(() => true),
   PAGE: {
     NOACCESS: 0x01,
     READONLY: 0x02,
@@ -37,12 +37,18 @@ const state = vi.hoisted(() => ({
     RESERVE: 0x2000,
     RELEASE: 0x8000,
   },
+  MEM_TYPE: {
+    IMAGE: 0x1000000,
+    MAPPED: 0x40000,
+    PRIVATE: 0x20000,
+  },
 }));
 
 vi.mock('@native/Win32API', () => ({
   ...state,
   PAGE: state.PAGE,
   MEM: state.MEM,
+  MEM_TYPE: state.MEM_TYPE,
 }));
 
 // Use dynamic import since Win32MemoryProvider imports Win32API at top level
@@ -78,7 +84,7 @@ describe('Win32MemoryProvider', () => {
     });
 
     it('returns unavailable when koffi missing', async () => {
-      state.isKoffiAvailable.mockReturnValue(false);
+      state.isKoffiBindingUsable.mockReturnValue(false);
       const result = await provider.checkAvailability();
       expect(result.available).toBe(false);
       expect(result.reason).toContain('koffi');
@@ -101,24 +107,38 @@ describe('Win32MemoryProvider', () => {
   });
 
   describe('readMemory', () => {
-    it('reads memory and returns MemoryReadResult', () => {
+    it('returns a Promise resolving to MemoryReadResult', async () => {
       const handle = provider.openProcess(1, false);
       const buf = Buffer.from([0xaa, 0xbb]);
-      state.ReadProcessMemory.mockReturnValue(buf);
+      state.ReadProcessMemoryAsync.mockResolvedValue(buf);
 
-      const result = provider.readMemory(handle, 0x1000n, 2);
+      const pending = provider.readMemory(handle, 0x1000n, 2);
+      // a4-01: readMemory must offload to the async FFI path, not return synchronously.
+      expect(pending).toBeInstanceOf(Promise);
+
+      const result = await pending;
       expect(result.data).toEqual(buf);
       expect(result.bytesRead).toBe(2);
-      expect(state.ReadProcessMemory).toHaveBeenCalledWith(0x1234n, 0x1000n, 2);
+      expect(state.ReadProcessMemoryAsync).toHaveBeenCalledWith(0x1234n, 0x1000n, 2);
+    });
+
+    it('rejects when ReadProcessMemoryAsync rejects', async () => {
+      const handle = provider.openProcess(1, false);
+      state.ReadProcessMemoryAsync.mockRejectedValue(new Error('RPM failed'));
+
+      await expect(provider.readMemory(handle, 0x1000n, 2)).rejects.toThrow('RPM failed');
     });
   });
 
   describe('writeMemory', () => {
-    it('writes memory and returns bytesWritten', () => {
+    it('returns a Promise resolving to bytesWritten', async () => {
       const handle = provider.openProcess(1, true);
-      state.WriteProcessMemory.mockReturnValue(4);
+      state.WriteProcessMemoryAsync.mockResolvedValue(4);
 
-      const result = provider.writeMemory(handle, 0x2000n, Buffer.from([1, 2, 3, 4]));
+      const pending = provider.writeMemory(handle, 0x2000n, Buffer.from([1, 2, 3, 4]));
+      expect(pending).toBeInstanceOf(Promise);
+
+      const result = await pending;
       expect(result.bytesWritten).toBe(4);
     });
   });
@@ -329,14 +349,14 @@ describe('Win32MemoryProvider', () => {
   });
 
   describe('handle validation', () => {
-    it('throws for invalid handle on readMemory', () => {
+    it('rejects for invalid handle on readMemory', async () => {
       const fakeHandle = { pid: 99, writeAccess: false };
-      expect(() => provider.readMemory(fakeHandle, 0n, 1)).toThrow('Invalid ProcessHandle');
+      await expect(provider.readMemory(fakeHandle, 0n, 1)).rejects.toThrow('Invalid ProcessHandle');
     });
 
-    it('throws for invalid handle on writeMemory', () => {
+    it('rejects for invalid handle on writeMemory', async () => {
       const fakeHandle = { pid: 99, writeAccess: true };
-      expect(() => provider.writeMemory(fakeHandle, 0n, Buffer.alloc(1))).toThrow(
+      await expect(provider.writeMemory(fakeHandle, 0n, Buffer.alloc(1))).rejects.toThrow(
         'Invalid ProcessHandle',
       );
     });

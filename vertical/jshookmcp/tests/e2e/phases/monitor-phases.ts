@@ -63,7 +63,7 @@ export const monitorPhases: Phase[] = [
   {
     name: 'Performance',
     setup: ['page_navigate'],
-    tools: ['performance_get_metrics', 'js_heap_search', 'performance_take_heap_snapshot'],
+    tools: ['performance_get_metrics', 'js_heap_search', 'v8_heap_snapshot_capture'],
   },
   { name: 'Network Teardown', setup: [], tools: ['network_export_har', 'network_disable'] },
   {

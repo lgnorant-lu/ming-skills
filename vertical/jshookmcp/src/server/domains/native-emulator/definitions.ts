@@ -11,7 +11,7 @@
  * project-wide convention used by binary-instrument; byte payloads to/from
  * JNI byte arrays and raw guest memory cross the tool boundary as base64.
  */
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import { tool } from '@server/registry/tool-builder';
 
 export const nativeEmulatorTools: Tool[] = [
@@ -162,8 +162,7 @@ export const nativeEmulatorTools: Tool[] = [
       )
       .number(
         'maxSteps',
-        'Max instruction steps before aborting (default: 1M, 0=unlimited). Use for long-running bytecode loops.',
-        { default: 0 },
+        'Max instruction steps before aborting (default: 1M). Use for long-running bytecode loops.',
       )
       .required('sessionId', 'symbol'),
   ),
@@ -176,6 +175,10 @@ export const nativeEmulatorTools: Tool[] = [
       .string('symbol', 'Exported `Java_*` JNI function name')
       .array('javaArgs', { type: 'number' }, 'Java arguments (ints or jobject handles) after thiz')
       .number('thiz', 'Receiver handle (jobject/jclass); 0 for static/none', { default: 0 })
+      .number(
+        'maxSteps',
+        'Max instruction steps before aborting (default: 1M). Values above the server cap are clamped and the response carries clamped:true.',
+      )
       .required('sessionId', 'symbol'),
   ),
   tool('nemu_call_address', (t) =>
@@ -187,7 +190,7 @@ export const nativeEmulatorTools: Tool[] = [
       .number('address', 'Guest address of the function to call')
       .array('args', { type: 'number' }, 'Integer arguments passed in x0..x7 (default: none)')
       .boolean('injectJni', 'Prepend guest JNIEnv* + thiz=0 as x0/x1 (default: false)')
-      .number('maxSteps', 'Max instruction steps before aborting (default: 1M, 0=unlimited)')
+      .number('maxSteps', 'Max instruction steps before aborting (default: 1M)')
       .required('sessionId', 'address'),
   ),
   tool('nemu_setup_java_mock', (t) =>
@@ -292,15 +295,24 @@ export const nativeEmulatorTools: Tool[] = [
       )
       .enum(
         'mode',
-        ['full', 'calls', 'branches', 'memory'],
-        'Trace filter mode. full=all instructions (default). calls=BLR/BR only. branches=all conditional + unconditional branches (B, B.cond, CBZ, CBNZ, TBZ, TBNZ, RET, BR, BLR). memory=LDR/STR only.',
+        ['full', 'profile', 'calls', 'branches', 'memory'],
+        'Trace filter mode. full=all instructions (default). profile=aggregate per-pc instruction-frequency statistics + a BL/BLR call tree instead of per-step rows (uses a much larger instruction budget — see maxSteps). calls=BLR/BR only. branches=all conditional + unconditional branches (B, B.cond, CBZ, CBNZ, TBZ, TBNZ, RET, BR, BLR). memory=LDR/STR only.',
         { default: 'full' },
+      )
+      .number(
+        'topN',
+        'Profile mode only: number of hottest instructions to return, by execution count (default: 20)',
+        { default: 20 },
       )
       .boolean(
         'injectJni',
         'Auto-detect JNI signature and inject the guest JNIEnv* as x0 + synthetic thiz=0 as x1 (default: auto, matching nemu_call_symbol). Set false to force raw args; set true to force JNI injection for a symbol that the auto-detector would miss.',
       )
-      .number('maxSteps', 'Maximum trace events to return (default: 1000)', { default: 1000 })
+      .number(
+        'maxSteps',
+        'Maximum trace events to return (default: 1000; profile mode default and cap: 500,000 — frequency statistics need no per-step rows)',
+        { default: 1000 },
+      )
       .boolean(
         'persistArtifact',
         'When true, write the full trace JSON to artifacts/traces and return traceArtifact metadata',
@@ -836,5 +848,55 @@ export const nativeEmulatorTools: Tool[] = [
         { default: true },
       )
       .required('sessionId', 'address', 'key', 'length'),
+  ),
+  // ── IPC Relay ──────────────────────────────────────────────────
+  tool('nemu_relay', (t) =>
+    t
+      .desc(
+        'Connect to a remote native-emulator session via IPC relay. ' +
+          'Proxies nemu operations through a named pipe (Windows) or Unix domain socket (Linux/macOS) ' +
+          'with JSON-RPC over length-prefixed frames. ' +
+          'Use to drive ARM64 nemu sessions on a Linux host from a Windows MCP server (or vice versa).',
+      )
+      .enum(
+        'action',
+        ['connect', 'disconnect', 'status'],
+        'connect=establish IPC link, disconnect=tear down, status=query connection state',
+      )
+      .string('sessionId', 'Remote session ID to connect/disconnect/query')
+      .string('host', 'Remote host for TCP fallback (default: localhost)')
+      .number('port', 'TCP port for fallback (default: 17171)')
+      .number('connectTimeoutMs', 'Connection timeout in ms (default: 5000)')
+      .number('maxMessageBytes', 'Max inbound message bytes (default: 1 MiB)')
+      .required('action'),
+  ),
+  // ── GDBServer ───────────────────────────────────────────────
+  tool('nemu_gdbserver', (t) =>
+    t
+      .desc(
+        'GDB Remote Serial Protocol (RSP) TCP server. ' +
+          'Starts a real TCP server on host:port that GDB clients can connect to. ' +
+          'Provides full register read/write, memory read/write, step, continue, ' +
+          'software breakpoints (Z0/z0), vCont extended step/continue, qXfer target ' +
+          'description, thread listing, and feature negotiation (qSupported). ' +
+          'The server dispatches commands to the nemu emulator session in real-time. ' +
+          'Packet format: $data#checksum (RFC 5.1 GDB Remote Serial Protocol). ' +
+          'Actions: start (launch TCP server), stop (shut down), status (server + clients). ' +
+          'Note: step/continue are simulated (PC += 4, immediate SIGTRAP); ' +
+          'real execution control requires CpuEngine.runUntilBreakpoint() which is not yet exposed.',
+      )
+      .enum(
+        'action',
+        ['start', 'stop', 'status'],
+        'start=launch TCP GDB server, stop=shut down, status=server info + connected clients',
+      )
+      .string('sessionId', 'Session id with a loaded library (required for start)')
+      .string(
+        'host',
+        'TCP host to listen on (default: 127.0.0.1). Change to 0.0.0.0 only for remote debugging on trusted networks.',
+        { default: '127.0.0.1' },
+      )
+      .number('port', 'TCP port to listen on (default: 1234)', { default: 1234 })
+      .required('action'),
   ),
 ];

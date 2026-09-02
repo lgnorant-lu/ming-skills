@@ -123,6 +123,7 @@ export interface ObjectPropertyInfo {
 }
 
 export class DebuggerManager {
+  private collector: CodeCollector;
   private cdpSession: CDPSession | null = null;
   private enabled = false;
   private initPromise?: Promise<void>;
@@ -148,7 +149,8 @@ export class DebuggerManager {
 
   private sessionManager: DebuggerSessionManager;
 
-  constructor(private collector: CodeCollector) {
+  constructor(collector: CodeCollector) {
+    this.collector = collector;
     this.sessionManager = new DebuggerSessionManager(this);
     this.touchInternalStateForTypeCheck();
   }
@@ -263,6 +265,7 @@ export class DebuggerManager {
       await this.init();
       return;
     }
+    const probed = this.cdpSession;
 
     // Zombie detection: verify the CDP session actually responds
     try {
@@ -275,6 +278,11 @@ export class DebuggerManager {
       return; // Session is healthy
     } catch {
       logger.warn('Debugger CDP session unresponsive (zombie), reinitializing...');
+      // A concurrent caller may already have replaced the session we probed —
+      // only wipe what we probed, or we'd kill the freshly-rebuilt session.
+      if (this.cdpSession !== probed) {
+        return;
+      }
       this.enabled = false;
       this.cdpSession = null;
       this.advancedFeatureSession = null;
@@ -569,6 +577,15 @@ export class DebuggerManager {
   }
 
   async close(): Promise<void> {
+    // Drain any in-flight init before tearing down, or its completion would
+    // re-enable a session after close() has already returned.
+    if (this.initPromise) {
+      try {
+        await this.initPromise;
+      } catch {
+        // init failure is fine — nothing to tear down.
+      }
+    }
     this.initPromise = undefined;
     if (this.enabled) {
       await this.disable();

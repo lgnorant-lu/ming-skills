@@ -265,4 +265,62 @@ describe('ScanHandlers — AOB Scan', () => {
       expect(parsed.error).toContain('Invalid AOB pattern');
     });
   });
+
+  describe('AOB operators (CE 7.6 parity)', () => {
+    it('13. greater-than operator >XX converts to wildcard for native scan', async () => {
+      mockscanner.aobScan = vi.fn().mockResolvedValue({
+        matches: ['0x7FF612340010'],
+        totalMatches: 1,
+        elapsed: '3ms',
+      });
+
+      const response = await handlers.handleAobScan({
+        pid: 1234,
+        pattern: '48 8B >40 <80 00 00',
+      });
+      const parsed = parseResponse(response);
+
+      expect(parsed.success).toBe(true);
+      // Native pattern should have operators replaced with ??
+      expect(mockscanner.aobScan).toHaveBeenCalledWith(
+        1234,
+        '48 8B ?? ?? 00 00',
+        expect.any(Object),
+      );
+    });
+
+    it('14. range operator XX-YY converts to wildcard and passes validation', async () => {
+      mockscanner.aobScan = vi.fn().mockResolvedValue({
+        matches: ['0x7FF612340050'],
+        totalMatches: 1,
+        elapsed: '2ms',
+      });
+
+      const response = await handlers.handleAobScan({
+        pid: 1234,
+        pattern: 'CC 40-5F 90',
+      });
+      const parsed = parseResponse(response);
+
+      expect(parsed.success).toBe(true);
+      expect(mockscanner.aobScan).toHaveBeenCalledWith(1234, 'CC ?? 90', expect.any(Object));
+    });
+
+    it('15. operator pattern with operatorsUsed flag in response', async () => {
+      mockscanner.aobScan = vi.fn().mockResolvedValue({
+        matches: ['0x7FF612340090'],
+        totalMatches: 1,
+        elapsed: '1ms',
+      });
+
+      const response = await handlers.handleAobScan({
+        pid: 1234,
+        pattern: '90 >10 FF',
+      });
+      const parsed = parseResponse(response);
+
+      expect(parsed.success).toBe(true);
+      expect(parsed.operatorsUsed).toBe(true);
+    });
+  });
 });

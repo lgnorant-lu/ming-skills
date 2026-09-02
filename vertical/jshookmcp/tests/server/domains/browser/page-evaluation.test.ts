@@ -15,6 +15,7 @@ vi.mock('@utils/outputPaths', () => ({
   })),
 }));
 
+import { PAGE_EVAL_MAX_SIZE_BYTES } from '@src/constants/browser';
 import { PageEvaluationHandlers } from '@server/domains/browser/handlers/page-evaluation';
 
 interface PageControllerMock {
@@ -106,7 +107,10 @@ describe('PageEvaluationHandlers – handlePageEvaluate', () => {
   it('uses detailedDataManager.smartHandle with autoSummarize=true (default)', async () => {
     pageController.evaluate.mockResolvedValueOnce({ big: 'data' });
     await handlers.handlePageEvaluate({ code: '1+1' });
-    expect(detailedDataManager.smartHandle).toHaveBeenCalledWith({ big: 'data' }, 51200);
+    expect(detailedDataManager.smartHandle).toHaveBeenCalledWith(
+      { big: 'data' },
+      PAGE_EVAL_MAX_SIZE_BYTES,
+    );
   });
 
   it('skips smartHandle when autoSummarize=false', async () => {

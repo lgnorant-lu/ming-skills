@@ -178,6 +178,13 @@ export interface TraceDBOptions {
   dbPath: string;
   /** Number of events to buffer before flushing to disk (default: 200) */
   batchSize?: number;
+  /**
+   * Per-table cap on append-only rows (events, memory deltas, chunks, samples,
+   * console logs, exceptions, heap snapshots). When a table exceeds this many
+   * rows the oldest are pruned, bounding disk growth of long trace sessions
+   * (RAM audit #5). Default: 100000.
+   */
+  maxRows?: number;
 }
 
 /** Result from a SQL query against the trace database. */

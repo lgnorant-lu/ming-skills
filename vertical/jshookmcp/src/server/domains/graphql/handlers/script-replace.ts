@@ -26,9 +26,12 @@ interface ScriptReplaceSessionState {
 }
 
 export class ScriptReplaceHandlers {
+  private collector: CodeCollector;
   private readonly states = new Map<string, ScriptReplaceSessionState>();
 
-  constructor(private collector: CodeCollector) {}
+  constructor(collector: CodeCollector) {
+    this.collector = collector;
+  }
 
   private getSessionId(): string {
     const sessionId = getToolRequestContext()?.sessionId;

@@ -47,11 +47,13 @@ describe('SearchQualityTracker', () => {
       expect(records[0]!.usedToolRank).toBe(2);
     });
 
-    it('leaves usedToolRank undefined when tool not in returned list', () => {
+    it('does not record usage when tool is not in returned list', () => {
+      // Must match associateLastSearch semantics — recording usedTool without a
+      // rank would dilute avgUsedRank/MRR in computeMetrics.
       const id = tracker.recordSearch('hook fetch', ['fetch_hook'], [0.9], 5);
       tracker.recordToolUsed(id, 'unknown_tool');
       const records = tracker.getRecentRecords();
-      expect(records[0]!.usedTool).toBe('unknown_tool');
+      expect(records[0]!.usedTool).toBeUndefined();
       expect(records[0]!.usedToolRank).toBeUndefined();
     });
 
@@ -140,6 +142,22 @@ describe('SearchQualityTracker', () => {
       const metrics = tracker.computeMetrics();
       // MRR = 1 / 1 = 1 (only records with usedTool contribute to numerator and denominator)
       expect(metrics.mrr).toBeCloseTo(1.0, 10);
+    });
+
+    it('does not dilute rank metrics with out-of-result usage', () => {
+      // recordToolUsed on a tool absent from returnedTools must not count
+      // toward toolUsedRate or the avgUsedRank/MRR denominator.
+      const id1 = tracker.recordSearch('q1', ['a', 'b'], [0.9, 0.8], 5);
+      tracker.recordToolUsed(id1, 'a'); // rank 1, reciprocal = 1
+      const id2 = tracker.recordSearch('q2', ['c'], [0.7], 3);
+      tracker.recordToolUsed(id2, 'unknown_tool'); // not in results — must be ignored
+
+      const metrics = tracker.computeMetrics();
+      expect(metrics.totalQueries).toBe(2);
+      expect(metrics.toolUsedRate).toBeCloseTo(0.5, 10);
+      expect(metrics.avgUsedRank).toBeCloseTo(1, 10);
+      expect(metrics.mrr).toBeCloseTo(1.0, 10);
+      expect(metrics.topKDistribution['1']).toBe(1);
     });
 
     it('computes correct average latency', () => {

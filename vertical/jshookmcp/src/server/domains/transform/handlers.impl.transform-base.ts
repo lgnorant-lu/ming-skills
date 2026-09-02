@@ -81,9 +81,12 @@ export const DEAD_CODE_IF_FALSE = /if\s*\(\s*(?:false|0|!0\s*===\s*!1)\s*\)\s*\{
 
 const WORKER_TIMEOUT_MS = TRANSFORM_WORKER_TIMEOUT_MS;
 
-export const enum TransformLimit {
-  MAX_LCS_CELLS = 250000,
-}
+export const TransformLimit = {
+  MAX_LCS_CELLS: 250000,
+} as const;
+
+/** Transform limit value */
+export type TransformLimit = (typeof TransformLimit)[keyof typeof TransformLimit];
 
 export const CRYPTO_KEYWORDS = [
   'cryptojs',

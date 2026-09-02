@@ -64,7 +64,6 @@ def main():
         #page.wait(100)
 
         collector = page.network.add_data_collector(
-            ["responseCompleted"],
             data_types=["response"],
         )
         page.listen.start(JOBLIST_API, method="POST")

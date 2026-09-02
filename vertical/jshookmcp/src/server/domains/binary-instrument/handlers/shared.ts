@@ -20,6 +20,7 @@ import type { AndroidRuntimeDumpSessionManager } from '@modules/binary-instrumen
 import type { MCPServerContext } from '@server/MCPServer.context';
 import type { CapabilityStatus } from '@server/domains/shared/capabilities';
 import { capabilityFailure } from '@server/domains/shared/capabilities';
+import { readEnvString } from '@src/config/environment';
 
 const UNIDBG_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 
@@ -90,11 +91,25 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+/**
+ * Duck-type a `Map`: a Map created in ANOTHER JS realm (e.g. inside a
+ * `node:vm` context) fails `instanceof Map` yet is fully usable — `has`/`get`
+ * work across realms. Accept any object that looks like a Map.
+ */
+function isMapLike(value: unknown): value is Map<unknown, unknown> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Map<unknown, unknown>).has === 'function' &&
+    typeof (value as Map<unknown, unknown>).get === 'function'
+  );
+}
+
 export function isServerContext(value: unknown): value is MCPServerContext {
   return (
     isRecord(value) &&
-    value['extensionPluginsById'] instanceof Map &&
-    value['extensionPluginRuntimeById'] instanceof Map
+    isMapLike(value['extensionPluginsById']) &&
+    isMapLike(value['extensionPluginRuntimeById'])
   );
 }
 
@@ -104,7 +119,7 @@ export function hasInstalledLegacyPlugin(
 ): boolean | undefined {
   if (!context) return undefined;
   const installed = context.extensionPluginsById;
-  if (!(installed instanceof Map)) return undefined;
+  if (!isMapLike(installed)) return undefined;
   return installed.has(pluginId);
 }
 
@@ -209,7 +224,7 @@ export async function getUnidbgAvailability(): Promise<{
   command: string;
   jarPath: string;
 }> {
-  const jarPath = process.env['UNIDBG_JAR'] ?? '';
+  const jarPath = readEnvString('UNIDBG_JAR', '', { trim: true });
   if (jarPath.length === 0) {
     return {
       available: false,

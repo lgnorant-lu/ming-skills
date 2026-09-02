@@ -24,6 +24,7 @@ import {
   QNAN_F64,
   FPCR_RMODE,
   FPCR_FZ,
+  FPCR_TRAP_MASK_FPSR_ALIGNED,
   FPCR_IOE,
   FPCR_DZE,
   FPCR_OFE,
@@ -239,7 +240,7 @@ export class FpContext {
 
     if (flags !== 0) {
       this.fpsr |= flags;
-      const trapMask = (this.fpcr >> 8) & 0x3f;
+      const trapMask = (this.fpcr >> 8) & FPCR_TRAP_MASK_FPSR_ALIGNED;
       if (flags & trapMask) {
         if (flags & (1 << FPSR_IOC)) throw new Error('FP Invalid Operation');
         if (flags & (1 << FPSR_IDC)) throw new Error('FP Input Denormal');
@@ -302,7 +303,7 @@ export class FpContext {
 
     if (flags !== 0) {
       this.fpsr |= flags;
-      const trapMask = (this.fpcr >> 8) & 0x3f;
+      const trapMask = (this.fpcr >> 8) & FPCR_TRAP_MASK_FPSR_ALIGNED;
       if (flags & trapMask) {
         if (flags & (1 << FPSR_IOC)) throw new Error('FP Invalid Operation');
         if (flags & (1 << FPSR_IDC)) throw new Error('FP Input Denormal');
@@ -392,7 +393,7 @@ export class FpContext {
 
     if (flags !== 0) {
       this.fpsr |= flags;
-      const trapMask = (this.fpcr >> 8) & 0x3f;
+      const trapMask = (this.fpcr >> 8) & FPCR_TRAP_MASK_FPSR_ALIGNED;
       if (flags & trapMask) {
         if (flags & (1 << FPSR_IOC)) throw new Error('FP Invalid Operation');
         if (flags & (1 << FPSR_OFC)) throw new Error('FP Overflow');
@@ -505,7 +506,7 @@ export class FpContext {
 
     if (flags !== 0) {
       this.fpsr |= flags;
-      const trapMask = (this.fpcr >> 8) & 0x3f;
+      const trapMask = (this.fpcr >> 8) & FPCR_TRAP_MASK_FPSR_ALIGNED;
       if (flags & trapMask) {
         if (flags & (1 << FPSR_IOC)) throw new Error('FP Invalid Operation');
         if (flags & (1 << FPSR_DZC)) throw new Error('FP Divide by Zero');
@@ -549,7 +550,7 @@ export class FpContext {
       const minNormal = is32bit ? FLOAT32_MIN_NORMAL : FLOAT64_MIN_NORMAL;
       if (a !== 0 && Math.abs(a) < minNormal && Number.isFinite(a)) {
         a2 = Object.is(a, -0) || a < 0 ? -0 : 0;
-        flags |= 32; // IDC
+        flags |= 1 << FPSR_IDC;
       }
     }
 
@@ -579,7 +580,7 @@ export class FpContext {
 
     if (flags !== 0) {
       this.fpsr |= flags;
-      const trapMask = (this.fpcr >> 8) & 0x3f;
+      const trapMask = (this.fpcr >> 8) & FPCR_TRAP_MASK_FPSR_ALIGNED;
       if (flags & trapMask) {
         if (flags & (1 << FPSR_IOC)) throw new Error('FP Invalid Operation');
         if (flags & (1 << FPSR_IXC)) throw new Error('FP Inexact');

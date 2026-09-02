@@ -91,7 +91,8 @@ export async function handlePausedCore(ctx: unknown, params: PausedEventParams):
   if (
     params.hitBreakpoints &&
     params.hitBreakpoints.length > 0 &&
-    coreCtx.breakpointHitCallbacks.size > 0
+    coreCtx.breakpointHitCallbacks.size > 0 &&
+    params.callFrames.length > 0
   ) {
     const firstHitBreakpointId = params.hitBreakpoints[0]!;
     const topFrame = params.callFrames[0]!;

@@ -43,36 +43,58 @@ def _make_tar_xz(path, entries, symlink=None):
 
 
 @pytest.mark.parametrize(
-    ("platform_key", "asset", "install_subdir"),
+    ("platform_key", "release", "version", "asset", "install_subdir"),
     [
         (
             "win64",
-            "firefox-155.0a1.en-US.win64-20260803.zip",
-            "firefox-155.0a1-v1.2.58-win64",
+            "v1.2.66",
+            "155.0",
+            "firefox-155.0.en-US.win64-20260829.zip",
+            "firefox-155.0-v1.2.66-win64",
         ),
         (
             "linux-x86_64",
-            "firefox-155.0a1.en-US.linux-x86_64.tar.xz",
-            "firefox-155.0a1-v1.2.58-linux-x86_64",
+            "v1.2.66",
+            "155.0",
+            "firefox-155.0.en-US.linux-x86_64.tar.xz",
+            "firefox-155.0-v1.2.66-linux-x86_64",
         ),
     ],
 )
 def test_runtime_manifest_targets_latest_ruyipage_release(
     platform_key,
+    release,
+    version,
     asset,
     install_subdir,
 ):
     info = RUNTIMES[platform_key]
 
-    assert RELEASE_TAG == "v1.2.58"
-    assert FIREFOX_VERSION == "155.0a1"
-    assert info["release"] == RELEASE_TAG
-    assert info["version"] == FIREFOX_VERSION
+    assert RELEASE_TAG == "v1.2.66"
+    assert FIREFOX_VERSION == "155.0"
+    assert info["release"] == release
+    assert info["version"] == version
     assert info["asset"] == asset
     assert info["install_subdir"] == install_subdir
     assert runtime_url(info) == (
         "https://github.com/LoseNine/ruyipage/releases/download/"
-        "v1.2.58/{}".format(asset)
+        "{}/{}".format(release, asset)
+    )
+
+
+def test_runtime_url_follows_each_platform_release():
+    """平台构建进度不同步时，URL 必须跟随该平台自己的 release tag。"""
+    lagging = dict(RUNTIMES["linux-x86_64"], release="v1.2.58")
+
+    assert "/download/v1.2.66/" in runtime_url(RUNTIMES["win64"])
+    assert "/download/v1.2.58/" in runtime_url(lagging)
+
+
+def test_runtime_url_honours_explicit_base_url_override():
+    info = RUNTIMES["win64"]
+
+    assert runtime_url(info, base_url="https://mirror.test/files/") == (
+        "https://mirror.test/files/{}".format(info["asset"])
     )
 
 

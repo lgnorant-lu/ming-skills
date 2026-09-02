@@ -12,6 +12,7 @@ import {
   STREAMING_QUERY_LIMIT_MAX,
   WS_PAYLOAD_PREVIEW_LIMIT,
   WS_PAYLOAD_SAMPLE_LIMIT,
+  WS_PAYLOAD_MAX_BYTES,
 } from '@src/constants/streaming';
 import type {
   StreamingSharedState,
@@ -23,13 +24,13 @@ import type {
   CdpSessionLike,
 } from './shared';
 import {
-  asJson,
   parseBooleanArg,
   parseNumberArg,
   parseOptionalStringArg,
   parseWsDirection,
   compileRegex,
 } from './shared';
+import { asJson } from './shared';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -55,6 +56,12 @@ type ExportFormat = 'json' | 'ndjson';
 
 const parseExportFormat = (value: unknown): ExportFormat =>
   value === 'ndjson' ? 'ndjson' : 'json';
+
+/** Truncate a UTF-8 string to at most `maxBytes` bytes (may split a multi-byte char at the boundary). */
+function truncateUtf8ToBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  return Buffer.from(text, 'utf8').subarray(0, maxBytes).toString('utf8');
+}
 
 /**
  * Runs in the browser. Wraps window.WebSocket so each new WebSocket instance is
@@ -123,7 +130,10 @@ function wsInstanceInjectionFn(): unknown {
 }
 
 export class WsHandlers {
-  constructor(private s: StreamingSharedState) {}
+  private s: StreamingSharedState;
+  constructor(s: StreamingSharedState) {
+    this.s = s;
+  }
 
   private async teardownWsSession(): Promise<void> {
     if (this.s.wsSession && this.s.wsListeners) {
@@ -209,6 +219,16 @@ export class WsHandlers {
 
     const timestamp = getNumberField(params, 'timestamp') ?? Date.now() / 1000;
 
+    // Retain at most WS_PAYLOAD_MAX_BYTES of the full payload per frame; an
+    // oversized frame keeps only the truncated payload + full payloadLength +
+    // a truncated marker so a single multi-MB frame cannot blow out host memory.
+    let payload = payloadData;
+    let payloadTruncated = false;
+    if (Buffer.byteLength(payloadData, 'utf8') > WS_PAYLOAD_MAX_BYTES) {
+      payload = truncateUtf8ToBytes(payloadData, WS_PAYLOAD_MAX_BYTES);
+      payloadTruncated = true;
+    }
+
     const frame: WsFrameRecord = {
       requestId,
       timestamp,
@@ -217,14 +237,44 @@ export class WsHandlers {
       payloadLength: payloadData.length,
       payloadPreview,
       payloadSample,
-      payload: payloadData,
+      payload,
+      payloadTruncated,
       isBinary: opcode === 2,
     };
 
     this.appendWsFrame(requestId, frame);
   }
 
+  /**
+   * Evict one frame from the shadow accounting (per-request bucket +
+   * connection frame count). Kept in lockstep with the ring-buffer eviction
+   * so the two views never diverge.
+   */
+  private evictWsFrame(entry: WsFrameOrderEntry): void {
+    const bucket = this.s.wsFramesByRequest.get(entry.requestId);
+    if (bucket && bucket.length > 0) {
+      bucket.shift();
+      if (bucket.length === 0) {
+        this.s.wsFramesByRequest.delete(entry.requestId);
+      } else {
+        this.s.wsFramesByRequest.set(entry.requestId, bucket);
+      }
+    }
+    const connection = this.s.wsConnections.get(entry.requestId);
+    if (connection) connection.framesCount = Math.max(0, connection.framesCount - 1);
+  }
+
   private appendWsFrame(requestId: string, frame: WsFrameRecord): void {
+    // The ring buffer OVERWRITES its oldest slot when full (its length never
+    // exceeds maxFrames), so `length > maxFrames` can never trigger. Evict
+    // the displaced frame's shadow accounting BEFORE pushing, or the
+    // per-request buckets would grow unbounded and frame counts accumulate
+    // past the cap.
+    if (this.s.wsFrameOrder.length >= this.s.wsConfig.maxFrames) {
+      const oldest = this.s.wsFrameOrder.shift();
+      if (oldest) this.evictWsFrame(oldest);
+    }
+
     const list = this.s.wsFramesByRequest.get(requestId) ?? [];
     list.push(frame);
     this.s.wsFramesByRequest.set(requestId, list);
@@ -236,25 +286,6 @@ export class WsHandlers {
     }
 
     this.s.wsFrameOrder.push({ requestId, frame });
-    this.enforceWsFrameLimit();
-  }
-
-  private enforceWsFrameLimit(): void {
-    while (this.s.wsFrameOrder.length > this.s.wsConfig.maxFrames) {
-      const oldest = this.s.wsFrameOrder.shift();
-      if (!oldest) break;
-      const bucket = this.s.wsFramesByRequest.get(oldest.requestId);
-      if (bucket && bucket.length > 0) {
-        bucket.shift();
-        if (bucket.length === 0) {
-          this.s.wsFramesByRequest.delete(oldest.requestId);
-        } else {
-          this.s.wsFramesByRequest.set(oldest.requestId, bucket);
-        }
-      }
-      const connection = this.s.wsConnections.get(oldest.requestId);
-      if (connection) connection.framesCount = Math.max(0, connection.framesCount - 1);
-    }
   }
 
   private getWsFrameStats(): { total: number; sent: number; received: number } {
@@ -323,7 +354,10 @@ export class WsHandlers {
     if (urlFilterRaw) {
       const compiled = compileRegex(urlFilterRaw);
       if (compiled.error)
-        return asJson({ success: false, error: `Invalid urlFilter regex: ${compiled.error}` });
+        return asJson({
+          success: false,
+          error: `Invalid urlFilter regex: ${compiled.error}`,
+        });
       urlFilter = compiled.regex;
     }
 
@@ -467,6 +501,7 @@ export class WsHandlers {
         payloadPreview: frame.payloadPreview,
         isBinary: frame.isBinary,
       };
+      if (frame.payloadTruncated) item.payloadTruncated = true;
       if (fullPayload) item.payload = frame.payload ?? frame.payloadSample;
       return item;
     });
@@ -537,6 +572,7 @@ export class WsHandlers {
         connectionStatus: conn?.status ?? null,
         handshakeStatus: conn?.handshakeStatus ?? null,
       };
+      if (frame.payloadTruncated) record.payloadTruncated = true;
       if (includePayload) record.payload = frame.payload ?? frame.payloadSample;
       return record;
     });

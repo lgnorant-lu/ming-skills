@@ -802,7 +802,6 @@ describe('canvas adapter registry', () => {
     expect(typeof adapter.detect).toBe('function');
     expect(typeof adapter.dumpScene).toBe('function');
     expect(typeof adapter.pickAt).toBe('function');
-    expect(typeof adapter.traceClick).toBe('function');
   });
 });
 

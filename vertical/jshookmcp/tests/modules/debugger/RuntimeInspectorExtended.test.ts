@@ -213,6 +213,31 @@ describe('RuntimeInspector - disable and close', () => {
 
     expect(loggerState.info).toHaveBeenCalledWith('Runtime inspector closed');
   });
+
+  it('close() drains an in-flight init so it cannot re-enable a torn-down inspector', async () => {
+    const { inspector, session, page } = createInspector();
+    // Slow CDP session creation: init() hangs until the promise resolves.
+    let releaseSession!: () => void;
+    page.createCDPSession.mockReturnValue(
+      new Promise((resolve) => {
+        releaseSession = () => resolve(session);
+      }),
+    );
+
+    const initPromise = inspector.init();
+    // Let init() reach the awaiting point, then close() while it is in flight.
+    await Promise.resolve();
+    const closePromise = inspector.close();
+    await Promise.resolve();
+
+    // Init completes after close() started — close() must have waited for it
+    // and then torn the just-enabled session down (Runtime.disable + detach).
+    releaseSession();
+    await closePromise;
+    await initPromise;
+    expect(session.send).toHaveBeenCalledWith('Runtime.disable');
+    expect(session.detach).toHaveBeenCalled();
+  });
 });
 
 describe('RuntimeInspector - getCallStack', () => {

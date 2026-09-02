@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import type { SearchConfig } from '@internal-types/config';
 
 const state = vi.hoisted(() => ({
@@ -61,6 +61,9 @@ vi.mock('@src/constants', () => ({
   SEARCH_RRF_RESCALE_FACTOR: 1000,
   SEARCH_RRF_BM25_BLEND: 0.5,
   SEARCH_SYNONYM_EXPANSION_LIMIT: 3,
+  SEARCH_NAME_TOKEN_WEIGHT: 3,
+  SEARCH_DOMAIN_TOKEN_WEIGHT: 2,
+  SEARCH_DESC_TOKEN_WEIGHT: 1,
   SEARCH_PARAM_TOKEN_WEIGHT: 1.5,
   SEARCH_BM25_K1: 1.5,
   SEARCH_BM25_B: 0.75,
@@ -350,6 +353,22 @@ describe('search/ToolSearchEngineImpl', () => {
     const results = await engine.search('target url', 5);
 
     expect(results[0]?.name).toBe('page_fetch');
+  });
+
+  it('weights name tokens above description tokens for the same term', async () => {
+    const { ToolSearchEngine } = await import('@server/search/ToolSearchEngineImpl');
+    const engine = new ToolSearchEngine([
+      makeTool('alpha_runner', 'Alpha runner utility'),
+      makeTool('beta_tool', 'Manages alpha workflows'),
+    ]);
+
+    const results = await engine.search('alpha', 5);
+
+    // Default field weights (SEARCH_NAME_TOKEN_WEIGHT 3 > SEARCH_DESC_TOKEN_WEIGHT 1)
+    // must keep the name hit ahead of the description hit.
+    expect(results[0]?.name).toBe('alpha_runner');
+    expect(results[1]?.name).toBe('beta_tool');
+    expect(results[0]!.score).toBeGreaterThan(results[1]!.score);
   });
 
   it('uses vector feedback, cache invalidation, and lazy embedding reuse', async () => {

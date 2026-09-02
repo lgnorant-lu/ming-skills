@@ -12,6 +12,13 @@ import { int } from './helpers.js';
 export const WS_PAYLOAD_PREVIEW_LIMIT = int('WS_PAYLOAD_PREVIEW_LIMIT', 200);
 export const WS_PAYLOAD_SAMPLE_LIMIT = int('WS_PAYLOAD_SAMPLE_LIMIT', 2_000);
 
+/**
+ * Cap on the retained full payload bytes per WebSocket frame. Oversized frames
+ * keep only the truncated payload + full payloadLength + a truncated marker,
+ * so a single multi-MB frame cannot blow out host memory.
+ */
+export const WS_PAYLOAD_MAX_BYTES = int('WS_PAYLOAD_MAX_BYTES', 64 * 1024);
+
 /* ================================================================== */
 /*  Generic stream monitors                                            */
 /* ================================================================== */

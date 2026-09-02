@@ -115,7 +115,7 @@ class BrowserManager(object):
         )
 
     def set_window_state(
-        self, client_window, state=None, width=None, height=None, x=None, y=None
+        self, client_window, state="normal", width=None, height=None, x=None, y=None
     ):
         """设置浏览器窗口状态或几何信息。
 
@@ -137,7 +137,7 @@ class BrowserManager(object):
                 单位：屏幕像素。常见值：``0``、``80``。
 
         Returns:
-            dict: BiDi 命令返回结果，通常为空字典。
+            dict: 更新后的 ``ClientWindowInfo``。
 
         适用场景：
             - 验证窗口状态切换

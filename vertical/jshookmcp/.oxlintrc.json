@@ -30,6 +30,7 @@
           "__jshookWsInstances",
           "__jshookWsInstancesPatched",
           "__jshookPcId",
+          "__jshookTimestamp",
           "__more",
           "__networkRequests",
           "__order",
@@ -48,6 +49,8 @@
           "__xhrInterceptorInjected",
           "__xhrRequests",
           "_bodyUnavailable",
+          "_bodyTruncated",
+          "_originalBodySize",
           "_executionMetrics",
           "_id",
           "_meta",
@@ -93,14 +96,26 @@
           "_CreateToolhelp32Snapshot",
           "_Thread32First",
           "_Thread32Next",
-          "_CloseHandle"
+          "_CloseHandle",
+          "_OpenProcess",
+          "_kernel32",
+          "_THREADENTRY32",
+          "_MODULEENTRY32W",
+          "_Module32FirstW",
+          "_Module32NextW",
+          "_SuspendThread",
+          "_ResumeThread",
+          "_GetThreadContext",
+          "_ReadProcessMemory"
         ]
       }
     ],
     "prefer-const": "error",
     "eqeqeq": "error",
     "no-constant-condition": "error",
-    "unicorn/require-post-message-target-origin": "off"
+    "unicorn/require-post-message-target-origin": "off",
+    "unicorn/prefer-node-protocol": "error",
+    "import/no-cycle": "error"
   },
   "plugins": ["unicorn", "import", "typescript"],
   "ignorePatterns": ["dist/**", "node_modules/**"],

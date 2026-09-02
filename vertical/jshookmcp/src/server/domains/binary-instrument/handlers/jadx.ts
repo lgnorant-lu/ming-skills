@@ -198,65 +198,74 @@ export class JadxHandlers {
       );
     }
     let autoDecompiled = false;
-    if (!decompileDir && apkPath) {
-      const jadxProbe = await probeCommand('jadx', ['--version']);
-      if (!jadxProbe.available) {
-        return jsonResponse({
-          success: false,
-          available: false,
-          capability: 'jadx_cli',
-          fix: 'Install JADX and ensure jadx is on PATH.',
-          apkPath,
-          reason: jadxProbe.reason ?? 'jadx is not available',
-        });
+    let outDir: string | undefined;
+    try {
+      if (!decompileDir && apkPath) {
+        const jadxProbe = await probeCommand('jadx', ['--version']);
+        if (!jadxProbe.available) {
+          return jsonResponse({
+            success: false,
+            available: false,
+            capability: 'jadx_cli',
+            fix: 'Install JADX and ensure jadx is on PATH.',
+            apkPath,
+            reason: jadxProbe.reason ?? 'jadx is not available',
+          });
+        }
+        outDir = await mkdtemp(join(tmpdir(), `jshook-jadx-search-${basename(apkPath)}-`));
+        await this.runJadx(
+          jadxProbe.path ?? 'jadx',
+          ['--no-res', '--no-debug-info', '-j', String(threads), '-d', outDir, apkPath],
+          searchTimeoutMs,
+        );
+        decompileDir = join(outDir, 'sources');
+        autoDecompiled = true;
       }
-      const outDir = await mkdtemp(join(tmpdir(), `jshook-jadx-search-${basename(apkPath)}-`));
-      await this.runJadx(
-        jadxProbe.path ?? 'jadx',
-        ['--no-res', '--no-debug-info', '-j', String(threads), '-d', outDir, apkPath],
-        searchTimeoutMs,
-      );
-      decompileDir = join(outDir, 'sources');
-      autoDecompiled = true;
+
+      const opts: JadxSearchOptions = { decompileDir: decompileDir!, query };
+      const literal = readOptionalBoolean(args, 'literal');
+      if (literal !== undefined) opts.literal = literal;
+      const caseInsensitive = readOptionalBoolean(args, 'caseInsensitive');
+      if (caseInsensitive !== undefined) opts.caseInsensitive = caseInsensitive;
+      const contextLines = readOptionalNumber(args, 'contextLines');
+      if (contextLines !== undefined) opts.contextLines = contextLines;
+      const maxMatchesPerFile = readOptionalNumber(args, 'maxMatchesPerFile');
+      if (maxMatchesPerFile !== undefined) opts.maxMatchesPerFile = maxMatchesPerFile;
+      const maxResults = readOptionalNumber(args, 'maxResults');
+      if (maxResults !== undefined) opts.maxResults = maxResults;
+
+      const rawGlobs = args['globs'];
+      if (rawGlobs !== undefined) {
+        if (!Array.isArray(rawGlobs)) {
+          throw new ToolError('VALIDATION', 'globs must be an array of strings');
+        }
+        const globs = readStringArray(args, 'globs');
+        if (globs.length !== rawGlobs.length) {
+          throw new ToolError('VALIDATION', 'globs contains non-string entries');
+        }
+        if (globs.length > 0) opts.globs = globs;
+      }
+
+      const result = await this.getJadxSearchEngine().search(opts);
+      return jsonResponse({
+        success: true,
+        matches: result.matches,
+        filesMatched: result.filesMatched,
+        totalMatches: result.totalMatches,
+        engine: result.engine,
+        durationMs: result.durationMs,
+        decompileDir: result.decompileDir,
+        ...(autoDecompiled ? { autoDecompiled: true } : {}),
+        ...(apkPath ? { apkPath } : {}),
+        ...(result.truncated ? { truncated: true } : {}),
+      });
+    } finally {
+      // The auto-decompile scratch dir is a per-request artifact: always remove
+      // it, whether the search succeeded, threw, or was interrupted mid-flight.
+      if (outDir !== undefined) {
+        await rm(outDir, { recursive: true, force: true }).catch(() => {});
+      }
     }
-
-    const opts: JadxSearchOptions = { decompileDir: decompileDir!, query };
-    const literal = readOptionalBoolean(args, 'literal');
-    if (literal !== undefined) opts.literal = literal;
-    const caseInsensitive = readOptionalBoolean(args, 'caseInsensitive');
-    if (caseInsensitive !== undefined) opts.caseInsensitive = caseInsensitive;
-    const contextLines = readOptionalNumber(args, 'contextLines');
-    if (contextLines !== undefined) opts.contextLines = contextLines;
-    const maxMatchesPerFile = readOptionalNumber(args, 'maxMatchesPerFile');
-    if (maxMatchesPerFile !== undefined) opts.maxMatchesPerFile = maxMatchesPerFile;
-    const maxResults = readOptionalNumber(args, 'maxResults');
-    if (maxResults !== undefined) opts.maxResults = maxResults;
-
-    const rawGlobs = args['globs'];
-    if (rawGlobs !== undefined) {
-      if (!Array.isArray(rawGlobs)) {
-        throw new ToolError('VALIDATION', 'globs must be an array of strings');
-      }
-      const globs = readStringArray(args, 'globs');
-      if (globs.length !== rawGlobs.length) {
-        throw new ToolError('VALIDATION', 'globs contains non-string entries');
-      }
-      if (globs.length > 0) opts.globs = globs;
-    }
-
-    const result = await this.getJadxSearchEngine().search(opts);
-    return jsonResponse({
-      success: true,
-      matches: result.matches,
-      filesMatched: result.filesMatched,
-      totalMatches: result.totalMatches,
-      engine: result.engine,
-      durationMs: result.durationMs,
-      decompileDir: result.decompileDir,
-      ...(autoDecompiled ? { autoDecompiled: true } : {}),
-      ...(apkPath ? { apkPath } : {}),
-      ...(result.truncated ? { truncated: true } : {}),
-    });
   }
 
   async handleApkManifestDump(args: Record<string, unknown>): Promise<unknown> {

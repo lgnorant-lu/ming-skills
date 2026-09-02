@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CodeCache, type CacheEntry } from '@modules/collector/CodeCache';
@@ -68,6 +68,20 @@ describe('CodeCache', () => {
     expect(result?.totalSize).toBe(20);
     expect(result?.dependencies).toEqual(sampleResult.dependencies);
     expect(result?.summaries).toEqual(sampleResult.summaries);
+  });
+
+  it('writes compact JSON without pretty-print indentation', async () => {
+    const cache = new TestCodeCache({ cacheDir, maxAge: 60_000 });
+    const url = withPath(TEST_URLS.root, 'compact');
+    await cache.set(url, sampleResult);
+
+    const key = cache.callGenerateKey(url, undefined);
+    const raw = await readFile(join(cacheDir, `${key}.json`), 'utf-8');
+
+    // Pretty-printing (JSON.stringify(x, null, 2)) emits "newline + spaces";
+    // a compact payload must round-trip without any indentation (b1-04).
+    expect(raw).not.toContain('\n  ');
+    expect(JSON.parse(raw)).toMatchObject({ url });
   });
 
   it('reads dependencies and summaries back from disk when memory cache is empty', async () => {

@@ -21,6 +21,7 @@ const registrations = defineMethodRegistrations<
     { tool: 'tls_keylog_enable', method: 'handleTlsKeylogEnableTool' },
     { tool: 'tls_keylog_parse', method: 'handleTlsKeylogParseTool' },
     { tool: 'tls_keylog_disable', method: 'handleTlsKeylogDisableTool' },
+    { tool: 'tls_keylog_seal', method: 'handleTlsKeylogSealTool' },
     { tool: 'tls_decrypt_payload', method: 'handleTlsDecryptPayloadTool' },
     { tool: 'tls_keylog_summarize', method: 'handleTlsKeylogSummarizeTool' },
     { tool: 'tls_keylog_lookup_secret', method: 'handleTlsKeylogLookupSecretTool' },

@@ -59,6 +59,21 @@ describe('CodeCollector utils internals', () => {
     vi.useRealTimers();
   });
 
+  it('throws a proper Error when goto rejects with a non-Error value', async () => {
+    vi.useFakeTimers();
+    const goto = vi
+      .fn()
+      .mockRejectedValueOnce('string failure')
+      .mockRejectedValueOnce('string failure');
+
+    const navigation = navigateWithRetryImpl({ goto } as any, TEST_URLS.root, {}, 2);
+    const assertion = expect(navigation).rejects.toBeInstanceOf(Error);
+    await vi.advanceTimersByTimeAsync(1000);
+    await assertion;
+    expect(goto).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
   it('collects performance metrics and page metadata with empty-object fallbacks', async () => {
     const page = {
       evaluate: vi.fn().mockResolvedValueOnce({ totalTime: 120 }).mockResolvedValueOnce({

@@ -93,7 +93,9 @@ export function classifyHookPattern(bytes: Uint8Array): HookType {
       if (reg >= 0xd0 && reg <= 0xdf) return 'mov_call';
     }
   }
-  if (b0 === 0x68 && bytes[5] === 0xc3) return 'push_ret';
+  // PUSH imm32 (68) + RET (C3) = 6 bytes minimum. Guard before bytes[5] —
+  // short windows must fall through to 'unknown', not read past the window.
+  if (b0 === 0x68 && bytes.length >= 6 && bytes[5] === 0xc3) return 'push_ret';
   return 'unknown';
 }
 

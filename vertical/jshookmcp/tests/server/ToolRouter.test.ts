@@ -8,6 +8,19 @@ import {
   RERANK_MAINTENANCE_PENALTY,
 } from '@src/constants';
 
+// Block `.env` loading so the RERANK_* multipliers resolve to their source
+// defaults. A local (gitignored, search-tune generated) `.env` would otherwise
+// be injected by the env-bootstrap that runs when the constants module loads,
+// inverting the browser_attach/browser_launch ordering these assertions pin
+// down. Mirrors the isolation pattern used by tests/utils/config.test.ts.
+const { dotenvMock } = vi.hoisted(() => ({
+  dotenvMock: {
+    config: vi.fn(() => ({ error: Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) })),
+  },
+}));
+
+vi.mock('dotenv', () => dotenvMock);
+
 await initRegistry();
 
 function tool(

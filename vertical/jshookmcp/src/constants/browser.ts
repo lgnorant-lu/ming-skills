@@ -41,6 +41,13 @@ export const PAGE_OPERATION_TIMEOUT_MS = int('PAGE_OPERATION_TIMEOUT_MS', 30_000
  */
 export const PAGE_EVALUATE_TIMEOUT_MS = int('PAGE_EVALUATE_TIMEOUT_MS', 30_000);
 
+/**
+ * Result-size threshold (bytes) beyond which evaluate results are summarized
+ * by the DetailedDataManager (50 KiB default — large enough for most
+ * structured payloads, small enough to keep responses bounded).
+ */
+export const PAGE_EVAL_MAX_SIZE_BYTES = int('PAGE_EVAL_MAX_SIZE_BYTES', 51200);
+
 /* ================================================================== */
 /*  CDP session                                                        */
 /* ================================================================== */
@@ -62,6 +69,58 @@ export const DOM_QUERY_DEFAULT_LIMIT = int('DOM_QUERY_DEFAULT_LIMIT', 50);
 
 /** Timeout for waitForElement (waitForSelector) in DOMInspector. */
 export const DOM_WAIT_ELEMENT_TIMEOUT_MS = int('DOM_WAIT_ELEMENT_TIMEOUT_MS', 30_000);
+
+/** Cap on caller-supplied selectors / filter text fed into string-built evaluations. */
+export const DOM_QUERY_INPUT_MAX_CHARS = int('DOM_QUERY_INPUT_MAX_CHARS', 4096);
+
+/** Default wait interval for the page to reach readyState 'complete' (ms). */
+export const DOM_READY_STATE_POLL_INTERVAL_MS = int('DOM_READY_STATE_POLL_INTERVAL_MS', 100);
+
+/** Retry delay before re-running an empty query after readyState 'complete' (ms). */
+export const DOM_EMPTY_RESULT_RETRY_DELAY_MS = int('DOM_EMPTY_RESULT_RETRY_DELAY_MS', 500);
+
+/** Default readyState wait budget when the caller does not supply one (ms). */
+export const DOM_DEFAULT_READY_STATE_TIMEOUT_MS = int('DOM_DEFAULT_READY_STATE_TIMEOUT_MS', 3000);
+
+/* ================================================================== */
+/*  Collector & Code Compression                                       */
+/* ================================================================== */
+
+/** Fallback navigation/collection timeout when neither options nor config supply one. */
+export const COLLECTOR_DEFAULT_TIMEOUT_MS = int('COLLECTOR_DEFAULT_TIMEOUT_MS', 30_000);
+
+/** How long to wait after navigation for late-loading dynamic scripts. */
+export const COLLECTOR_DYNAMIC_SCRIPT_WAIT_MS = int('COLLECTOR_DYNAMIC_SCRIPT_WAIT_MS', 3_000);
+
+/** Compression batch retries per file in collector. */
+export const COLLECTOR_COMPRESS_MAX_RETRIES = int('COLLECTOR_COMPRESS_MAX_RETRIES', 3);
+
+/** Compression concurrency across files in collector. */
+export const COLLECTOR_COMPRESS_CONCURRENCY = int('COLLECTOR_COMPRESS_CONCURRENCY', 5);
+
+/** Log compression progress every N percent in collector. */
+export const COLLECTOR_COMPRESS_PROGRESS_LOG_INTERVAL = int(
+  'COLLECTOR_COMPRESS_PROGRESS_LOG_INTERVAL',
+  25,
+);
+
+/** Base (ms) for the linear retry backoff in CodeCompressor: `base * attempt`. */
+export const CODE_COMPRESSOR_RETRY_BACKOFF_MS = int('CODE_COMPRESSOR_RETRY_BACKOFF_MS', 100);
+
+/** Default `shouldCompress` threshold (bytes) — content below this is kept raw. */
+export const CODE_COMPRESSOR_MIN_THRESHOLD_BYTES = int('CODE_COMPRESSOR_MIN_THRESHOLD_BYTES', 1024);
+
+/** Max nesting depth for chunked payloads in CodeCompressor. */
+export const CODE_COMPRESSOR_MAX_RECURSION_DEPTH = int('CODE_COMPRESSOR_MAX_RECURSION_DEPTH', 16);
+
+/** Fail-fast window for the pre-evaluate CDP health probe in PageController. */
+export const PAGE_CDP_HEALTH_CHECK_TIMEOUT_MS = int('PAGE_CDP_HEALTH_CHECK_TIMEOUT_MS', 500);
+
+/** Cap on extracted function names per file in SmartCodeCollector. */
+export const SMART_COLLECTOR_MAX_EXTRACTED_FUNCTIONS = int(
+  'SMART_COLLECTOR_MAX_EXTRACTED_FUNCTIONS',
+  20,
+);
 
 /* ================================================================== */
 /*  Browser scripts                                                    */

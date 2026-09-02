@@ -1,4 +1,4 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import { tool } from '@server/registry/tool-builder';
 
 export const v8InspectorTools: Tool[] = [
@@ -58,13 +58,6 @@ export const v8InspectorTools: Tool[] = [
   tool('v8_version_detect', (t) =>
     t.desc('Detect V8 engine version, flags, and runtime capabilities.').query(),
   ),
-  tool('v8_jit_inspect', (t) =>
-    t
-      .desc('Report JIT compilation status and optimization tier for a script.')
-      .string('scriptId', 'CDP scriptId')
-      .required('scriptId')
-      .query(),
-  ),
   tool('v8_heap_find_leaks', (t) =>
     t
       .desc(
@@ -101,9 +94,11 @@ export const v8InspectorTools: Tool[] = [
     t
       .desc(
         'Trace V8 deoptimization events during a capture window. ' +
-          'Enables %TraceDeoptimizations via natives syntax and captures ' +
-          'deopt events (function name, reason, bailout position). ' +
-          'Requires V8 natives syntax. Falls back gracefully when unavailable.',
+          'Primary path uses CDP Tracing (v8 category, V8.DeoptimizeFrame ' +
+          'events — no natives syntax needed, structured reason/type/line ' +
+          'data, timestamps aligned with profiler_cpu). Falls back to ' +
+          '%TraceDeoptimizations console parsing when Tracing is unavailable ' +
+          '(requires V8 natives syntax).',
       )
       .number('durationMs', 'Trace window duration in ms (default: 5000)', {
         default: 5000,
@@ -117,10 +112,12 @@ export const v8InspectorTools: Tool[] = [
   tool('v8_turbofan_inspect', (t) =>
     t
       .desc(
-        'Inspect TurboFan compilation state for functions in a script. ' +
-          'Reports optimization tier (interpreted/maglev/turbofan). ' +
-          'Supports actions: inspect (default), optimize (%OptimizeFunctionOnNextCall), ' +
-          'deoptimize (%DeoptimizeFunction). Requires V8 natives syntax.',
+        'Inspect JIT/TurboFan compilation state for functions in a script. ' +
+          'Reports optimization tier (interpreted/maglev/turbofan) with V8 ' +
+          'optimization status codes. Supports actions: inspect (default), ' +
+          'optimize (%OptimizeFunctionOnNextCall), deoptimize (%DeoptimizeFunction). ' +
+          'Requires V8 natives syntax; falls back to heuristic JIT inspection ' +
+          'when natives is unavailable.',
       )
       .string('scriptId', 'CDP scriptId to inspect')
       .string('functionName', 'Optional function name filter (substring match)')
@@ -241,13 +238,20 @@ export const v8InspectorTools: Tool[] = [
         default: 5000,
       })
       .number('topN', 'Number of top allocation sites to return (default: 50)', { default: 50 })
+      .number('samplingInterval', 'Allocation sampling interval in bytes (default: 32768)', {
+        default: 32768,
+        minimum: 256,
+        maximum: 1048576,
+      })
       .query(),
   ),
   tool('v8_allocation_track', (t) =>
     t
       .desc(
         'Track live V8 allocations via CDP HeapProfiler object tracking. ' +
-          'Starts allocation tracking for a capture window (default 3s), then returns ' +
+          'Enables the HeapProfiler, calls startTrackingHeapObjects({ trackAllocations: true }) ' +
+          'to collect lastSeenObjectId events for a capture window (default 3s), then ' +
+          'stopTrackingHeapObjects (with an explicit takeHeapSnapshot fallback) to return ' +
           'currently-live objects seen during the window with their allocation stack ' +
           '(top frame + size). Useful for finding objects that survive GC during a specific ' +
           'interaction. Requires browser/page CDP context and V8 natives for full stack resolution.',

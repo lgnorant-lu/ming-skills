@@ -2,6 +2,7 @@ import type { PageController } from '@server/domains/shared/modules/collector';
 import type { FrameResolveOptions } from '@modules/collector/PageController';
 import type { DetailedDataManager } from '@utils/DetailedDataManager';
 import { resolveScreenshotOutputPath } from '@utils/outputPaths';
+import { PAGE_EVAL_MAX_SIZE_BYTES, PAGE_OPERATION_TIMEOUT_MS } from '@src/constants/browser';
 import {
   argString,
   argNumber,
@@ -51,7 +52,10 @@ interface PageEvaluationHandlersDeps {
 }
 
 export class PageEvaluationHandlers {
-  constructor(private deps: PageEvaluationHandlersDeps) {}
+  private deps: PageEvaluationHandlersDeps;
+  constructor(deps: PageEvaluationHandlersDeps) {
+    this.deps = deps;
+  }
 
   private resolveEvaluationSource(args: Record<string, unknown>): string | null {
     const code =
@@ -79,7 +83,7 @@ export class PageEvaluationHandlers {
     try {
       const code = this.resolveEvaluationSource(args);
       const autoSummarize = argBool(args, 'autoSummarize', true);
-      const maxSize = argNumber(args, 'maxSize', 51200);
+      const maxSize = argNumber(args, 'maxSize', PAGE_EVAL_MAX_SIZE_BYTES);
       const fieldFilterArg = argStringArray(args, 'fieldFilter');
       const doStripBase64 = argBool(args, 'stripBase64', false);
       const frameUrl = argString(args, 'frameUrl');
@@ -102,12 +106,16 @@ export class PageEvaluationHandlers {
         const { evaluateFunction } = transformCodeForCamoufox({ code });
 
         const result = await context.evaluate(evaluateFunction as () => unknown);
-        const processedResult = applyEvaluationPostFilters(result, this.deps.detailedDataManager, {
-          autoSummarize,
-          maxSize,
-          fieldFilter: fieldFilterArg ?? undefined,
-          stripBase64: doStripBase64,
-        });
+        const processedResult = await applyEvaluationPostFilters(
+          result,
+          this.deps.detailedDataManager,
+          {
+            autoSummarize,
+            maxSize,
+            fieldFilter: fieldFilterArg ?? undefined,
+            stripBase64: doStripBase64,
+          },
+        );
         return R.ok().build({
           driver: 'camoufox',
           ...(frameOptions ? { frame: frameOptions } : {}),
@@ -119,12 +127,16 @@ export class PageEvaluationHandlers {
         ? await this.deps.pageController.evaluate(code, frameOptions)
         : await this.deps.pageController.evaluate(code);
 
-      const processedResult = applyEvaluationPostFilters(result, this.deps.detailedDataManager, {
-        autoSummarize,
-        maxSize,
-        fieldFilter: fieldFilterArg ?? undefined,
-        stripBase64: doStripBase64,
-      });
+      const processedResult = await applyEvaluationPostFilters(
+        result,
+        this.deps.detailedDataManager,
+        {
+          autoSummarize,
+          maxSize,
+          fieldFilter: fieldFilterArg ?? undefined,
+          stripBase64: doStripBase64,
+        },
+      );
 
       return R.ok().build({
         ...(frameOptions ? { frame: frameOptions } : {}),
@@ -317,7 +329,7 @@ export class PageEvaluationHandlers {
         const page = (await this.deps.getCamoufoxPage()) as CamoufoxPageLike;
 
         try {
-          await page.waitForSelector(selector, { timeout: timeout || 30000 });
+          await page.waitForSelector(selector, { timeout: timeout || PAGE_OPERATION_TIMEOUT_MS });
 
           const element = await page.evaluate((sel: string) => {
             const el = document.querySelector(sel);

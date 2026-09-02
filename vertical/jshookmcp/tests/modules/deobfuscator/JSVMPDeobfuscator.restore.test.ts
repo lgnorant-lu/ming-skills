@@ -16,10 +16,6 @@ vi.mock('@utils/logger', () => ({
   logger: loggerState,
 }));
 
-vi.mock('@services/prompts/deobfuscation', () => ({
-  generateVMAnalysisMessages: promptState.generateVMAnalysisMessages,
-}));
-
 vi.mock('@modules/security/ExecutionSandbox', () => ({
   ExecutionSandbox: {},
 }));

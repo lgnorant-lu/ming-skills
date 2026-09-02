@@ -24,6 +24,7 @@ const resolveArtifactPathMock = vi.fn();
 vi.mock('node:fs/promises', () => ({
   writeFile: (...args: any[]) => writeFileMock(...args),
   stat: (...args: any[]) => statMock(...args),
+  realpath: vi.fn((p) => Promise.resolve(p)),
 }));
 
 vi.mock('@src/utils/artifacts', () => ({

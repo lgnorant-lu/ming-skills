@@ -14,7 +14,7 @@
 
 import type { Dirent } from 'node:fs';
 import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { join, relative, resolve } from 'node:path';
+import { join, relative } from 'node:path';
 import { getArtifactDir } from '@utils/artifacts';
 import { getProjectRoot } from '@utils/outputPaths';
 
@@ -52,9 +52,10 @@ export function getHeapSnapshotArtifactDir(): string {
 
 /** Reduce an arbitrary snapshot id to a filename-safe segment. */
 function sanitizeSnapshotId(id: string): string {
+  // NOTE: no `_+` collapse — `foo__bar` and `foo_bar` must stay distinct so a
+  // user-supplied id can never silently target another snapshot's files.
   return id
     .replace(/[^a-zA-Z0-9_-]/g, '_')
-    .replace(/_+/g, '_')
     .replace(/^_|_$/g, '')
     .substring(0, 120);
 }
@@ -71,9 +72,9 @@ function toDisplayPath(absolutePath: string): string {
   const root = getProjectRoot();
   const rel = relative(root, absolutePath);
   // If the path is outside the project root, fall back to the absolute form.
-  return rel && !rel.startsWith('..') && !resolve(absolutePath).includes('..')
-    ? rel.replace(/\\/g, '/')
-    : absolutePath.replace(/\\/g, '/');
+  // (resolve() on an already-absolute path can never contain '..' — the
+  // relative() '..' prefix above is the only escape signal.)
+  return rel && !rel.startsWith('..') ? rel.replace(/\\/g, '/') : absolutePath.replace(/\\/g, '/');
 }
 
 /**
@@ -156,7 +157,9 @@ export async function listPersistedSnapshots(options?: {
         continue;
       }
       const capturedMs = Date.parse(meta.capturedAt ?? '');
-      const expired = ttlMs > 0 && Number.isFinite(capturedMs) ? now - capturedMs > ttlMs : false;
+      // Unparseable capturedAt is treated as expired so corrupt sidecars can
+      // still be swept by retention instead of being kept forever.
+      const expired = ttlMs > 0 ? !Number.isFinite(capturedMs) || now - capturedMs > ttlMs : false;
       results.push({
         id: meta.id,
         capturedAt: meta.capturedAt ?? '',
@@ -273,11 +276,18 @@ export async function deleteAllPersistedSnapshots(): Promise<{
 /**
  * Enforce retention by evicting oldest snapshots until under both caps.
  * Zero/negative caps are ignored (no eviction on that axis).
+ *
+ * When `memoryCache` is provided, evicted snapshots are also dropped from the
+ * in-memory cache so its chunks do not linger after the on-disk files are gone.
  */
-export async function enforceSnapshotRetention(options: {
-  maxCount?: number;
-  maxTotalBytes?: number;
-}): Promise<{ evictedIds: string[]; freedBytes: number }> {
+export async function enforceSnapshotRetention(
+  options: {
+    maxCount?: number;
+    maxTotalBytes?: number;
+    /** In-memory cache kept in lockstep with disk deletions. */
+    memoryCache?: { delete(key: string): boolean };
+  } = {},
+): Promise<{ evictedIds: string[]; freedBytes: number }> {
   const maxCount = options.maxCount ?? 0;
   const maxTotalBytes = options.maxTotalBytes ?? 0;
   if (maxCount <= 0 && maxTotalBytes <= 0) {
@@ -293,6 +303,7 @@ export async function enforceSnapshotRetention(options: {
     const toEvict = current.slice(0, current.length - maxCount);
     for (const meta of toEvict) {
       const res = await deletePersistedSnapshot(meta.id);
+      options.memoryCache?.delete(meta.id);
       if (res.deleted) {
         evictedIds.push(meta.id);
         freedBytes += res.freedBytes;
@@ -307,6 +318,7 @@ export async function enforceSnapshotRetention(options: {
     while (i < current.length && total > maxTotalBytes) {
       const meta = current[i]!;
       const res = await deletePersistedSnapshot(meta.id);
+      options.memoryCache?.delete(meta.id);
       if (res.deleted) {
         evictedIds.push(meta.id);
         freedBytes += res.freedBytes;

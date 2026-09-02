@@ -1,13 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const state = vi.hoisted(() => ({
-  isKoffiAvailable: vi.fn(),
+  isKoffiBindingUsable: vi.fn(),
   isWindows: vi.fn(),
   execAsync: vi.fn(),
 }));
 
 vi.mock('@native/Win32API', () => ({
-  isKoffiAvailable: state.isKoffiAvailable,
+  isKoffiBindingUsable: state.isKoffiBindingUsable,
   isWindows: state.isWindows,
 }));
 
@@ -47,11 +47,11 @@ describe('NativeMemoryManager.availability', () => {
     beforeEach(() => {
       Object.defineProperty(process, 'platform', { value: 'win32' });
       state.isWindows.mockReturnValue(true);
-      state.isKoffiAvailable.mockReturnValue(true);
+      state.isKoffiBindingUsable.mockReturnValue(true);
     });
 
     it('returns unavailable when koffi is not available', async () => {
-      state.isKoffiAvailable.mockReturnValue(false);
+      state.isKoffiBindingUsable.mockReturnValue(false);
 
       const result = await checkNativeMemoryAvailability(state.execAsync);
 

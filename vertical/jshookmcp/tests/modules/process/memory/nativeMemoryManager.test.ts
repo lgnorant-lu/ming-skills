@@ -14,12 +14,10 @@ function createMockProvider(): PlatformMemoryAPI & {
   openProcessMock: ReturnType<typeof vi.fn>;
   closeProcessMock: ReturnType<typeof vi.fn>;
 } {
-  const openProcess = vi.fn(
-    (_pid: number, _write: boolean): ProcessHandle => ({
-      pid: _pid,
-      writeAccess: _write,
-    }),
-  );
+  const openProcess = vi.fn((_pid: number, _write: boolean): ProcessHandle => ({
+    pid: _pid,
+    writeAccess: _write,
+  }));
   const closeProcess = vi.fn();
   const queryRegion = vi.fn();
   const readMemory = vi.fn();
@@ -30,7 +28,7 @@ function createMockProvider(): PlatformMemoryAPI & {
     openProcess,
     closeProcess,
     readMemory,
-    writeMemory: vi.fn(() => ({ bytesWritten: 0 })),
+    writeMemory: vi.fn(async () => ({ bytesWritten: 0 })),
     queryRegion,
     changeProtection: vi.fn(() => ({ oldProtection: MemoryProtection.NoAccess })),
     allocateMemory: vi.fn(() => ({ address: 0n })),
@@ -65,7 +63,7 @@ vi.mock('@utils/logger', () => ({
 import { NativeMemoryManager, scanRegionInChunks } from '@src/native/NativeMemoryManager.impl';
 
 function createChunkReader(source: Buffer, baseAddress = 0n) {
-  return (address: bigint, size: number): Buffer => {
+  return async (address: bigint, size: number): Promise<Buffer> => {
     const start = Number(address - baseAddress);
     return source.subarray(start, start + size);
   };
@@ -76,9 +74,9 @@ describe('NativeMemoryManager chunked scanning', () => {
     vi.clearAllMocks();
   });
 
-  it('matches patterns that span chunk boundaries without duplicates', () => {
+  it('matches patterns that span chunk boundaries without duplicates', async () => {
     const source = Buffer.from([0xaa, 0xbb, 0xcc, 0xdd, 0xaa, 0xbb, 0xcc, 0xdd]);
-    const matches = scanRegionInChunks(
+    const matches = await scanRegionInChunks(
       { baseAddress: 0n, regionSize: source.length },
       [0xaa, 0xbb, 0xcc, 0xdd],
       [1, 1, 1, 1],
@@ -89,9 +87,9 @@ describe('NativeMemoryManager chunked scanning', () => {
     expect(matches).toEqual([0n, 4n]);
   });
 
-  it('does not duplicate matches when overlap is zero', () => {
+  it('does not duplicate matches when overlap is zero', async () => {
     const source = Buffer.from([0xaa, 0xaa, 0xaa]);
-    const matches = scanRegionInChunks(
+    const matches = await scanRegionInChunks(
       { baseAddress: 0n, regionSize: source.length },
       [0xaa],
       [1],
@@ -102,9 +100,9 @@ describe('NativeMemoryManager chunked scanning', () => {
     expect(matches).toEqual([0n, 1n, 2n]);
   });
 
-  it('supports patterns longer than the chunk size', () => {
+  it('supports patterns longer than the chunk size', async () => {
     const source = Buffer.from([1, 2, 3, 4, 5, 6]);
-    const matches = scanRegionInChunks(
+    const matches = await scanRegionInChunks(
       { baseAddress: 0n, regionSize: source.length },
       [1, 2, 3, 4, 5],
       [1, 1, 1, 1, 1],

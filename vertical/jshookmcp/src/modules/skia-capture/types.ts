@@ -105,6 +105,12 @@ export interface SkiaSceneTree {
     dpr: number;
     contextType: string;
   };
+  /**
+   * Set when scene extraction is not supported for the active canvas engine
+   * (e.g. a browser-page probe that cannot expose a Skia scene graph). Lets
+   * callers surface an honest error instead of a silently empty scene.
+   */
+  unsupported?: boolean;
 }
 
 /**

@@ -30,6 +30,21 @@ interface InterceptorScriptOptions {
   onLeaveBody?: string;
 }
 
+/** Ceiling for task-mode CLI timeouts; stays inside TaskManager's 10-minute default TTL. */
+const FRIDA_TASK_MAX_TIMEOUT_MS = 10 * 60_000;
+const FRIDA_TASK_DEFAULT_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * Resolve the task-mode CLI timeout from tool args. Returns undefined for the
+ * synchronous path so FridaSession keeps its default FRIDA_TIMEOUT_MS.
+ */
+function readTaskTimeoutMs(args: Record<string, unknown>): number | undefined {
+  if (readOptionalBoolean(args, 'async') !== true) return undefined;
+  const requested = typeof args.timeoutMs === 'number' ? args.timeoutMs : undefined;
+  if (requested === undefined) return FRIDA_TASK_DEFAULT_TIMEOUT_MS;
+  return Math.max(1000, Math.min(requested, FRIDA_TASK_MAX_TIMEOUT_MS));
+}
+
 export class FridaHandlers {
   private state: BinaryInstrumentState;
 
@@ -187,7 +202,7 @@ export class FridaHandlers {
     const availability = await frida.getAvailability();
 
     if (!availability.available) {
-      return {
+      return jsonResponse({
         success: false,
         available: false,
         capability: 'frida_cli',
@@ -195,11 +210,11 @@ export class FridaHandlers {
         sessionId,
         reason: availability.reason ?? 'Frida CLI is not available',
         execution: { output: '', error: 'Frida unavailable' },
-      };
+      });
     }
 
     if (!frida.useSession(sessionId)) {
-      return {
+      return jsonResponse({
         success: false,
         available: false,
         capability: 'frida_session',
@@ -207,7 +222,38 @@ export class FridaHandlers {
         sessionId,
         reason: `Unknown Frida session: ${sessionId}`,
         execution: { output: '', error: 'Unknown session' },
-      };
+      });
+    }
+
+    // Task mode: run the script in the background and return a taskId immediately
+    // (MCP 2.0 Tasks retrofit — long/hanging scripts no longer hit the CLI timeout).
+    const taskTimeoutMs = readTaskTimeoutMs(args);
+    if (taskTimeoutMs !== undefined) {
+      const taskManager = this.state.context?.taskManager;
+      if (taskManager) {
+        const task = await taskManager.createTask({
+          name: 'frida_run_script',
+          executor: async (ctx) => {
+            ctx.updateProgress(5, 100, 'Executing Frida script...');
+            const execution = await frida.executeScript(script, {
+              timeoutMs: taskTimeoutMs,
+              signal: ctx.signal,
+            });
+            ctx.updateProgress(100, 100, 'Script execution finished');
+            return execution;
+          },
+        });
+        return jsonResponse({
+          success: true,
+          available: true,
+          async: true,
+          sessionId,
+          taskId: task.taskId,
+          status: task.status,
+          pollWith: ['tasks_get', 'tasks_result'],
+          cancelWith: 'tasks_cancel',
+        });
+      }
     }
 
     const execution = await frida.executeScript(script);
@@ -445,7 +491,7 @@ export class FridaHandlers {
     const availability = await frida.getAvailability();
 
     if (!availability.available) {
-      return {
+      return jsonResponse({
         success: false,
         available: false,
         capability: 'frida_cli',
@@ -454,11 +500,11 @@ export class FridaHandlers {
         moduleName,
         reason: availability.reason ?? 'Frida CLI is not available',
         functions: [],
-      };
+      });
     }
 
     if (!frida.useSession(sessionId)) {
-      return {
+      return jsonResponse({
         success: false,
         available: false,
         capability: 'frida_session',
@@ -466,7 +512,7 @@ export class FridaHandlers {
         sessionId,
         reason: `Unknown Frida session: ${sessionId}`,
         functions: [],
-      };
+      });
     }
 
     const functions = await frida.enumerateFunctions(moduleName);
@@ -500,7 +546,7 @@ export class FridaHandlers {
     const availability = await frida.getAvailability();
 
     if (!availability.available) {
-      return {
+      return jsonResponse({
         success: false,
         available: false,
         capability: 'frida_cli',
@@ -509,11 +555,11 @@ export class FridaHandlers {
         pattern,
         reason: availability.reason ?? 'Frida CLI is not available',
         symbols: [],
-      };
+      });
     }
 
     if (!frida.useSession(sessionId)) {
-      return {
+      return jsonResponse({
         success: false,
         available: false,
         capability: 'frida_session',
@@ -521,7 +567,7 @@ export class FridaHandlers {
         sessionId,
         reason: `Unknown Frida session: ${sessionId}`,
         symbols: [],
-      };
+      });
     }
 
     const symbols = await frida.findSymbols(pattern);
@@ -559,7 +605,7 @@ export class FridaHandlers {
     const availability = await frida.getAvailability();
 
     if (!availability.available) {
-      return {
+      return jsonResponse({
         success: false,
         available: false,
         capability: 'frida_cli',
@@ -568,11 +614,11 @@ export class FridaHandlers {
         pattern,
         reason: availability.reason ?? 'Frida CLI is not available',
         matches: [],
-      };
+      });
     }
 
     if (!frida.useSession(sessionId)) {
-      return {
+      return jsonResponse({
         success: false,
         available: false,
         capability: 'frida_session',
@@ -580,7 +626,44 @@ export class FridaHandlers {
         sessionId,
         reason: `Unknown Frida session: ${sessionId}`,
         matches: [],
-      };
+      });
+    }
+
+    // Task mode: scan in the background and return a taskId immediately
+    // (MCP 2.0 Tasks retrofit — broad scans survive past the CLI timeout).
+    const taskTimeoutMs = readTaskTimeoutMs(args);
+    if (taskTimeoutMs !== undefined) {
+      const taskManager = this.state.context?.taskManager;
+      if (taskManager) {
+        const scanLabel = moduleName ?? 'all readable ranges';
+        const task = await taskManager.createTask({
+          name: 'frida_memory_scan',
+          executor: async (ctx) => {
+            ctx.updateProgress(5, 100, `Scanning ${scanLabel} for ${pattern}`);
+            const matches = await frida.memoryScan(pattern, {
+              moduleName: moduleName ?? undefined,
+              address: address ?? undefined,
+              size: rawSize,
+              max: rawMax,
+              timeoutMs: taskTimeoutMs,
+              signal: ctx.signal,
+            });
+            ctx.updateProgress(100, 100, `Scan finished: ${matches.length} match(es)`);
+            return { sessionId, pattern, matches, count: matches.length };
+          },
+        });
+        return jsonResponse({
+          success: true,
+          available: true,
+          async: true,
+          sessionId,
+          pattern,
+          taskId: task.taskId,
+          status: task.status,
+          pollWith: ['tasks_get', 'tasks_result'],
+          cancelWith: 'tasks_cancel',
+        });
+      }
     }
 
     const matches = await frida.memoryScan(pattern, {
@@ -629,7 +712,7 @@ export class FridaHandlers {
     const availability = await frida.getAvailability();
 
     if (!availability.available) {
-      return {
+      return jsonResponse({
         success: false,
         available: false,
         capability: 'frida_cli',
@@ -637,18 +720,18 @@ export class FridaHandlers {
         sessionId,
         address,
         reason: availability.reason ?? 'Frida CLI is not available',
-      };
+      });
     }
 
     if (!frida.useSession(sessionId)) {
-      return {
+      return jsonResponse({
         success: false,
         available: false,
         capability: 'frida_session',
         fix: 'Call frida_attach first and reuse the returned sessionId.',
         sessionId,
         reason: `Unknown Frida session: ${sessionId}`,
-      };
+      });
     }
 
     const read = await frida.memoryRead(address, size);

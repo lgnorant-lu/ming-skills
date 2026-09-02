@@ -29,8 +29,10 @@ vi.mock('koffi', () => ({
           return (req: bigint, pid: number, addr: bigint, data: bigint): bigint => {
             const reqNum = Number(req);
             state.ptraceCalls.push({ req: reqNum, pid, addr, data });
-            // PTRACE_PEEKTEXT (3) returns the scripted word; everything else 0n.
+            // PTRACE_PEEKTEXT (3) returns the scripted word; PTRACE_POKETEXT
+            // (4) simulates memory by updating what subsequent peeks return.
             if (reqNum === 3) return state.peekReturn;
+            if (reqNum === 4) state.peekReturn = data;
             return 0n;
           };
         }
@@ -146,5 +148,87 @@ describe('LinuxInt3AccessBreakpoint', () => {
     // At least one WNOHANG poll occurred.
     expect(state.waitpidCalls.length).toBeGreaterThan(0);
     expect(state.waitpidCalls.every((c) => c.options === WNOHANG)).toBe(true);
+  });
+
+  it('rearmBreakpoint re-patches after a successful SIGTRAP single-step', async () => {
+    const isArm64 = process.arch === 'arm64';
+    const pid = 4242;
+    const address = 0x401000n;
+    state.peekReturn = 0xdeadbeef12345678n;
+    state.waitpidRet = pid;
+    state.waitpidStatus = (19 << 8) | 0x7f; // attach stop (SIGSTOP)
+
+    const engine = new LinuxInt3AccessBreakpoint();
+    await engine.attach(pid);
+    const { id } = await engine.setBreakpoint(pid, address, 'execute', 1);
+
+    // Single-step stop delivers SIGTRAP (5) — the expected rearm flow.
+    state.waitpidStatus = (5 << 8) | 0x7f;
+    const ok = await engine.rearmBreakpoint(id);
+
+    expect(ok).toBe(true);
+    // setBreakpoint patch + rearm restore + rearm re-patch = 3 POKETEXTs.
+    const pokes = state.ptraceCalls.filter((c) => c.req === PTRACE_POKETEXT);
+    expect(pokes).toHaveLength(3);
+    // The final re-patch carries the breakpoint instruction again.
+    const lowMask = isArm64 ? 0xffffffffn : 0xffn;
+    const insnWord = isArm64 ? 0xd4200000n : 0xccn;
+    expect(pokes[2]!.data & lowMask).toBe(insnWord);
+  });
+
+  it('rearmBreakpoint returns false and leaves the breakpoint disarmed when the single-step is not a SIGTRAP', async () => {
+    const isArm64 = process.arch === 'arm64';
+    const pid = 4242;
+    const address = 0x401000n;
+    state.peekReturn = 0xdeadbeef12345678n;
+    state.waitpidRet = pid;
+    state.waitpidStatus = (19 << 8) | 0x7f; // attach stop (SIGSTOP)
+
+    const engine = new LinuxInt3AccessBreakpoint();
+    await engine.attach(pid);
+    const { id } = await engine.setBreakpoint(pid, address, 'execute', 1);
+
+    // Single-step is interrupted by SIGSEGV (11) instead of SIGTRAP (5).
+    state.waitpidStatus = (11 << 8) | 0x7f;
+    const ok = await engine.rearmBreakpoint(id);
+
+    expect(ok).toBe(false);
+    // setBreakpoint patch + rearm restore only — NO re-patch after the failed
+    // single-step: the tracee must not be re-patched over an unknown stop.
+    const pokes = state.ptraceCalls.filter((c) => c.req === PTRACE_POKETEXT);
+    expect(pokes).toHaveLength(2);
+    const lowMask = isArm64 ? 0xffffffffn : 0xffn;
+    const insnWord = isArm64 ? 0xd4200000n : 0xccn;
+    expect(pokes[1]!.data & lowMask).not.toBe(insnWord);
+  });
+
+  it('re-arming the same address restores the prior patch first (no stacked originals)', async () => {
+    const isArm64 = process.arch === 'arm64';
+    const pid = 4242;
+    const address = 0x401000n;
+    const originalWord = 0xdeadbeef12345678n;
+    const insnWord = isArm64 ? 0xd4200000n : 0xccn;
+    const lowMask = isArm64 ? 0xffffffffn : 0xffn;
+    state.peekReturn = originalWord;
+    state.waitpidRet = pid;
+    state.waitpidStatus = (19 << 8) | 0x7f;
+
+    const engine = new LinuxInt3AccessBreakpoint();
+    await engine.attach(pid);
+    const { id: id1 } = await engine.setBreakpoint(pid, address, 'execute', 1);
+    // The tracee word now holds the patched instruction in the low bytes.
+    state.peekReturn = (originalWord & ~lowMask) | insnWord;
+
+    const { id: id2 } = await engine.setBreakpoint(pid, address, 'execute', 1);
+    expect(id2).not.toBe(id1);
+
+    // Removing the second breakpoint restores the TRUE original bytes — not
+    // the patched instruction a stacked record would have saved as original.
+    await engine.removeBreakpoint(id2);
+    const pokes = state.ptraceCalls.filter((c) => c.req === PTRACE_POKETEXT);
+    expect(pokes[pokes.length - 1]!.data & lowMask).toBe(originalWord & lowMask);
+
+    // The dedupe replaced the first record — its id is no longer valid.
+    await expect(engine.removeBreakpoint(id1)).resolves.toBe(false);
   });
 });

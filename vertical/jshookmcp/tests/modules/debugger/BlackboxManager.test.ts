@@ -92,10 +92,8 @@ describe('BlackboxManager', () => {
     session.send.mockRejectedValueOnce(new Error('cdp error'));
 
     await expect(manager.blackboxCommonLibraries()).rejects.toThrow('cdp error');
-    // patterns were added to the set before the CDP call failed
-    expect(manager.getAllBlackboxedPatterns()).toHaveLength(
-      BlackboxManager.COMMON_LIBRARY_PATTERNS.length,
-    );
+    // patterns must roll back on CDP failure — no local state without CDP state
+    expect(manager.getAllBlackboxedPatterns()).toEqual([]);
   });
 
   it('throws when clearAllBlackboxedPatterns CDP call fails', async () => {
@@ -103,6 +101,8 @@ describe('BlackboxManager', () => {
     session.send.mockRejectedValueOnce(new Error('cdp clear error'));
 
     await expect(manager.clearAllBlackboxedPatterns()).rejects.toThrow('cdp clear error');
+    // patterns must be restored on CDP failure — the browser still has them
+    expect(manager.getAllBlackboxedPatterns()[0]).toContain('lodash');
   });
 
   it('throws when close fails due to clearAllBlackboxedPatterns throwing', async () => {

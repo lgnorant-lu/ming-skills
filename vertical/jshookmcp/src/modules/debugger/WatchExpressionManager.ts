@@ -1,9 +1,6 @@
 import type { RuntimeInspector } from '@modules/debugger/RuntimeInspector';
 import { logger } from '@utils/logger';
-import { WATCH_EVAL_TIMEOUT_MS } from '@src/constants';
-
-/** Cap on retained value-history entries per watch (oldest dropped first). */
-const WATCH_MAX_HISTORY = 100;
+import { WATCH_EVAL_TIMEOUT_MS, WATCH_MAX_HISTORY } from '@src/constants';
 
 type WatchValue = unknown;
 
@@ -34,10 +31,13 @@ export interface WatchResult {
 }
 
 export class WatchExpressionManager {
+  private runtimeInspector: RuntimeInspector;
   private watches: Map<string, WatchExpression> = new Map();
   private watchCounter = 0;
 
-  constructor(private runtimeInspector: RuntimeInspector) {}
+  constructor(runtimeInspector: RuntimeInspector) {
+    this.runtimeInspector = runtimeInspector;
+  }
 
   addWatch(expression: string, name?: string): string {
     const watchId = `watch_${++this.watchCounter}`;

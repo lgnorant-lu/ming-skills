@@ -109,6 +109,29 @@ describe('ConsoleMonitor.impl.core.dynamic.ts', () => {
         expression: expect.stringContaining('const maxRecords = 500'),
       });
     });
+
+    it('sets the installed flag only after setup succeeds and records patched setAttribute', async () => {
+      const ctx = createMockContext();
+
+      await enableDynamicScriptMonitoringCore(ctx);
+
+      const call = ctx.cdpSession!.send.mock.calls.find(
+        (c: unknown[]) => c[0] === 'Runtime.evaluate',
+      );
+      const expression = String(call![1]!.expression);
+
+      // The installed flag must sit at the END of the IIFE, after every setup
+      // step — a partial failure must not leave the monitor marked installed.
+      const flagPos = expression.indexOf('__dynamicScriptMonitorInstalled = true');
+      const enabledPos = expression.indexOf('[ScriptMonitor] Dynamic script monitoring enabled');
+      const lastSetupPos = expression.indexOf('originalFunction.apply');
+      expect(flagPos).toBeGreaterThan(lastSetupPos);
+      expect(enabledPos).toBeGreaterThan(flagPos);
+
+      // Patched script elements are recorded so reset can restore setAttribute.
+      expect(expression).toContain('state.patchedScriptElements');
+      expect(expression).toContain('__jshookOriginalSetAttribute');
+    });
   });
 
   describe('clearDynamicScriptBufferCore', () => {
@@ -318,6 +341,21 @@ describe('ConsoleMonitor.impl.core.dynamic.ts', () => {
         error,
       );
     });
+
+    it('injected reset code restores setAttribute on patched script elements', async () => {
+      const ctx = createMockContext();
+      ctx.cdpSession!.send.mockResolvedValueOnce({
+        result: {
+          value: { scriptMonitorReset: true },
+        },
+      } as RuntimeEvaluateResult);
+
+      await resetDynamicScriptMonitoringCore(ctx);
+
+      const expression = String(ctx.cdpSession!.send.mock.calls[0]![1]!.expression);
+      expect(expression).toContain('patchedScriptElements');
+      expect(expression).toContain('el.__jshookOriginalSetAttribute');
+    });
   });
 
   describe('getDynamicScriptsCore', () => {
@@ -456,6 +494,15 @@ describe('ConsoleMonitor.impl.core.dynamic.ts', () => {
         expression: expect.stringContaining('window.customFunction'),
       });
     });
+
+    it('rejects a functionName that is not a plain identifier', async () => {
+      const ctx = createMockContext();
+
+      await expect(injectFunctionTracerCore(ctx, 'fetch; maliciousCode(); //')).rejects.toThrow(
+        'Invalid function name',
+      );
+      expect(ctx.cdpSession!.send).not.toHaveBeenCalled();
+    });
   });
 
   describe('injectPropertyWatcherCore', () => {
@@ -513,6 +560,24 @@ describe('ConsoleMonitor.impl.core.dynamic.ts', () => {
       expect(call![1]).toMatchObject({
         expression: expect.stringContaining('className'),
       });
+    });
+
+    it('rejects an objectPath that is not a dotted identifier path', async () => {
+      const ctx = createMockContext();
+
+      await expect(injectPropertyWatcherCore(ctx, 'window; alert(1); //', 'href')).rejects.toThrow(
+        'Invalid object path or property name',
+      );
+      expect(ctx.cdpSession!.send).not.toHaveBeenCalled();
+    });
+
+    it('rejects a propertyName that is not a plain identifier', async () => {
+      const ctx = createMockContext();
+
+      await expect(
+        injectPropertyWatcherCore(ctx, 'window.location', 'x"; alert(1); //'),
+      ).rejects.toThrow('Invalid object path or property name');
+      expect(ctx.cdpSession!.send).not.toHaveBeenCalled();
     });
   });
 });

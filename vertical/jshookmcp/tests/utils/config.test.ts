@@ -55,6 +55,12 @@ describe('config utilities', () => {
     delete process.env.SEARCH_CJK_QUERY_ALIASES_JSON;
     delete process.env.SEARCH_INTENT_TOOL_BOOST_RULES_JSON;
     delete process.env.MCP_TRANSPORT;
+    delete process.env.MCP_HOST;
+    delete process.env.MCP_PORT;
+    delete process.env.MCP_AUTH_TOKEN;
+    delete process.env.MCP_ALLOW_INSECURE;
+    delete process.env.MCP_RATE_LIMIT_MAX;
+    delete process.env.MCP_LOG_LEVEL;
     delete process.env.SEARCH_VECTOR_ENABLED;
     delete process.env.SEARCH_VECTOR_MODEL_ID;
     delete process.env.SEARCH_VECTOR_COSINE_WEIGHT;
@@ -224,6 +230,27 @@ describe('config utilities', () => {
     expect(config.transformWorkbench.maxSteps).toBe(5);
   });
 
+  it('falls back per field for malformed reverse-engineering env values', async () => {
+    process.env.TRANSFORM_WORKBENCH_MAX_STEPS = 'abc';
+    process.env.FRIDA_DEX_DUMP_TIMEOUT_MS = 'not-a-number';
+    process.env.NEMU_GUEST_PAGE_SIZE_BYTES = '0';
+
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { getConfig } = await import('@utils/config');
+    const config = getConfig();
+
+    // Invalid values fall back independently without discarding valid sibling
+    // overrides or leaking unvalidated strings into the runtime config.
+    expect(config.reverseEngineering.transformWorkbench.maxSteps).toBe(32);
+    expect(config.reverseEngineering.frida.dexDumpTimeoutMs).toBe(180_000);
+    expect(config.reverseEngineering.nativeEmulator.guestPageSizeBytes).toBe(4096);
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid environment values'),
+    );
+    expect(config.puppeteer.timeout).toBe(30000);
+    consoleError.mockRestore();
+  });
+
   it('resolves executable path by priority order', async () => {
     process.env.BROWSER_EXECUTABLE_PATH = 'browser-path';
     process.env.PUPPETEER_EXECUTABLE_PATH = 'puppeteer-path';
@@ -242,11 +269,74 @@ describe('config utilities', () => {
     expect(getConfig().puppeteer.headless).toBe(false);
   });
 
+  it('normalizes supported boolean spellings consistently', async () => {
+    process.env.PUPPETEER_HEADLESS = ' TRUE ';
+    process.env.ENABLE_CACHE = '1';
+    const { getConfig } = await import('@utils/config');
+
+    expect(getConfig().puppeteer.headless).toBe(true);
+    expect(getConfig().cache.enabled).toBe(true);
+  });
+
+  it('rejects partial numbers and keeps valid sibling overrides', async () => {
+    process.env.PUPPETEER_TIMEOUT = '999999';
+    process.env.MAX_CONCURRENT_ANALYSIS = '8';
+    process.env.MAX_CODE_SIZE_MB = '20garbage';
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { getConfig, validateConfig } = await import('@utils/config');
+
+    const config = getConfig();
+    expect(config.puppeteer.timeout).toBe(30_000);
+    expect(config.performance.maxConcurrentAnalysis).toBe(8);
+    expect(config.performance.maxCodeSizeMB).toBe(10);
+    expect(validateConfig(config)).toEqual({ valid: true, errors: [] });
+    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('PUPPETEER_TIMEOUT'));
+    expect(consoleError).toHaveBeenCalledWith(expect.stringContaining('MAX_CODE_SIZE_MB'));
+    consoleError.mockRestore();
+  });
+
+  it('loads critical server settings through the typed config', async () => {
+    process.env.MCP_TRANSPORT = 'HTTP';
+    process.env.MCP_HOST = '0.0.0.0';
+    process.env.MCP_PORT = '4310';
+    process.env.MCP_AUTH_TOKEN = 'test-token';
+    process.env.MCP_RATE_LIMIT_MAX = '90';
+    process.env.MCP_LOG_LEVEL = 'WARNING';
+    const { getConfig } = await import('@utils/config');
+
+    expect(getConfig().server).toMatchObject({
+      transport: 'http',
+      host: '0.0.0.0',
+      port: 4310,
+      authToken: 'test-token',
+      logging: { level: 'warning' },
+      http: { rateLimitMax: 90 },
+    });
+  });
+
   it('resolves relative cache directory against project root', async () => {
     process.env.CACHE_DIR = '.cache/custom';
     const { getConfig } = await import('@utils/config');
     const config = getConfig();
     expect(config.cache.dir).toBe(join(getProjectRoot(), '.cache/custom'));
+  });
+
+  it.runIf(process.platform === 'win32')('preserves an absolute UNC cache path', async () => {
+    process.env.CACHE_DIR = '\\\\server\\share\\jshook-cache';
+    const { getConfig } = await import('@utils/config');
+
+    expect(getConfig().cache.dir).toBe('\\\\server\\share\\jshook-cache');
+  });
+
+  it('resolves relative cache directory against the writable base in npx contexts', async () => {
+    // In npx/global-install contexts the package root is an immutable install
+    // cache; a relative CACHE_DIR must land in the user's cwd or the cache
+    // silently degrades to a no-op (and pollutes the install dir).
+    process.env.NPX_CACHE = '/tmp/npx-cache';
+    process.env.CACHE_DIR = '.cache/npx-test';
+    const { getConfig } = await import('@utils/config');
+    const config = getConfig();
+    expect(config.cache.dir).toBe(join(process.cwd(), '.cache/npx-test'));
   });
 
   it('validateConfig reports invalid performance settings', async () => {

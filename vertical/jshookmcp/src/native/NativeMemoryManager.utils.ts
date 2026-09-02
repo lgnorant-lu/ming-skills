@@ -2,7 +2,7 @@ import {
   PAGE,
   MEM,
   MEM_TYPE,
-  isKoffiAvailable as isWin32KoffiAvailable,
+  isKoffiBindingUsable as isWin32KoffiAvailable,
   type MemoryBasicInfo,
 } from '@native/Win32API';
 import type { NativePatternType } from '@native/NativeMemoryManager.types';

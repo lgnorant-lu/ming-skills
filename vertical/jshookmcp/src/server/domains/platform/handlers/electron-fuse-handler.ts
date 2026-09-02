@@ -4,7 +4,7 @@
  * Creates backup before patching.
  */
 
-import { readFile, writeFile, copyFile } from 'node:fs/promises';
+import { readFile, writeFile, copyFile, rename, rm } from 'node:fs/promises';
 import type { ToolResponse } from '@server/types';
 import { parseStringArg, pathExists } from '@server/domains/platform/handlers/platform-utils';
 import { handleSafe } from '@server/domains/shared/ResponseBuilder';
@@ -203,8 +203,20 @@ export async function handleElectronPatchFuses(
       await copyFile(exePath, backupPath);
     }
 
-    // Write patched binary
-    await writeFile(exePath, buffer);
+    // Atomic replace: write the patched buffer to a temp SIBLING (same
+    // directory → same volume, so rename cannot cross filesystems), then
+    // rename over the exe. Never overwrite the target in place — a crash
+    // mid-write would leave a truncated executable.
+    const tempPath = `${exePath}.tmp`;
+    try {
+      await writeFile(tempPath, buffer);
+      await rename(tempPath, exePath);
+    } catch (error) {
+      // Clean up the temp sibling; a leftover .tmp next to the exe would
+      // confuse the next patch attempt (and could shadow the real binary).
+      await rm(tempPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
 
     // Read new state for verification
     const fusesAfter = parseFuses(buffer, sentinelIndex);

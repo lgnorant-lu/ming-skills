@@ -118,7 +118,7 @@ export async function runV8Phase(ctx) {
     );
     report.v8.jit = await callTool(
       client,
-      'v8_jit_inspect',
+      'v8_turbofan_inspect',
       { scriptId: report.v8.auditProbeScriptId },
       30000,
     );

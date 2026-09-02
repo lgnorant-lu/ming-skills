@@ -1,9 +1,17 @@
 /**
- * DNS message parser (RFC 1035 + RFC 3596 AAAA + RFC 6891 EDNS(0)).
+ * DNS message dissection (RFC 1035 + RFC 3596 AAAA + RFC 6891 EDNS(0)).
  *
- * Decodes a raw UDP/TCP DNS payload into structured fields with full RR
- * coverage, compression-pointer handling, and EDNS OPT pseudo-record support.
+ * Decoding is delegated to the `dns-packet` package (the DNS-over-HTTPS
+ * ecosystem's reference decoder); a lightweight offset scanner keeps the
+ * reverse-engineering extras `dns-packet` doesn't expose: raw `rdataHex` and
+ * `rdlength` for every record, including known types.
+ *
+ * Failure mode: `dns-packet` decodes atomically — malformed input throws and
+ * no partial records survive. We catch that and surface it as a warning
+ * (all-or-nothing), replacing the previous per-record fail-soft walker.
  */
+
+import * as dnsPacket from 'dns-packet';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -77,7 +85,7 @@ export interface DnsMessage {
 }
 
 // ---------------------------------------------------------------------------
-// Mnemonic tables (subset)
+// Mnemonic tables
 // ---------------------------------------------------------------------------
 
 const TYPE_TABLE: Record<number, string> = {
@@ -104,7 +112,7 @@ const CLASS_TABLE: Record<number, string> = {
   255: 'ANY',
 };
 
-const OPCODE_TABLE: Record<number, string> = {
+const OPCODE_MNEMONIC: Record<number, string> = {
   0: 'QUERY',
   1: 'IQUERY',
   2: 'STATUS',
@@ -130,17 +138,125 @@ function classMnemonic(value: number): string {
   return CLASS_TABLE[value] ?? `CLASS${value}`;
 }
 
+/** Map `dns-packet`'s `UNKNOWN_65` label to the project's `TYPE65` mnemonic. */
+function typeMnemonicOf(typeStr: string): string {
+  const match = /^UNKNOWN_(\d+)$/.exec(typeStr);
+  if (match) return `TYPE${match[1]}`;
+  return typeStr;
+}
+
 // ---------------------------------------------------------------------------
-// Parser
+// Offset scanner (rdataHex / rdlength — the bits dns-packet doesn't expose)
 // ---------------------------------------------------------------------------
 
 const POINTER_BASE = 0x3fff;
 
-interface ParseContext {
-  buffer: Buffer;
-  warnings: string[];
-  maxPointerDepth: number;
+interface RdataSlice {
+  /** Numeric record type read straight off the wire (never 0 for real records). */
+  type: number;
+  /** Numeric class read straight off the wire (OPT carries udpPayloadSize here). */
+  class: number;
+  rdlength: number;
+  rdataHex: string;
 }
+
+/** Domain-name walker with compression-pointer support (mirrors RFC 1035 §4.1.4). */
+function readName(
+  buffer: Buffer,
+  offset: number,
+  warnings: string[],
+  maxPointerDepth: number,
+): { name: string; nextOffset: number } {
+  const labels: string[] = [];
+  let cursor = offset;
+  let jumps = 0;
+  let nextOffset: number | null = null;
+
+  while (cursor < buffer.length) {
+    const lengthOrPointer = buffer[cursor]!;
+    if (lengthOrPointer === 0) {
+      cursor += 1;
+      if (nextOffset === null) nextOffset = cursor;
+      break;
+    }
+    if ((lengthOrPointer & 0xc0) === 0xc0) {
+      if (cursor + 2 > buffer.length) {
+        throw new Error('compression pointer truncated');
+      }
+      const pointer = buffer.readUInt16BE(cursor) & POINTER_BASE;
+      if (pointer >= buffer.length) {
+        throw new Error('compression pointer out of bounds');
+      }
+      if (nextOffset === null) nextOffset = cursor + 2;
+      cursor = pointer;
+      jumps += 1;
+      if (jumps > maxPointerDepth) {
+        warnings.push(`compression pointer depth exceeded ${maxPointerDepth}`);
+        labels.push('<truncated>');
+        break;
+      }
+      continue;
+    }
+    if ((lengthOrPointer & 0xc0) !== 0) {
+      throw new Error(`invalid label length byte 0x${lengthOrPointer.toString(16)}`);
+    }
+    cursor += 1;
+    if (cursor + lengthOrPointer > buffer.length) {
+      throw new Error(`label of length ${lengthOrPointer} exceeds buffer`);
+    }
+    labels.push(buffer.subarray(cursor, cursor + lengthOrPointer).toString('ascii'));
+    cursor += lengthOrPointer;
+  }
+
+  if (nextOffset === null) nextOffset = cursor;
+  const name = labels.length === 0 ? '.' : labels.join('.');
+  return { name, nextOffset };
+}
+
+/**
+ * Walk the record sections and collect each record's raw RDATA. The walker
+ * only needs record boundaries (name + 10-byte fixed header + rdlength), so
+ * it stays ~40 lines instead of re-implementing full decoding.
+ */
+function scanRdataSlices(
+  buffer: Buffer,
+  count: number,
+  startOffset: number,
+  warnings: string[],
+  maxPointerDepth: number,
+): { slices: RdataSlice[]; nextOffset: number } {
+  const slices: RdataSlice[] = [];
+  let cursor = startOffset;
+  for (let i = 0; i < count; i++) {
+    const { nextOffset } = readName(buffer, cursor, warnings, maxPointerDepth);
+    cursor = nextOffset;
+    if (cursor + 10 > buffer.length) {
+      throw new Error(`resource record ${i} truncated before TYPE/CLASS/TTL/RDLENGTH`);
+    }
+    // Numeric type/class come straight from the wire: `dns-packet` decodes every
+    // record but only re-exposes mnemonic strings, so round-tripping through its
+    // string labels would silently collapse ~45 known-but-unlisted types to 0.
+    const type = buffer.readUInt16BE(cursor);
+    const recordClass = buffer.readUInt16BE(cursor + 2);
+    const rdlength = buffer.readUInt16BE(cursor + 8);
+    cursor += 10;
+    if (cursor + rdlength > buffer.length) {
+      throw new Error(`resource record ${i} RDATA exceeds payload (rdlength=${rdlength})`);
+    }
+    slices.push({
+      type,
+      class: recordClass,
+      rdlength,
+      rdataHex: buffer.subarray(cursor, cursor + rdlength).toString('hex'),
+    });
+    cursor += rdlength;
+  }
+  return { slices, nextOffset: cursor };
+}
+
+// ---------------------------------------------------------------------------
+// Parser
+// ---------------------------------------------------------------------------
 
 export interface DnsParseOptions {
   /** Max recursion depth for compression pointers (default 10). */
@@ -149,14 +265,22 @@ export interface DnsParseOptions {
   maxRecordsPerSection?: number;
 }
 
+interface RawRecord {
+  name?: string;
+  type?: string;
+  class?: string;
+  ttl?: number;
+  data?: unknown;
+  flush?: boolean;
+}
+
 export function parseDnsMessage(payload: Buffer, options: DnsParseOptions = {}): DnsMessage {
-  const ctx: ParseContext = {
-    buffer: payload,
-    warnings: [],
-    maxPointerDepth: options.maxPointerDepth ?? 10,
-  };
+  const warnings: string[] = [];
+  const maxPointerDepth = options.maxPointerDepth ?? 10;
   const maxRecordsPerSection = options.maxRecordsPerSection ?? 256;
 
+  // Short payloads are a hard error (not fail-soft): no records can be
+  // recovered and callers need the structured failure.
   if (payload.length < 12) {
     throw new Error('DNS payload too short: header requires 12 bytes');
   }
@@ -173,7 +297,7 @@ export function parseDnsMessage(payload: Buffer, options: DnsParseOptions = {}):
     flags,
     qr: (((flags >>> 15) & 0x1) === 1 ? 1 : 0) as 0 | 1,
     opcode: (flags >>> 11) & 0xf,
-    opcodeMnemonic: OPCODE_TABLE[(flags >>> 11) & 0xf] ?? 'UNKNOWN',
+    opcodeMnemonic: OPCODE_MNEMONIC[(flags >>> 11) & 0xf] ?? 'UNKNOWN',
     authoritativeAnswer: ((flags >>> 10) & 0x1) === 1,
     truncation: ((flags >>> 9) & 0x1) === 1,
     recursionDesired: ((flags >>> 8) & 0x1) === 1,
@@ -185,29 +309,53 @@ export function parseDnsMessage(payload: Buffer, options: DnsParseOptions = {}):
     rcodeMnemonic: RCODE_TABLE[flags & 0xf] ?? 'UNKNOWN',
   };
 
-  let offset = 12;
   const questions: DnsQuestion[] = [];
   const answers: DnsResourceRecord[] = [];
   const authorities: DnsResourceRecord[] = [];
   const additionals: DnsResourceRecord[] = [];
 
   try {
-    offset = readQuestions(ctx, offset, Math.min(questionCount, maxRecordsPerSection), questions);
-    offset = readResourceRecords(ctx, offset, Math.min(answerCount, maxRecordsPerSection), answers);
-    offset = readResourceRecords(
-      ctx,
-      offset,
+    const decoded = dnsPacket.decode(payload);
+
+    // Questions come from the wire scanner too: numeric qtype/qclass must be
+    // exact, and the scanner applies the `maxRecordsPerSection` cap.
+    const scannedQuestions = scanQuestions(
+      payload,
+      Math.min(questionCount, maxRecordsPerSection),
+      warnings,
+      maxPointerDepth,
+    );
+    questions.push(...scannedQuestions.questions);
+
+    // Record sections: zip dns-packet's decoded records with raw RDATA slices
+    // from the offset scanner (preserves rdataHex/rdlength for known types).
+    const answerSlices = scanRdataSlices(
+      payload,
+      Math.min(answerCount, maxRecordsPerSection),
+      scannedQuestions.nextOffset,
+      warnings,
+      maxPointerDepth,
+    );
+    const authoritySlices = scanRdataSlices(
+      payload,
       Math.min(authorityCount, maxRecordsPerSection),
-      authorities,
+      answerSlices.nextOffset,
+      warnings,
+      maxPointerDepth,
     );
-    offset = readResourceRecords(
-      ctx,
-      offset,
+    const additionalSlices = scanRdataSlices(
+      payload,
       Math.min(additionalCount, maxRecordsPerSection),
-      additionals,
+      authoritySlices.nextOffset,
+      warnings,
+      maxPointerDepth,
     );
+
+    zipRecords(decoded.answers ?? [], answerSlices.slices, answers);
+    zipRecords(decoded.authorities ?? [], authoritySlices.slices, authorities);
+    zipRecords(decoded.additionals ?? [], additionalSlices.slices, additionals);
   } catch (error) {
-    ctx.warnings.push(error instanceof Error ? error.message : `parse error at offset ${offset}`);
+    warnings.push(error instanceof Error ? error.message : 'DNS decode failed');
   }
 
   return {
@@ -221,27 +369,30 @@ export function parseDnsMessage(payload: Buffer, options: DnsParseOptions = {}):
     answers,
     authorities,
     additionals,
-    warnings: ctx.warnings,
+    warnings,
   };
 }
 
-function readQuestions(
-  ctx: ParseContext,
-  offset: number,
+function scanQuestions(
+  buffer: Buffer,
   count: number,
-  out: DnsQuestion[],
-): number {
-  let cursor = offset;
+  warnings: string[],
+  maxPointerDepth: number,
+): { questions: DnsQuestion[]; nextOffset: number } {
+  const questions: DnsQuestion[] = [];
+  let cursor = 12;
   for (let i = 0; i < count; i++) {
-    const { name, nextOffset } = readName(ctx, cursor);
+    const { name, nextOffset } = readName(buffer, cursor, warnings, maxPointerDepth);
     cursor = nextOffset;
-    if (cursor + 4 > ctx.buffer.length) {
+    if (cursor + 4 > buffer.length) {
       throw new Error(`question ${i} truncated before QTYPE/QCLASS`);
     }
-    const qtype = ctx.buffer.readUInt16BE(cursor);
-    const qclass = ctx.buffer.readUInt16BE(cursor + 2);
+    // Numeric qtype/qclass straight off the wire — same rationale as the
+    // record scanner: never round-trip through mnemonic strings.
+    const qtype = buffer.readUInt16BE(cursor);
+    const qclass = buffer.readUInt16BE(cursor + 2);
     cursor += 4;
-    out.push({
+    questions.push({
       name,
       qtype,
       qtypeMnemonic: mnemonicOf(TYPE_TABLE, qtype),
@@ -249,189 +400,92 @@ function readQuestions(
       qclassMnemonic: classMnemonic(qclass),
     });
   }
-  return cursor;
+  return { questions, nextOffset: cursor };
 }
 
-function readResourceRecords(
-  ctx: ParseContext,
-  offset: number,
-  count: number,
-  out: DnsResourceRecord[],
-): number {
-  let cursor = offset;
-  for (let i = 0; i < count; i++) {
-    const { name, nextOffset } = readName(ctx, cursor);
-    cursor = nextOffset;
-    if (cursor + 10 > ctx.buffer.length) {
-      throw new Error(`resource record ${i} truncated before TYPE/CLASS/TTL/RDLENGTH`);
-    }
-    const type = ctx.buffer.readUInt16BE(cursor);
-    const recordClass = ctx.buffer.readUInt16BE(cursor + 2);
-    const ttl = ctx.buffer.readUInt32BE(cursor + 4);
-    const rdlength = ctx.buffer.readUInt16BE(cursor + 8);
-    cursor += 10;
-    if (cursor + rdlength > ctx.buffer.length) {
-      throw new Error(`resource record ${i} RDATA exceeds payload (rdlength=${rdlength})`);
-    }
-    const rdata = ctx.buffer.subarray(cursor, cursor + rdlength);
-    cursor += rdlength;
+/** Merge one decoded record with its raw slice, adding decoded RDATA fields. */
+function zipRecords(rawRecords: RawRecord[], slices: RdataSlice[], out: DnsResourceRecord[]): void {
+  // Cap semantics: the scanner walks at most `maxRecordsPerSection` records,
+  // so truncate the decoded list to match (restores the legacy truncation
+  // behaviour instead of fabricating rdlength: 0 for the overflow records).
+  const capped = rawRecords.slice(0, slices.length);
+  for (let i = 0; i < capped.length; i++) {
+    const raw = capped[i]!;
+    const slice = slices[i]!;
+    const typeNum = slice.type;
     const record: DnsResourceRecord = {
-      name,
-      type,
-      typeMnemonic: type === 41 ? 'OPT' : mnemonicOf(TYPE_TABLE, type),
-      class: recordClass,
-      classMnemonic: classMnemonic(recordClass),
-      ttl,
-      rdlength,
-      rdataHex: rdata.toString('hex'),
+      name: raw.name ?? '',
+      type: typeNum,
+      typeMnemonic: typeNum === 41 ? 'OPT' : typeMnemonicOf(raw.type ?? ''),
+      class: slice.class,
+      classMnemonic: classMnemonic(slice.class),
+      ttl: raw.ttl ?? 0,
+      rdlength: slice.rdlength,
+      rdataHex: slice.rdataHex,
     };
-    const decoded = decodeRdata(ctx, type, cursor - rdlength, rdlength, recordClass, ttl);
+    const decoded = decodeRecordData(raw, typeNum);
     if (decoded) {
       record.decoded = decoded;
     }
     out.push(record);
   }
-  return cursor;
 }
 
-/**
- * Read a domain name starting at `offset`, following compression pointers.
- * Returns the offset immediately after the first label run (not after any
- * pointed-to data) so the caller can continue parsing sequentially.
- */
-function readName(ctx: ParseContext, offset: number): { name: string; nextOffset: number } {
-  const labels: string[] = [];
-  let cursor = offset;
-  let jumps = 0;
-  let nextOffset: number | null = null;
-
-  while (cursor < ctx.buffer.length) {
-    const lengthOrPointer = ctx.buffer[cursor]!;
-    if (lengthOrPointer === 0) {
-      cursor += 1;
-      if (nextOffset === null) {
-        nextOffset = cursor;
-      }
-      break;
-    }
-    if ((lengthOrPointer & 0xc0) === 0xc0) {
-      if (cursor + 2 > ctx.buffer.length) {
-        throw new Error('compression pointer truncated');
-      }
-      const pointer = ctx.buffer.readUInt16BE(cursor) & POINTER_BASE;
-      if (nextOffset === null) {
-        nextOffset = cursor + 2;
-      }
-      cursor = pointer;
-      jumps += 1;
-      if (jumps > ctx.maxPointerDepth) {
-        ctx.warnings.push(`compression pointer depth exceeded ${ctx.maxPointerDepth}`);
-        labels.push('<truncated>');
-        break;
-      }
-      continue;
-    }
-    if ((lengthOrPointer & 0xc0) !== 0) {
-      throw new Error(`invalid label length byte 0x${lengthOrPointer.toString(16)}`);
-    }
-    cursor += 1;
-    if (cursor + lengthOrPointer > ctx.buffer.length) {
-      throw new Error(`label of length ${lengthOrPointer} exceeds buffer`);
-    }
-    labels.push(ctx.buffer.subarray(cursor, cursor + lengthOrPointer).toString('ascii'));
-    cursor += lengthOrPointer;
-  }
-
-  if (nextOffset === null) {
-    nextOffset = cursor;
-  }
-  const name = labels.length === 0 ? '.' : labels.join('.');
-  return { name, nextOffset };
-}
-
-function decodeRdata(
-  ctx: ParseContext,
-  type: number,
-  rdataOffset: number,
-  rdlength: number,
-  recordClass: number,
-  ttl: number,
-): Record<string, unknown> | null {
-  const buffer = ctx.buffer;
-  switch (type) {
+/** Project `dns-packet`'s decoded `data` into the project's `decoded` shape. */
+function decodeRecordData(raw: RawRecord, typeNum: number): Record<string, unknown> | null {
+  const data = raw.data;
+  switch (typeNum) {
     case 1: // A
-      if (rdlength >= 4) {
-        const a = buffer[rdataOffset]!;
-        const b = buffer[rdataOffset + 1]!;
-        const c = buffer[rdataOffset + 2]!;
-        const d = buffer[rdataOffset + 3]!;
-        return { address: `${a}.${b}.${c}.${d}` };
-      }
-      return null;
+      return typeof data === 'string' ? { address: data } : null;
     case 28: // AAAA
-      if (rdlength >= 16) {
-        const groups: string[] = [];
-        for (let i = 0; i < 16; i += 2) {
-          groups.push(
-            ((buffer[rdataOffset + i]! << 8) | buffer[rdataOffset + i + 1]!)
-              .toString(16)
-              .replace(/^0+/u, '') || '0',
-          );
-        }
-        return { address: groups.join(':') };
-      }
-      return null;
+      return typeof data === 'string' ? { address: data } : null;
     case 5: // CNAME
     case 2: // NS
-    case 12: {
-      // PTR
-      const { name } = readName(ctx, rdataOffset);
-      return { target: name };
-    }
-    case 15: {
-      // MX
-      if (rdlength < 3) return null;
-      const preference = buffer.readUInt16BE(rdataOffset);
-      const { name } = readName(ctx, rdataOffset + 2);
-      return { preference, exchange: name };
-    }
-    case 16: {
-      // TXT
-      const entries: string[] = [];
-      let cursor = rdataOffset;
-      const end = rdataOffset + rdlength;
-      while (cursor < end) {
-        const len = buffer[cursor]!;
-        cursor += 1;
-        if (cursor + len > end) break;
-        entries.push(buffer.subarray(cursor, cursor + len).toString('utf8'));
-        cursor += len;
+    case 12: // PTR
+      return typeof data === 'string' ? { target: data } : null;
+    case 15: // MX
+      if (data && typeof data === 'object' && 'preference' in data) {
+        const mx = data as unknown as { preference: number; exchange: string };
+        return { preference: mx.preference, exchange: mx.exchange };
       }
-      return { entries };
-    }
-    case 33: {
-      // SRV
-      if (rdlength < 7) return null;
-      const priority = buffer.readUInt16BE(rdataOffset);
-      const weight = buffer.readUInt16BE(rdataOffset + 2);
-      const port = buffer.readUInt16BE(rdataOffset + 4);
-      const { name } = readName(ctx, rdataOffset + 6);
-      return { priority, weight, port, target: name };
-    }
+      return null;
+    case 16: // TXT — dns-packet yields Buffer[] (raw character-strings)
+      return Array.isArray(data)
+        ? { entries: data.map((entry) => Buffer.from(entry).toString('utf8')) }
+        : null;
+    case 33: // SRV
+      if (data && typeof data === 'object' && 'port' in data) {
+        const srv = data as unknown as {
+          priority: number;
+          weight: number;
+          port: number;
+          target: string;
+        };
+        return {
+          priority: srv.priority,
+          weight: srv.weight,
+          port: srv.port,
+          target: srv.target,
+        };
+      }
+      return null;
     case 41: {
-      // OPT (EDNS(0))
-      // For OPT the class field is the requestor's UDP payload size and the
-      // TTL field carries extended RCODE + flags.
-      const extendedRcode = (ttl >>> 24) & 0xff;
-      const version = (ttl >>> 16) & 0xff;
-      const flags = ttl & 0xffff;
-      const doBit = (flags >>> 15) & 0x1;
+      // OPT (EDNS(0)) — dns-packet spreads these fields on the record itself,
+      // not under `data`. Map back to the project's legacy decoded shape.
+      const rawOpt = raw as unknown as {
+        udpPayloadSize?: number;
+        extendedRcode?: number;
+        ednsVersion?: number;
+        flags?: number;
+        flag_do?: boolean;
+      };
+      if (rawOpt.udpPayloadSize === undefined) return null;
       return {
-        udpPayloadSize: recordClass,
-        extendedRcode,
-        version,
-        flags,
-        dnssecOk: doBit === 1,
+        udpPayloadSize: rawOpt.udpPayloadSize,
+        extendedRcode: rawOpt.extendedRcode ?? 0,
+        version: rawOpt.ednsVersion ?? 0,
+        flags: rawOpt.flags ?? 0,
+        dnssecOk: rawOpt.flag_do === true,
       };
     }
     default:

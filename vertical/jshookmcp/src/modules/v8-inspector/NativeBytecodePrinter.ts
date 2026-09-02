@@ -1,4 +1,9 @@
 import { spawn } from 'node:child_process';
+import {
+  normalizeFunctionName,
+  parseStatusLine,
+  shouldWrapAsObjectMember,
+} from './isolated-v8-utils';
 
 const STATUS_PREFIX = '__JSHOOK_BYTECODE_STATUS__:';
 const TARGET_NAME = '__jshookBytecodeTarget__';
@@ -16,32 +21,6 @@ export interface IsolatedNativeBytecodeAttempt {
   functionName: string;
   reason: string;
   rawIgnitionBytecodeAvailable: boolean;
-}
-
-function isValidFunctionName(value: string): boolean {
-  return /^[A-Za-z_$][\w$]*$/u.test(value);
-}
-
-function normalizeFunctionName(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.length === 0 || trimmed === 'anonymous') {
-    return TARGET_NAME;
-  }
-  return isValidFunctionName(trimmed) ? trimmed : TARGET_NAME;
-}
-
-function shouldWrapAsObjectMember(source: string): boolean {
-  const trimmed = source.trim();
-  if (
-    trimmed.startsWith('function') ||
-    trimmed.startsWith('async function') ||
-    trimmed.startsWith('class ') ||
-    trimmed.startsWith('(') ||
-    trimmed.includes('=>')
-  ) {
-    return false;
-  }
-  return /^(?:async\s+)?(?:get\s+|set\s+)?\*?\s*[A-Za-z_$][\w$]*\s*\(/u.test(trimmed);
 }
 
 function buildBootstrapScript(context: NativeSourceContext): string {
@@ -124,15 +103,8 @@ function parsePrintedBytecode(
   return { bytecode: captured.join('\n').trim(), matchedFunctionName };
 }
 
-function parseStatus(output: string): string | null {
-  const line = output
-    .split(/\r?\n/u)
-    .find((entry) => entry.startsWith(STATUS_PREFIX) && entry.length > STATUS_PREFIX.length);
-  return line ? line.slice(STATUS_PREFIX.length) : null;
-}
-
 function formatIsolatedFailure(output: string, stderr: string, fallback: string): string {
-  const status = parseStatus(output);
+  const status = parseStatusLine(output, STATUS_PREFIX);
   if (status === 'resolve-failed') {
     return 'Unable to reconstruct an executable function from the captured source slice';
   }
@@ -173,6 +145,8 @@ async function runBytecodePrinter(
 
     const timer = setTimeout(() => {
       child.kill();
+      // SIGTERM can be ignored or leave grandchildren; force-kill as fallback.
+      setTimeout(() => child.kill('SIGKILL'), 1000).unref();
       finish(`Timed out after ${timeoutMs}ms while waiting for isolated bytecode output`);
     }, timeoutMs);
 
@@ -190,6 +164,8 @@ async function runBytecodePrinter(
     child.on('close', (code) => {
       finish(code === 0 ? null : `Bytecode printer exited with code ${code}`);
     });
+    // EPIPE when the child exits before consuming stdin — swallow, close already settles.
+    child.stdin?.on?.('error', () => undefined);
     child.stdin.end(bootstrapScript);
   });
 }
@@ -198,7 +174,7 @@ export async function printNativeIgnitionBytecode(
   context: NativeSourceContext,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<IsolatedNativeBytecodeAttempt> {
-  const requestedName = normalizeFunctionName(context.functionName);
+  const requestedName = normalizeFunctionName(context.functionName, TARGET_NAME);
   const candidateNames = Array.from(new Set([requestedName, TARGET_NAME]));
   const bootstrapScript = buildBootstrapScript(context);
 

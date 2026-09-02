@@ -49,7 +49,10 @@ interface MutableEntry {
 }
 
 export class PackageDetector {
-  constructor(private readonly extractor: StringsExtractor = new StringsExtractor()) {}
+  private readonly extractor: StringsExtractor;
+  constructor(extractor: StringsExtractor = new StringsExtractor()) {
+    this.extractor = extractor;
+  }
 
   /**
    * Detect packages in either scan or aggregate mode.

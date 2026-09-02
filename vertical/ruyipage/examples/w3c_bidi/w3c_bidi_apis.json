@@ -1,15 +1,20 @@
 {
+  "schema_version": 1,
+  "scope": "core",
+  "source": "https://w3c.github.io/webdriver-bidi/",
+  "source_revision": "27a2f4b1aa258bb8c6859eb7ee265add0f9840fb",
+  "source_date": "2026-08-25T10:57:04Z",
   "modules": [
+    "session",
     "browser",
     "browsingContext",
     "emulation",
-    "input",
-    "log",
     "network",
     "script",
-    "session",
     "storage",
-    "webExtension"
+    "input",
+    "webExtension",
+    "log"
   ],
   "commands": {
     "session": [
@@ -41,16 +46,20 @@
       "browsingContext.reload",
       "browsingContext.setBypassCSP",
       "browsingContext.setViewport",
+      "browsingContext.startScreencast",
+      "browsingContext.stopScreencast",
       "browsingContext.traverseHistory"
     ],
     "emulation": [
       "emulation.setForcedColorsModeThemeOverride",
       "emulation.setGeolocationOverride",
       "emulation.setLocaleOverride",
+      "emulation.setMediaFeaturesOverride",
       "emulation.setNetworkConditions",
       "emulation.setScreenSettingsOverride",
       "emulation.setScreenOrientationOverride",
       "emulation.setUserAgentOverride",
+      "emulation.setViewportMetaOverride",
       "emulation.setScriptingEnabled",
       "emulation.setScrollbarTypeOverride",
       "emulation.setTimezoneOverride",
@@ -123,13 +132,13 @@
       "script.realmCreated",
       "script.realmDestroyed"
     ],
-    "log": [
-      "log.entryAdded"
-    ],
     "input": [
       "input.fileDialogOpened"
+    ],
+    "log": [
+      "log.entryAdded"
     ]
   },
-  "total_commands": 63,
+  "total_commands": 67,
   "total_events": 24
 }

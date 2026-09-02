@@ -89,6 +89,13 @@ export async function handleSyscallStackCapture(
   const events = capturedEvents.slice(-maxEvents);
   const mapper = new SyscallToJSMapper();
 
+  // The live stack is captured once (debugger must be paused for CDP to
+  // expose frames); we attribute every event to that frame when available.
+  let liveStack: StackFrame[] | undefined;
+  if (useDebugger && ctx) {
+    liveStack = tryGetJsStack(ctx);
+  }
+
   let mode: 'debugger' | 'heuristic' | 'mixed' = 'heuristic';
   let withStacks = 0;
   let withHeuristicsOnly = 0;
@@ -100,13 +107,10 @@ export async function handleSyscallStackCapture(
     let hasStack = false;
 
     // Try real CDP stack capture first
-    if (useDebugger && ctx) {
-      const stack = tryGetJsStack(ctx);
-      if (stack) {
-        correlation.stack = stack;
-        hasStack = true;
-        withStacks++;
-      }
+    if (liveStack) {
+      correlation.stack = liveStack;
+      hasStack = true;
+      withStacks++;
     }
 
     // Always run heuristics as fallback / complement

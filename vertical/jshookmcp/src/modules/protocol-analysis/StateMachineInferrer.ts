@@ -1,5 +1,23 @@
 import type { ProtocolMessage, StateMachine, StateNode, StateTransition } from './types';
 
+/**
+ * Heuristic thresholds for state-name classification (empirical tuning values).
+ */
+const TEXT_RATIO_THRESHOLD = 0.7; // printable-ratio above this ⇒ textual message
+const ENCRYPTED_ENTROPY_THRESHOLD = 6.0; // Shannon entropy above this ⇒ encrypted
+const ENCRYPTED_MIN_BUFFER_LENGTH = 32; // buffer must be ≥32B before judging entropy
+const CONTROL_MAX_BUFFER_LENGTH = 4; // ≤4B payload ⇒ control message
+const SIGNATURE_RAW_PREFIX_LENGTH = 24; // raw-hex prefix included in message signature
+const PAYLOAD_PREFIX_LENGTH = 8; // expected-payload prefix used to group states
+const CONDITION_MAX_FIELD_KEYS = 2; // max keys rendered into a transition condition
+
+/** Transition-confidence scoring weights (sum of addends capped at 1.0). */
+const CONFIDENCE_BASE = 0.3;
+const CONFIDENCE_FIELD_WEIGHT = 0.3;
+const CONFIDENCE_STATUS_WEIGHT = 0.2;
+const CONFIDENCE_RAW_WEIGHT = 0.2;
+const CONFIDENCE_MAX = 1.0;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -262,10 +280,10 @@ export class StateMachineInferrer {
 
   private getPayloadPrefix(state: StateNode): string | null {
     const payload = state.expectedPayload;
-    if (!payload || payload.length < 8) {
+    if (!payload || payload.length < PAYLOAD_PREFIX_LENGTH) {
       return null;
     }
-    return payload.slice(0, 8).toLowerCase();
+    return payload.slice(0, PAYLOAD_PREFIX_LENGTH).toLowerCase();
   }
 
   private buildSignature(message: ProtocolMessage): string {
@@ -273,7 +291,7 @@ export class StateMachineInferrer {
     const raw = (message as InternalProtocolMessage).rawBuffer
       ? (message as InternalProtocolMessage).rawBuffer!.toString('hex')
       : message.raw;
-    const rawPrefix = normalizeText(raw).slice(0, 24);
+    const rawPrefix = normalizeText(raw).slice(0, SIGNATURE_RAW_PREFIX_LENGTH);
     return `${message.direction}|${fieldKeys}|${rawPrefix}`;
   }
 
@@ -303,7 +321,7 @@ export class StateMachineInferrer {
 
     // Detect text (high printable ratio, or mostly printable + common whitespace)
     const ratio = printableRatioOf(raw);
-    if (ratio >= 0.7) {
+    if (ratio >= TEXT_RATIO_THRESHOLD) {
       const lower = normalizeText(raw);
       if (lower.includes('close') || lower.includes('fin') || lower.includes('bye')) {
         return `${directionName}_close`;
@@ -315,15 +333,15 @@ export class StateMachineInferrer {
     }
 
     // Detect encrypted (high entropy, large buffer)
-    if (Buffer.isBuffer(buf) && buf.length >= 32) {
+    if (Buffer.isBuffer(buf) && buf.length >= ENCRYPTED_MIN_BUFFER_LENGTH) {
       const entropy = calculateEntropy(buf);
-      if (entropy > 6.0) {
+      if (entropy > ENCRYPTED_ENTROPY_THRESHOLD) {
         return `${directionName}_encrypted`;
       }
     }
 
     // Detect small control messages
-    if (Buffer.isBuffer(buf) && buf.length <= 4) {
+    if (Buffer.isBuffer(buf) && buf.length <= CONTROL_MAX_BUFFER_LENGTH) {
       return `${directionName}_control`;
     }
 
@@ -411,7 +429,7 @@ export class StateMachineInferrer {
       return `status=${statusValue}`;
     }
 
-    const keys = Object.keys(fields).toSorted().slice(0, 2);
+    const keys = Object.keys(fields).toSorted().slice(0, CONDITION_MAX_FIELD_KEYS);
     if (keys.length === 0) {
       return undefined;
     }
@@ -475,21 +493,21 @@ export class StateMachineInferrer {
   }
 
   private computeTransitionConfidence(message: ProtocolMessage): number {
-    let confidence = 0.3;
+    let confidence = CONFIDENCE_BASE;
 
     if (Object.keys(message.fields).length > 0) {
-      confidence += 0.3;
+      confidence += CONFIDENCE_FIELD_WEIGHT;
     }
 
     const statusValue = this.findStatusValue(message.fields);
     if (statusValue) {
-      confidence += 0.2;
+      confidence += CONFIDENCE_STATUS_WEIGHT;
     }
 
     if (message.raw.length > 0) {
-      confidence += 0.2;
+      confidence += CONFIDENCE_RAW_WEIGHT;
     }
 
-    return Math.min(confidence, 1.0);
+    return Math.min(confidence, CONFIDENCE_MAX);
   }
 }

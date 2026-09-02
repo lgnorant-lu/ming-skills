@@ -29,7 +29,20 @@ export async function validateApkFile(apkPath: string): Promise<ValidatedApkFile
   try {
     stats = await stat(apkPath);
   } catch (cause) {
-    throw new ToolError('NOT_FOUND', `APK not found: ${apkPath}`, {
+    const errno = (cause as NodeJS.ErrnoException)?.code;
+    if (errno === 'ENOENT') {
+      throw new ToolError('NOT_FOUND', `APK not found: ${apkPath}`, {
+        details: { apkPath },
+        cause: cause as Error,
+      });
+    }
+    if (errno === 'EACCES' || errno === 'EPERM') {
+      throw new ToolError('PERMISSION', `APK is not readable: ${apkPath}`, {
+        details: { apkPath },
+        cause: cause as Error,
+      });
+    }
+    throw new ToolError('VALIDATION', `Cannot inspect APK file: ${apkPath}`, {
       details: { apkPath },
       cause: cause as Error,
     });

@@ -188,7 +188,7 @@ export async function runCrossDomainBinaryPhase(ctx) {
     15000,
   );
   report.mojo.monitorSimulation = Boolean(
-    report.mojo.monitorStart?._simulation ?? report.mojo.messages?._simulation,
+    report.mojo.monitorStart?.simulation ?? report.mojo.messages?.simulation,
   );
   report.mojo.interfaceCatalogSource =
     report.mojo.listInterfaces?.interfaceCatalogSource ?? 'unknown';

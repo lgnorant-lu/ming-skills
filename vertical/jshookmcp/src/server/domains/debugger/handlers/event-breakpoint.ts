@@ -28,7 +28,10 @@ function getErrorMessage(error: unknown): string {
 }
 
 export class EventBreakpointHandlers {
-  constructor(private deps: EventBreakpointHandlersDeps) {}
+  private deps: EventBreakpointHandlersDeps;
+  constructor(deps: EventBreakpointHandlersDeps) {
+    this.deps = deps;
+  }
 
   private async ensureAdvancedFeaturesIfSupported(): Promise<void> {
     if (hasEnsureAdvancedFeatures(this.deps.debuggerManager)) {

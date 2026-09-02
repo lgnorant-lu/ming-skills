@@ -106,7 +106,6 @@ export function correlateSkiaToJS(
   const graphNodeIds: string[] = [];
   const correlations: SkiaCorrelation[] = [];
   const unmatchedSkiaNodes: string[] = [];
-  const matchedIds = new Set<string>();
 
   const allSkiaItems: Array<{ id: string; label: string; heapObjectId?: string }> = [];
 
@@ -132,17 +131,18 @@ export function correlateSkiaToJS(
       if (jsObj) {
         const heapNode = bridge.addV8Object({ address: item.heapObjectId, name: jsObj.name });
         graphNodeIds.push(heapNode.id);
-        bridge.getGraph().addEdge(heapNode.id, canvasNode.id, 'canvas-rendered-by', {
-          domain: 'cross-domain',
-          matchScore: 1.0,
-        });
+        if (!bridge.getGraph().hasEdge(heapNode.id, canvasNode.id, 'canvas-rendered-by')) {
+          bridge.getGraph().addEdge(heapNode.id, canvasNode.id, 'canvas-rendered-by', {
+            domain: 'cross-domain',
+            matchScore: 1.0,
+          });
+        }
         correlations.push({
           skiaNodeId: item.id,
           matchedObjectId: jsObj.objectId,
           matchedObjectName: jsObj.name,
           matchScore: 1.0,
         });
-        matchedIds.add(item.id);
         continue;
       }
     }
@@ -152,17 +152,18 @@ export function correlateSkiaToJS(
     if (match) {
       const heapNode = bridge.addV8Object({ address: match.objectId, name: match.name });
       graphNodeIds.push(heapNode.id);
-      bridge.getGraph().addEdge(heapNode.id, canvasNode.id, 'canvas-rendered-by', {
-        domain: 'cross-domain',
-        matchScore: match.score,
-      });
+      if (!bridge.getGraph().hasEdge(heapNode.id, canvasNode.id, 'canvas-rendered-by')) {
+        bridge.getGraph().addEdge(heapNode.id, canvasNode.id, 'canvas-rendered-by', {
+          domain: 'cross-domain',
+          matchScore: match.score,
+        });
+      }
       correlations.push({
         skiaNodeId: item.id,
         matchedObjectId: match.objectId,
         matchedObjectName: match.name,
         matchScore: match.score,
       });
-      matchedIds.add(item.id);
     } else {
       unmatchedSkiaNodes.push(item.id);
     }

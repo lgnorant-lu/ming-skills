@@ -17,7 +17,14 @@ import {
   type DOMObserverOptions,
 } from '@modules/collector/DOMInspector.evaluations';
 import { logger } from '@utils/logger';
-import { DOM_QUERY_DEFAULT_LIMIT, DOM_WAIT_ELEMENT_TIMEOUT_MS } from '@src/constants';
+import {
+  DOM_QUERY_DEFAULT_LIMIT,
+  DOM_WAIT_ELEMENT_TIMEOUT_MS,
+  DOM_QUERY_INPUT_MAX_CHARS,
+  DOM_READY_STATE_POLL_INTERVAL_MS,
+  DOM_EMPTY_RESULT_RETRY_DELAY_MS,
+  DOM_DEFAULT_READY_STATE_TIMEOUT_MS,
+} from '@src/constants';
 
 export type {
   DOMInspectorClickableElement,
@@ -57,17 +64,39 @@ type DOMFindClickableEvaluationResult = {
   diagnostics: DOMEvaluationDiagnostics;
 };
 
+/** Cap on caller-supplied selectors / filter text fed into string-built evaluations. */
+const QUERY_INPUT_MAX_CHARS = DOM_QUERY_INPUT_MAX_CHARS;
+
+/**
+ * Input gate for the string-built evaluations. The build* helpers already
+ * embed caller input via JSON.stringify (quotes/newlines are escaped), so no
+ * code injection is possible; this adds a length/NUL guard for defense in
+ * depth before the transport Function is constructed (same pattern as
+ * CRIT-01's validateCodeSafety).
+ */
+function assertSafeQueryInput(value: string, field: string): void {
+  if (value.length > QUERY_INPUT_MAX_CHARS) {
+    throw new Error(`${field} exceeds ${QUERY_INPUT_MAX_CHARS} characters`);
+  }
+  if (value.includes('\u0000')) {
+    throw new Error(`${field} contains NUL`);
+  }
+}
+
 export class DOMInspector {
+  protected collector: CodeCollector;
   protected cdpSession: CDPSession | null = null;
 
   /** Default wait for the page to reach readyState 'complete' (ms). */
-  private static readonly READY_STATE_POLL_INTERVAL_MS = 100;
+  private static readonly READY_STATE_POLL_INTERVAL_MS = DOM_READY_STATE_POLL_INTERVAL_MS;
   /** Retry delay before re-running an empty query after readyState 'complete' (ms). */
-  private static readonly EMPTY_RESULT_RETRY_DELAY_MS = 500;
+  private static readonly EMPTY_RESULT_RETRY_DELAY_MS = DOM_EMPTY_RESULT_RETRY_DELAY_MS;
   /** Default readyState wait budget when the caller does not supply one (ms). */
-  private static readonly DEFAULT_READY_STATE_TIMEOUT_MS = 3000;
+  private static readonly DEFAULT_READY_STATE_TIMEOUT_MS = DOM_DEFAULT_READY_STATE_TIMEOUT_MS;
 
-  constructor(protected collector: CodeCollector) {}
+  constructor(collector: CodeCollector) {
+    this.collector = collector;
+  }
 
   private async waitForReadyState(
     page: { evaluate: <T>(fn: () => T) => Promise<T>; frames?: () => unknown[] },
@@ -122,6 +151,7 @@ export class DOMInspector {
 
   async querySelector(selector: string, _getAttributes = true): Promise<ElementInfo> {
     try {
+      assertSafeQueryInput(selector, 'selector');
       const page = await this.collector.getActivePage();
       const elementInfo = await page.evaluate(
         new Function(buildQuerySelectorEvaluation(selector)) as () => ElementInfo,
@@ -139,6 +169,7 @@ export class DOMInspector {
     limit = DOM_QUERY_DEFAULT_LIMIT,
   ): Promise<DOMQueryAllResult> {
     try {
+      assertSafeQueryInput(selector, 'selector');
       const page = await this.collector.getActivePage();
       const runQuery = async () =>
         page.evaluate(
@@ -191,6 +222,7 @@ export class DOMInspector {
 
   async findClickable(filterText?: string): Promise<DOMFindClickableResult> {
     try {
+      assertSafeQueryInput(filterText ?? '', 'filterText');
       const page = await this.collector.getActivePage();
       const runQuery = async () =>
         page.evaluate(
@@ -270,6 +302,7 @@ export class DOMInspector {
 
   async findByText(text: string, tag?: string): Promise<ElementInfo[]> {
     try {
+      assertSafeQueryInput(text, 'text');
       const page = await this.collector.getActivePage();
       const elements = await page.evaluate(
         new Function(buildFindByTextEvaluation(text, tag)) as () => Array<

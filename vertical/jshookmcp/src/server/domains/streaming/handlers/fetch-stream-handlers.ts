@@ -12,13 +12,7 @@
 import { writeFile } from 'node:fs/promises';
 import { resolveArtifactPath } from '@utils/artifacts';
 import type { StreamingSharedState, TextToolResponse } from './shared';
-import {
-  asJson,
-  parseBooleanArg,
-  parseNumberArg,
-  parseOptionalStringArg,
-  compileRegex,
-} from './shared';
+import { parseBooleanArg, parseNumberArg, parseOptionalStringArg, compileRegex } from './shared';
 import {
   evaluateWithTimeout,
   evaluateOnNewDocumentWithTimeout,
@@ -31,6 +25,7 @@ import {
   STREAMING_QUERY_LIMIT_MAX,
   WS_PAYLOAD_PREVIEW_LIMIT,
 } from '@src/constants/streaming';
+import { asJson } from './shared';
 
 type ExportFormat = 'json' | 'ndjson';
 
@@ -313,7 +308,10 @@ function fetchStreamInjectionFn(config: {
 }
 
 export class FetchStreamHandlers {
-  constructor(private s: StreamingSharedState) {}
+  private s: StreamingSharedState;
+  constructor(s: StreamingSharedState) {
+    this.s = s;
+  }
 
   private async enable(
     maxEvents: number,
@@ -367,7 +365,10 @@ export class FetchStreamHandlers {
     if (urlFilterRaw) {
       const compiled = compileRegex(urlFilterRaw);
       if (compiled.error)
-        return asJson({ success: false, error: `Invalid urlFilter regex: ${compiled.error}` });
+        return asJson({
+          success: false,
+          error: `Invalid urlFilter regex: ${compiled.error}`,
+        });
     }
     const persistent = args.persistent === true;
     const result = await this.enable(maxEvents, urlFilterRaw, { persistent });

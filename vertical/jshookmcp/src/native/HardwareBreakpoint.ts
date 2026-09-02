@@ -32,7 +32,9 @@ import {
   parseContext,
   writeContext,
   encodeDR7,
+  writeBreakpointRegisters,
   CONTEXT_FLAGS,
+  IS_ARM64_WINDOWS,
   EXCEPTION_CODE,
   DBG,
 } from './Win32Debug';
@@ -71,9 +73,11 @@ export class HardwareBreakpointEngine {
     // Remove all breakpoints for this pid
     for (const [id, bp] of this.breakpoints) {
       if (bp.pid === pid) {
+        // Delete before clearDR so the DR7 rebuild excludes this breakpoint
+        // (otherwise its DR bit stays enabled with a zeroed address).
+        this.breakpoints.delete(id);
         this.clearDR(pid, bp.drIndex);
         this.drAllocation[bp.drIndex] = false;
-        this.breakpoints.delete(id);
       }
     }
 
@@ -126,9 +130,12 @@ export class HardwareBreakpointEngine {
     const bp = this.breakpoints.get(id);
     if (!bp) return false;
 
+    // Delete before clearDR so the DR7 rebuild in applyDRToAllThreads
+    // excludes this breakpoint — otherwise its DR bit stays enabled with
+    // a zeroed address, leaving a ghost breakpoint at 0.
+    this.breakpoints.delete(id);
     this.clearDR(bp.pid, bp.drIndex);
     this.drAllocation[bp.drIndex] = false;
-    this.breakpoints.delete(id);
     return true;
   }
 
@@ -198,13 +205,21 @@ export class HardwareBreakpointEngine {
   // ── Private ──
 
   private allocateDR(): number {
-    for (let i = 0; i < 4; i++) {
+    // AMD64 has 4 hardware debug registers (DR0-3); Windows-on-ARM64 exposes
+    // only 2 hardware watchpoints (Wvr0-1 / Wcr0-1).
+    const maxSlots = IS_ARM64_WINDOWS ? 2 : 4;
+    for (let i = 0; i < maxSlots; i++) {
       if (!this.drAllocation[i]) {
         this.drAllocation[i] = true;
         return i;
       }
     }
-    throw new ToolError('PREREQUISITE', 'All 4 hardware breakpoint registers (DR0-DR3) are in use');
+    throw new ToolError(
+      'PREREQUISITE',
+      IS_ARM64_WINDOWS
+        ? 'All 2 hardware watchpoint registers (WVR0-1) are in use'
+        : 'All 4 hardware breakpoint registers (DR0-DR3) are in use',
+    );
   }
 
   private applyDRToAllThreads(
@@ -236,36 +251,36 @@ export class HardwareBreakpointEngine {
 
         const ctxBuf = GetThreadContext(hThread, CONTEXT_FLAGS.ALL);
 
-        // Set/clear DR address
-        const drOffsets = [0x48, 0x50, 0x58, 0x60]; // DR0-DR3 offsets
-        if (enable) {
-          ctxBuf.writeBigUInt64LE(address, drOffsets[drIndex]!);
-        } else {
-          ctxBuf.writeBigUInt64LE(0n, drOffsets[drIndex]!);
+        // Arch-aware debug-register write. On AMD64 this sets DR0-3 + merges DR7;
+        // on ARM64 it programs the Wvr/Wcr watchpoint pair (only drIndex 0-1 exist,
+        // guarded here and in allocate so 2-3 degrade to an explicit error).
+        writeBreakpointRegisters(ctxBuf, drIndex, enable ? address : null, enable, access);
+
+        if (!IS_ARM64_WINDOWS) {
+          // Build DR7 from all active breakpoints of this pid only — including
+          // other pids' breakpoints would pollute this process's debug state.
+          const entries = Array.from(this.breakpoints.values())
+            .filter((bp) => bp.enabled && bp.pid === pid)
+            .map((bp) => ({
+              drIndex: bp.drIndex,
+              enabled: true,
+              access: drAccessMap[bp.access],
+              size: bp.size,
+            }));
+
+          // Add current one if enabling
+          if (enable) {
+            entries.push({
+              drIndex,
+              enabled: true,
+              access: drAccessMap[access],
+              size,
+            });
+          }
+
+          const dr7 = encodeDR7(entries);
+          ctxBuf.writeBigUInt64LE(dr7, 0x70); // DR7 offset
         }
-
-        // Build DR7 from all active breakpoints
-        const entries = Array.from(this.breakpoints.values())
-          .filter((bp) => bp.enabled)
-          .map((bp) => ({
-            drIndex: bp.drIndex,
-            enabled: true,
-            access: drAccessMap[bp.access],
-            size: bp.size,
-          }));
-
-        // Add current one if enabling
-        if (enable) {
-          entries.push({
-            drIndex,
-            enabled: true,
-            access: drAccessMap[access],
-            size,
-          });
-        }
-
-        const dr7 = encodeDR7(entries);
-        ctxBuf.writeBigUInt64LE(dr7, 0x70); // DR7 offset
 
         writeContext(ctxBuf, { contextFlags: CONTEXT_FLAGS.ALL });
         SetThreadContext(hThread, ctxBuf);
@@ -305,48 +320,71 @@ export class HardwareBreakpointEngine {
       const ctxBuf = GetThreadContext(hThread, CONTEXT_FLAGS.ALL);
       const ctx = parseContext(ctxBuf);
 
-      // DR6 bits 0-3 indicate which breakpoint was hit
+      // AMD64: DR6 bits 0-3 indicate which breakpoint was hit.
+      // ARM64: no DR6; watchpoint faults don't tag the Wvr index in CONTEXT. With
+      // only 2 watchpoints we match the ARM64 breakpoint whose address equals the
+      // faulting address when the caller supplies it, else the first enabled one
+      // for this pid. (Runtime semantics not exercisable on an x64 host.)
       for (const [id, bp] of this.breakpoints) {
         if (bp.pid !== processId) continue;
-        const drBit = 1n << BigInt(bp.drIndex);
-        if (ctx.dr6 & drBit) {
-          bp.hitCount++;
-          bp.lastHit = Date.now();
 
-          // Clear DR6
-          ctxBuf.writeBigUInt64LE(0n, 0x68);
-          SetThreadContext(hThread, ctxBuf);
-
-          return {
-            breakpointId: id,
-            address: bp.address,
-            accessAddress: bp.address,
-            instructionAddress: toHex(ctx.rip),
-            threadId,
-            accessType: bp.access,
-            timestamp: Date.now(),
-            registers: {
-              rax: toHex(ctx.rax),
-              rbx: toHex(ctx.rbx),
-              rcx: toHex(ctx.rcx),
-              rdx: toHex(ctx.rdx),
-              rsi: toHex(ctx.rsi),
-              rdi: toHex(ctx.rdi),
-              rsp: toHex(ctx.rsp),
-              rbp: toHex(ctx.rbp),
-              r8: toHex(ctx.r8),
-              r9: toHex(ctx.r9),
-              r10: toHex(ctx.r10),
-              r11: toHex(ctx.r11),
-              r12: toHex(ctx.r12),
-              r13: toHex(ctx.r13),
-              r14: toHex(ctx.r14),
-              r15: toHex(ctx.r15),
-              rip: toHex(ctx.rip),
-              rflags: `0x${ctx.eflags.toString(16).toUpperCase()}`,
-            },
-          };
+        let hit = false;
+        if (IS_ARM64_WINDOWS) {
+          const bpAddr = BigInt(bp.address.startsWith('0x') ? bp.address : `0x${bp.address}`);
+          const addrHit = _exceptionAddress !== undefined && _exceptionAddress === bpAddr;
+          hit = addrHit || bp.enabled;
+          if (!addrHit && bp.enabled) {
+            // Prefer a breakpoint whose address matches the reported faulting address;
+            // only fall back to any-enabled when there is exactly one enabled.
+            const enabled = Array.from(this.breakpoints.values()).filter(
+              (b) => b.pid === processId && b.enabled,
+            );
+            if (enabled.length !== 1) continue;
+          }
+        } else {
+          const drBit = 1n << BigInt(bp.drIndex);
+          hit = (ctx.dr6 & drBit) !== 0n;
         }
+        if (!hit) continue;
+
+        bp.hitCount++;
+        bp.lastHit = Date.now();
+
+        // Clear debug-register hit state (DR6 on AMD64; no-op on ARM64).
+        if (!IS_ARM64_WINDOWS) {
+          ctxBuf.writeBigUInt64LE(0n, 0x68);
+        }
+        SetThreadContext(hThread, ctxBuf);
+
+        return {
+          breakpointId: id,
+          address: bp.address,
+          accessAddress: bp.address,
+          instructionAddress: toHex(ctx.rip),
+          threadId,
+          accessType: bp.access,
+          timestamp: Date.now(),
+          registers: {
+            rax: toHex(ctx.rax),
+            rbx: toHex(ctx.rbx),
+            rcx: toHex(ctx.rcx),
+            rdx: toHex(ctx.rdx),
+            rsi: toHex(ctx.rsi),
+            rdi: toHex(ctx.rdi),
+            rsp: toHex(ctx.rsp),
+            rbp: toHex(ctx.rbp),
+            r8: toHex(ctx.r8),
+            r9: toHex(ctx.r9),
+            r10: toHex(ctx.r10),
+            r11: toHex(ctx.r11),
+            r12: toHex(ctx.r12),
+            r13: toHex(ctx.r13),
+            r14: toHex(ctx.r14),
+            r15: toHex(ctx.r15),
+            rip: toHex(ctx.rip),
+            rflags: `0x${ctx.eflags.toString(16).toUpperCase()}`,
+          },
+        };
       }
 
       return null;

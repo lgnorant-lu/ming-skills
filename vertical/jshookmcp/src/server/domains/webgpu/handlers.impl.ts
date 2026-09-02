@@ -6,6 +6,7 @@ import {
   ShaderCompileHandler,
   ShaderDisassembleHandler,
   TimingAnalysisHandler,
+  FrameTimingHandler,
   MemoryLayoutHandler,
   CommandCaptureHandler,
   ShaderSourceCaptureHandler,
@@ -22,6 +23,7 @@ export class WebGPUHandlers {
   private shaderCompileHandler: ShaderCompileHandler;
   private shaderDisassembleHandler: ShaderDisassembleHandler;
   private timingAnalysisHandler: TimingAnalysisHandler;
+  private frameTimingHandler: FrameTimingHandler;
   private memoryLayoutHandler: MemoryLayoutHandler;
   private commandCaptureHandler: CommandCaptureHandler;
   private shaderSourceCaptureHandler: ShaderSourceCaptureHandler;
@@ -37,6 +39,7 @@ export class WebGPUHandlers {
     this.shaderCompileHandler = new ShaderCompileHandler(_ctx, d);
     this.shaderDisassembleHandler = new ShaderDisassembleHandler(_ctx, d);
     this.timingAnalysisHandler = new TimingAnalysisHandler(_ctx, d);
+    this.frameTimingHandler = new FrameTimingHandler(_ctx, d);
     this.memoryLayoutHandler = new MemoryLayoutHandler(_ctx, d);
     this.commandCaptureHandler = new CommandCaptureHandler(_ctx, d);
     this.shaderSourceCaptureHandler = new ShaderSourceCaptureHandler(_ctx, d);
@@ -58,6 +61,10 @@ export class WebGPUHandlers {
 
   async webgpu_timing_analysis(args: Record<string, unknown>): Promise<ToolResponse> {
     return this.timingAnalysisHandler.handle(args);
+  }
+
+  async webgpu_frame_timing(args: Record<string, unknown>): Promise<ToolResponse> {
+    return this.frameTimingHandler.handle(args);
   }
 
   async webgpu_memory_layout(args: Record<string, unknown>): Promise<ToolResponse> {

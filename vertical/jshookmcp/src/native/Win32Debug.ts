@@ -8,7 +8,8 @@
  * @module Win32Debug
  */
 
-import koffi, { type LibraryHandle } from 'koffi';
+import type { LibraryHandle } from 'koffi';
+import { requireKoffi } from './koffi-loader';
 import { logger } from '@utils/logger';
 import { GetLastError, CloseHandle } from './Win32API';
 
@@ -27,17 +28,46 @@ export const THREAD_ACCESS = {
   ALL_ACCESS: 0x1f03ff,
 } as const;
 
+/**
+ * True when the current process is a native ARM64 build running on Windows
+ * (Windows-on-ARM64), where the kernel uses the ARM64_NT_CONTEXT layout
+ * instead of the x64 (AMD64) one. Mirrors the `IS_AARCH64` arch-gating
+ * precedent in platform/linux/LinuxInt3AccessBreakpoint.ts.
+ *
+ * The platform check is required: `process.arch === 'arm64'` alone also
+ * matches Apple Silicon (darwin) and Linux aarch64 hosts, where this
+ * Win32 module never runs real FFI and the AMD64 layout must stay the
+ * default (tests exercise it via mocks on those hosts).
+ *
+ * Note: under x64 emulation (WOW64) on a Windows-on-ARM64 machine the Node
+ * process itself is x64, so `process.arch` is `'x64'` and we correctly take
+ * the AMD64 path (GetThreadContext kernel32 marshals compatibility).
+ */
+export const IS_ARM64_WINDOWS = process.platform === 'win32' && process.arch === 'arm64';
+
 /** CONTEXT flags for GetThreadContext / SetThreadContext */
-export const CONTEXT_FLAGS = {
-  AMD64: 0x00100000,
-  CONTROL: 0x00100001,
-  INTEGER: 0x00100002,
-  SEGMENTS: 0x00100004,
-  FLOATING_POINT: 0x00100008,
-  DEBUG_REGISTERS: 0x00100010,
-  FULL: 0x0010000b, // CONTROL | INTEGER | FLOATING_POINT
-  ALL: 0x0010001f, // FULL | SEGMENTS | DEBUG_REGISTERS
-} as const;
+export const CONTEXT_FLAGS = IS_ARM64_WINDOWS
+  ? {
+      // CONTEXT_ARM64 = 0x00400000; the CONTROL|INTEGER|FP our engines touch.
+      ARM64: 0x00400000,
+      CONTROL: 0x00400001,
+      INTEGER: 0x00400002,
+      SEGMENTS: 0x00400000,
+      FLOATING_POINT: 0x00400004,
+      DEBUG_REGISTERS: 0x00400008,
+      FULL: 0x00400007, // CONTROL | INTEGER | FLOATING_POINT
+      ALL: 0x0040000f, // FULL | DEBUG_REGISTERS
+    }
+  : {
+      AMD64: 0x00100000,
+      CONTROL: 0x00100001,
+      INTEGER: 0x00100002,
+      SEGMENTS: 0x00100004,
+      FLOATING_POINT: 0x00100008,
+      DEBUG_REGISTERS: 0x00100010,
+      FULL: 0x0010000b, // CONTROL | INTEGER | FLOATING_POINT
+      ALL: 0x0010001f, // FULL | SEGMENTS | DEBUG_REGISTERS
+    };
 
 /** Debug event codes */
 export const DEBUG_EVENT_CODE = {
@@ -83,29 +113,30 @@ export const TH32CS = {
   SNAPMODULE: 0x00000008,
 } as const;
 
-// ── x64 CONTEXT struct layout ──
-// Full CONTEXT is 1232 bytes on x64. We only need the relevant fields.
-// Layout (key offsets):
-//   +0x00: P1Home..P6Home (48 bytes)
-//   +0x30: ContextFlags (4 bytes)
-//   +0x34: MxCsr (4 bytes)
-//   +0x38: SegCs..SegSs (12 bytes short regs = 6*2 = 12 padded to 16)
-//   +0x44: EFlags (4 bytes)
-//   +0x48: Dr0 (8 bytes)
-//   +0x50: Dr1 (8 bytes)
-//   +0x58: Dr2 (8 bytes)
-//   +0x60: Dr3 (8 bytes)
-//   +0x68: Dr6 (8 bytes)
-//   +0x70: Dr7 (8 bytes)
-//   +0x78: Rax (8), Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi (64 bytes total)
-//   +0xB8: R8..R15 (64 bytes)
-//   +0xF8: Rip (8 bytes)
-//   ... FPU/SSE state follows
+// ── CONTEXT struct layouts ──
+// Full AMD64 CONTEXT is 1232 bytes; ARM64_NT_CONTEXT is 912 bytes. We only
+// need the relevant fields. The `X64Context` fields double as an arch-agnostic
+// register view (riporting the Linux precedent
+// platform/linux/LinuxInt3AccessBreakpoint.ts which maps rip←pc, rflags←pstate
+// so x86-named fields stay meaningful on aarch64).
+//   AMD64 offsets:
+//   +0x30: ContextFlags (4)   +0x44: EFlags (4)
+//   +0x48..0x70: Dr0 Dr1 Dr2 Dr3 Dr6 Dr7 (8 each)
+//   +0x78..0xF8: Rax..R15 (8)  Rip@0xF8 (8)
+//   ARM64_NT_CONTEXT offsets:
+//   +0x00: ContextFlags (4)   +0x04: Cpsr (4) = PSTATE (x86 "eflags" view)
+//   +0x08..0xF8: X0..X28 (8 each), Fp@0xF0 (=x29→rbp), Lr@0xF8 (=x30)
+//   +0x100: Sp   +0x108: Pc (→rip)
+//   +0x318: Bcr[8] (4 each)   +0x338: Bvr[8] (8 each)  — breakpoints
+//   +0x378: Wcr[2] (4 each)   +0x380: Wvr[2] (8 each)  — watchpoints
 
-export const CONTEXT_SIZE = 1232;
+export const CONTEXT_SIZE = IS_ARM64_WINDOWS ? 912 : 1232;
 
 export interface X64Context {
   contextFlags: number;
+  /** ARM64: PSTATE/Cpsr (kept in the x86 "eflags" slot for callers). */
+  eflags: number;
+  /** Debug registers. AMD64: Dr0-3, Dr6-7. ARM64: no Dr regs — 0n; use wvr/wcr. */
   dr0: bigint;
   dr1: bigint;
   dr2: bigint;
@@ -129,11 +160,66 @@ export interface X64Context {
   r14: bigint;
   r15: bigint;
   rip: bigint;
-  eflags: number;
+  /** ARM64 only: x30 (link register). AMD64: 0n. */
+  lr: bigint;
+  /** ARM64 only: breakpoint regs (Bvr/Bcr). AMD64: empty. */
+  bvr: bigint[];
+  bcr: number[];
+  /** ARM64 only: watchpoint regs (Wvr/Wcr). AMD64: empty. */
+  wvr: bigint[];
+  wcr: number[];
 }
 
-/** Parse x64 CONTEXT from raw buffer */
-export function parseContext(buf: Buffer): X64Context {
+const ARM64_X0 = 0x08;
+const ARM64_SP = 0x100;
+const ARM64_PC = 0x108;
+const ARM64_LR = 0x0f8;
+const ARM64_FP = 0x0f0;
+const ARM64_BVR = 0x338;
+const ARM64_BCR = 0x318;
+const ARM64_WVR = 0x380;
+const ARM64_WCR = 0x378;
+
+/**
+ * Parse a CONTEXT buffer into the shared register view. Pass `isArm64` to
+ * force the ARM64_NT_CONTEXT layout (used by tests / when the arch const is
+ * not authoritative); defaults to the runtime arch.
+ */
+export function parseContext(buf: Buffer, isArm64 = IS_ARM64_WINDOWS): X64Context {
+  if (isArm64) {
+    return {
+      contextFlags: buf.readUInt32LE(0x00),
+      eflags: buf.readUInt32LE(0x04),
+      dr0: 0n,
+      dr1: 0n,
+      dr2: 0n,
+      dr3: 0n,
+      dr6: 0n,
+      dr7: 0n,
+      rax: buf.readBigUInt64LE(ARM64_X0 + 0 * 8),
+      rcx: buf.readBigUInt64LE(ARM64_X0 + 1 * 8),
+      rdx: buf.readBigUInt64LE(ARM64_X0 + 2 * 8),
+      rbx: buf.readBigUInt64LE(ARM64_X0 + 3 * 8),
+      rsp: buf.readBigUInt64LE(ARM64_SP),
+      rbp: buf.readBigUInt64LE(ARM64_FP),
+      rsi: buf.readBigUInt64LE(ARM64_X0 + 4 * 8),
+      rdi: buf.readBigUInt64LE(ARM64_X0 + 5 * 8),
+      r8: buf.readBigUInt64LE(ARM64_X0 + 8 * 8),
+      r9: buf.readBigUInt64LE(ARM64_X0 + 9 * 8),
+      r10: buf.readBigUInt64LE(ARM64_X0 + 10 * 8),
+      r11: buf.readBigUInt64LE(ARM64_X0 + 11 * 8),
+      r12: buf.readBigUInt64LE(ARM64_X0 + 12 * 8),
+      r13: buf.readBigUInt64LE(ARM64_X0 + 13 * 8),
+      r14: buf.readBigUInt64LE(ARM64_X0 + 14 * 8),
+      r15: buf.readBigUInt64LE(ARM64_X0 + 15 * 8),
+      rip: buf.readBigUInt64LE(ARM64_PC),
+      lr: buf.readBigUInt64LE(ARM64_LR),
+      bvr: Array.from({ length: 8 }, (_, i) => buf.readBigUInt64LE(ARM64_BVR + i * 8)),
+      bcr: Array.from({ length: 8 }, (_, i) => buf.readUInt32LE(ARM64_BCR + i * 4)),
+      wvr: Array.from({ length: 2 }, (_, i) => buf.readBigUInt64LE(ARM64_WVR + i * 8)),
+      wcr: Array.from({ length: 2 }, (_, i) => buf.readUInt32LE(ARM64_WCR + i * 4)),
+    };
+  }
   return {
     contextFlags: buf.readUInt32LE(0x30),
     eflags: buf.readUInt32LE(0x44),
@@ -160,11 +246,59 @@ export function parseContext(buf: Buffer): X64Context {
     r14: buf.readBigUInt64LE(0xe8),
     r15: buf.readBigUInt64LE(0xf0),
     rip: buf.readBigUInt64LE(0xf8),
+    lr: 0n,
+    bvr: [],
+    bcr: [],
+    wvr: [],
+    wcr: [],
   };
 }
 
-/** Write x64 CONTEXT fields into a raw buffer */
-export function writeContext(buf: Buffer, ctx: Partial<X64Context>): void {
+/** Write CONTEXT fields into a raw buffer (arch-aware offsets). */
+export function writeContext(
+  buf: Buffer,
+  ctx: Partial<X64Context>,
+  isArm64 = IS_ARM64_WINDOWS,
+): void {
+  if (isArm64) {
+    if (ctx.contextFlags !== undefined) buf.writeUInt32LE(ctx.contextFlags, 0x00);
+    if (ctx.eflags !== undefined) buf.writeUInt32LE(ctx.eflags, 0x04);
+    if (ctx.rax !== undefined) buf.writeBigUInt64LE(ctx.rax, ARM64_X0 + 0 * 8);
+    if (ctx.rcx !== undefined) buf.writeBigUInt64LE(ctx.rcx, ARM64_X0 + 1 * 8);
+    if (ctx.rdx !== undefined) buf.writeBigUInt64LE(ctx.rdx, ARM64_X0 + 2 * 8);
+    if (ctx.rbx !== undefined) buf.writeBigUInt64LE(ctx.rbx, ARM64_X0 + 3 * 8);
+    if (ctx.rsi !== undefined) buf.writeBigUInt64LE(ctx.rsi, ARM64_X0 + 4 * 8);
+    if (ctx.rdi !== undefined) buf.writeBigUInt64LE(ctx.rdi, ARM64_X0 + 5 * 8);
+    if (ctx.rsp !== undefined) buf.writeBigUInt64LE(ctx.rsp, ARM64_SP);
+    if (ctx.rbp !== undefined) buf.writeBigUInt64LE(ctx.rbp, ARM64_FP);
+    if (ctx.r8 !== undefined) buf.writeBigUInt64LE(ctx.r8, ARM64_X0 + 8 * 8);
+    if (ctx.r9 !== undefined) buf.writeBigUInt64LE(ctx.r9, ARM64_X0 + 9 * 8);
+    if (ctx.r10 !== undefined) buf.writeBigUInt64LE(ctx.r10, ARM64_X0 + 10 * 8);
+    if (ctx.r11 !== undefined) buf.writeBigUInt64LE(ctx.r11, ARM64_X0 + 11 * 8);
+    if (ctx.r12 !== undefined) buf.writeBigUInt64LE(ctx.r12, ARM64_X0 + 12 * 8);
+    if (ctx.r13 !== undefined) buf.writeBigUInt64LE(ctx.r13, ARM64_X0 + 13 * 8);
+    if (ctx.r14 !== undefined) buf.writeBigUInt64LE(ctx.r14, ARM64_X0 + 14 * 8);
+    if (ctx.r15 !== undefined) buf.writeBigUInt64LE(ctx.r15, ARM64_X0 + 15 * 8);
+    if (ctx.rip !== undefined) buf.writeBigUInt64LE(ctx.rip, ARM64_PC);
+    if (ctx.lr !== undefined) buf.writeBigUInt64LE(ctx.lr, ARM64_LR);
+    if (ctx.bvr !== undefined)
+      ctx.bvr.forEach((v, i) => {
+        if (i < 8) buf.writeBigUInt64LE(v, ARM64_BVR + i * 8);
+      });
+    if (ctx.bcr !== undefined)
+      ctx.bcr.forEach((v, i) => {
+        if (i < 8) buf.writeUInt32LE(v, ARM64_BCR + i * 4);
+      });
+    if (ctx.wvr !== undefined)
+      ctx.wvr.forEach((v, i) => {
+        if (i < 2) buf.writeBigUInt64LE(v, ARM64_WVR + i * 8);
+      });
+    if (ctx.wcr !== undefined)
+      ctx.wcr.forEach((v, i) => {
+        if (i < 2) buf.writeUInt32LE(v, ARM64_WCR + i * 4);
+      });
+    return;
+  }
   if (ctx.contextFlags !== undefined) buf.writeUInt32LE(ctx.contextFlags, 0x30);
   if (ctx.eflags !== undefined) buf.writeUInt32LE(ctx.eflags, 0x44);
   if (ctx.dr0 !== undefined) buf.writeBigUInt64LE(ctx.dr0, 0x48);
@@ -176,13 +310,119 @@ export function writeContext(buf: Buffer, ctx: Partial<X64Context>): void {
   if (ctx.rip !== undefined) buf.writeBigUInt64LE(ctx.rip, 0xf8);
 }
 
+/**
+ * Encode a single ARM64 watchpoint into its Wcr bitfield.
+ *
+ * ARM64 watchpoint control register (DBGWCR, mirrored in CONTEXT.Wcr) layout:
+ *   bits 0-1  : BAS (byte address select) — 0b1111 = 4-byte granule selected
+ *   bit  2    : LSC[0]
+ *   bit  3    : LSC[1]  (00=reserved, 01=load, 11=store, so catches both on WOA)
+ *   bit  5    : PAC (privileged access control) — 0 = EL0 (user) watchpoint
+ *   bit  13   : E / enable
+ * The Wvr holds the watchpoint address (masked to the granule).
+ * Structure verified against the Windows SDK winnt.h ARM64_NT_CONTEXT Wcr/Wvr
+ * field ordering; runtime semantics are not exercisable on an x64 host.
+ */
+function encodeArm64Wcr(
+  _enabled: boolean,
+  access: 'execute' | 'write' | 'readwrite' | 'read',
+): number {
+  let wcr = 0b1111; // BAS: all 4 bytes of the granule
+  wcr |= access === 'read' || access === 'readwrite' ? 0b01 : 0b00; // LSC: load
+  wcr |= access === 'write' || access === 'readwrite' ? 0b10 : 0b00; // LSC: store → 0b11
+  // PAC (bit 5) stays 0 → EL0 watchpoint. E (bit 13) set below by caller.
+  return wcr;
+}
+
+/**
+ * Write a hardware watchpoint/breakpoint into an architecture-appropriate
+ * register set. AMD64: Dr0-3 + Dr7. ARM64: Wvr/Wcr or Bvr/Bcr.
+ * Exposed so engine callers (HardwareBreakpoint / VehDebugger) stop hardcoding
+ * the AMD64 Dr offsets and instead delegate to the arch-aware writer.
+ */
+export function writeBreakpointRegisters(
+  buf: Buffer,
+  index: number,
+  address: bigint | null,
+  enabled: boolean,
+  access: 'execute' | 'write' | 'readwrite' | 'read',
+  arm64Kind: 'watch' | 'break' = 'watch',
+  isArm64 = IS_ARM64_WINDOWS,
+): void {
+  if (isArm64) {
+    if (arm64Kind === 'watch') {
+      // Wvr[0..1] / Wcr[0..1]
+      if (index < 0 || index > 1) return;
+      buf.writeBigUInt64LE(address ?? 0n, ARM64_WVR + index * 8);
+      const base = encodeArm64Wcr(enabled, access);
+      const wcr = (base | (enabled ? 0x2000 /* E */ : 0)) & 0xffffffff;
+      buf.writeUInt32LE(wcr, ARM64_WCR + index * 4);
+    } else {
+      // Bvr[0..7] / Bcr[0..7] — execute-only breakpoint.
+      if (index < 0 || index > 7) return;
+      buf.writeBigUInt64LE(address ?? 0n, ARM64_BVR + index * 8);
+      const bcr = (encodeArm64Wcr(enabled, 'execute') | (enabled ? 0x2000 : 0)) & 0xffffffff;
+      buf.writeUInt32LE(bcr, ARM64_BCR + index * 4);
+    }
+    return;
+  }
+  // AMD64: DR0-3 hold addresses; DR7 enables + configures them.
+  const drOffsets = [0x48, 0x50, 0x58, 0x60]; // Dr0-Dr3
+  buf.writeBigUInt64LE(address ?? 0n, drOffsets[index]!);
+  if (enabled) {
+    const dr7 = encodeDR7([
+      { drIndex: index, enabled: true, access, size: address !== null ? 8 : 1 },
+    ]);
+    // Merge into existing DR7 (preserve other breakpoints).
+    const existing = buf.readBigUInt64LE(0x70);
+    buf.writeBigUInt64LE(existing | (dr7 & 0xffffffffn), 0x70);
+  } else {
+    // Clear local/global enable bits for this index (bits 2*i, 2*i+1).
+    const clearMask = ~(3n << BigInt(index * 2));
+    buf.writeBigUInt64LE(buf.readBigUInt64LE(0x70) & clearMask, 0x70);
+  }
+}
+
+/** Read the debug-register address currently held for an index (arch-aware). */
+export function readBreakpointRegisterAddress(
+  buf: Buffer,
+  index: number,
+  isArm64 = IS_ARM64_WINDOWS,
+): bigint {
+  if (isArm64) {
+    if (index < 0 || index > 1) return 0n;
+    return buf.readBigUInt64LE(ARM64_WVR + index * 8);
+  }
+  const drOffsets = [0x48, 0x50, 0x58, 0x60];
+  return buf.readBigUInt64LE(drOffsets[index]!);
+}
+
+/**
+ * Set (or clear) the single-step trap bit in an arch-aware way.
+ *
+ * AMD64: sets EFLAGS.TF (bit 8). ARM64: sets PSTATE.SS (Software Step, bit 21)
+ * in the Cpsr slot — the ARM64 single-step control, mirroring how the tracer
+ * switches arch on Linux. Both feed the same `eflags` field of the shared view.
+ */
+export function setSingleStepFlag(buf: Buffer, enabled: boolean, isArm64 = IS_ARM64_WINDOWS): void {
+  if (isArm64) {
+    const ssMask = 0x1 << 21; // PSTATE.SS
+    const cpsr = buf.readUInt32LE(0x04);
+    buf.writeUInt32LE(enabled ? cpsr | ssMask : cpsr & ~ssMask, 0x04);
+    return;
+  }
+  const tfMask = 0x100; // EFLAGS/RFLAGS.TF
+  const eflags = buf.readUInt32LE(0x44);
+  buf.writeUInt32LE(enabled ? eflags | tfMask : eflags & ~tfMask, 0x44);
+}
+
 // ── Library Loading ──
 
 let kernel32Debug: LibraryHandle | null = null;
 
 function getKernel32(): LibraryHandle {
   if (!kernel32Debug) {
-    kernel32Debug = koffi.load('kernel32.dll');
+    kernel32Debug = requireKoffi().load('kernel32.dll');
     logger.debug('Loaded kernel32.dll for debug APIs');
   }
   return kernel32Debug;
@@ -222,10 +462,10 @@ export function ResumeThread(hThread: bigint): number {
 
 /** Get thread context (CPU registers including debug registers) */
 export function GetThreadContext(hThread: bigint, contextFlags: number): Buffer {
-  const fn = getKernel32().func('int GetThreadContext(void *, _Inout_ uint8_t[1232])');
+  const fn = getKernel32().func(`int GetThreadContext(void *, _Inout_ uint8_t[${CONTEXT_SIZE}])`);
   const buf = Buffer.alloc(CONTEXT_SIZE);
   // Must set ContextFlags before calling
-  buf.writeUInt32LE(contextFlags, 0x30);
+  buf.writeUInt32LE(contextFlags, IS_ARM64_WINDOWS ? 0x00 : 0x30);
 
   const result = fn(hThread, buf);
   if (result === 0) {
@@ -236,7 +476,7 @@ export function GetThreadContext(hThread: bigint, contextFlags: number): Buffer 
 
 /** Set thread context (CPU registers including debug registers) */
 export function SetThreadContext(hThread: bigint, contextBuf: Buffer): void {
-  const fn = getKernel32().func('int SetThreadContext(void *, uint8_t[1232])');
+  const fn = getKernel32().func(`int SetThreadContext(void *, uint8_t[${CONTEXT_SIZE}])`);
   const result = fn(hThread, contextBuf);
   if (result === 0) {
     throw new Error(`SetThreadContext failed. Error: 0x${GetLastError().toString(16)}`);

@@ -1,289 +1,86 @@
-import type { MsgPackDecodeResult } from '@server/domains/encoding/handlers.impl.core.runtime.shared';
+import { decode, ExtData, ExtensionCodec } from '@msgpack/msgpack';
 import { bigIntToSafeValue } from '@server/domains/encoding/encoding-protobuf';
 
-export function decodeMsgPack(buffer: Buffer): unknown {
-  const decoded = decodeMsgPackValue(buffer, 0, 0);
-  if (decoded.offset !== buffer.length) {
-    throw new Error(
-      `MessagePack decode ended early: consumed ${decoded.offset} of ${buffer.length} bytes`,
-    );
-  }
-  return decoded.value;
+/**
+ * MessagePack decoding via the official `@msgpack/msgpack` package.
+ *
+ * Binary output follows the grpc-raw convention: `base64` is the single
+ * authoritative representation; `hex` is derived on demand only when
+ * `includeHex` is set (it is recoverable from base64, so we don't store both
+ * by default). `extType` is always retained on ext values — reverse
+ * engineering needs the type discriminator.
+ *
+ * Adaptations over the raw package behaviour:
+ * - `useBigInt64: true` then map back through `bigIntToSafeValue`, preserving
+ *   the project convention of number-within-safe-range / string-beyond.
+ * - A raw ext codec override for type -1 (timestamp): the package's default
+ *   codec converts 4/8/12-byte payloads into `Date` and rejects others. We
+ *   want the raw payload bytes, never an interpreted Date.
+ * - `mapKeyConverter` reuses `msgPackMapKey` so bool/null/number keys keep
+ *   their stringified behaviour.
+ */
+export function decodeMsgPack(buffer: Buffer, includeHex = false): unknown {
+  const decoded = decode(buffer, {
+    useBigInt64: true,
+    extensionCodec: RAW_EXT_CODEC,
+    mapKeyConverter: (key: unknown): string | number => msgPackMapKey(key),
+  });
+  return adapt(decoded, includeHex);
 }
 
-export function decodeMsgPackValue(
-  buffer: Buffer,
-  startOffset: number,
-  depth: number,
-): MsgPackDecodeResult {
-  if (depth > 64) {
-    throw new Error('MessagePack decode depth exceeds safety limit');
-  }
-
-  const prefix = buffer[startOffset];
-  if (prefix === undefined) {
-    throw new Error(`Unexpected EOF at offset ${startOffset}`);
-  }
-
-  let offset = startOffset + 1;
-
-  if (prefix <= 0x7f) {
-    return { value: prefix, offset };
-  }
-  if (prefix >= 0xe0) {
-    return { value: prefix - 0x100, offset };
-  }
-  if (prefix >= 0xa0 && prefix <= 0xbf) {
-    const length = prefix & 0x1f;
-    ensureRange(buffer, offset, length);
-    const value = buffer.subarray(offset, offset + length).toString('utf8');
-    return { value, offset: offset + length };
-  }
-  if (prefix >= 0x90 && prefix <= 0x9f) {
-    const length = prefix & 0x0f;
-    return decodeMsgPackArray(buffer, offset, length, depth + 1);
-  }
-  if (prefix >= 0x80 && prefix <= 0x8f) {
-    const length = prefix & 0x0f;
-    return decodeMsgPackMap(buffer, offset, length, depth + 1);
-  }
-
-  if (prefix === 0xc0) return { value: null, offset };
-  if (prefix === 0xc2) return { value: false, offset };
-  if (prefix === 0xc3) return { value: true, offset };
-
-  if (prefix === 0xcc) {
-    ensureRange(buffer, offset, 1);
-    const value = buffer.readUInt8(offset);
-    return { value, offset: offset + 1 };
-  }
-  if (prefix === 0xcd) {
-    ensureRange(buffer, offset, 2);
-    const value = buffer.readUInt16BE(offset);
-    return { value, offset: offset + 2 };
-  }
-  if (prefix === 0xce) {
-    ensureRange(buffer, offset, 4);
-    const value = buffer.readUInt32BE(offset);
-    return { value, offset: offset + 4 };
-  }
-  if (prefix === 0xcf) {
-    ensureRange(buffer, offset, 8);
-    const value = buffer.readBigUInt64BE(offset);
-    return { value: bigIntToSafeValue(value), offset: offset + 8 };
-  }
-
-  if (prefix === 0xd0) {
-    ensureRange(buffer, offset, 1);
-    const value = buffer.readInt8(offset);
-    return { value, offset: offset + 1 };
-  }
-  if (prefix === 0xd1) {
-    ensureRange(buffer, offset, 2);
-    const value = buffer.readInt16BE(offset);
-    return { value, offset: offset + 2 };
-  }
-  if (prefix === 0xd2) {
-    ensureRange(buffer, offset, 4);
-    const value = buffer.readInt32BE(offset);
-    return { value, offset: offset + 4 };
-  }
-  if (prefix === 0xd3) {
-    ensureRange(buffer, offset, 8);
-    const value = buffer.readBigInt64BE(offset);
-    return { value: bigIntToSafeValue(value), offset: offset + 8 };
-  }
-
-  if (prefix === 0xca) {
-    ensureRange(buffer, offset, 4);
-    const value = buffer.readFloatBE(offset);
-    return { value, offset: offset + 4 };
-  }
-  if (prefix === 0xcb) {
-    ensureRange(buffer, offset, 8);
-    const value = buffer.readDoubleBE(offset);
-    return { value, offset: offset + 8 };
-  }
-
-  if (prefix === 0xd9) {
-    ensureRange(buffer, offset, 1);
-    const length = buffer.readUInt8(offset);
-    offset += 1;
-    ensureRange(buffer, offset, length);
-    const value = buffer.subarray(offset, offset + length).toString('utf8');
-    return { value, offset: offset + length };
-  }
-  if (prefix === 0xda) {
-    ensureRange(buffer, offset, 2);
-    const length = buffer.readUInt16BE(offset);
-    offset += 2;
-    ensureRange(buffer, offset, length);
-    const value = buffer.subarray(offset, offset + length).toString('utf8');
-    return { value, offset: offset + length };
-  }
-  if (prefix === 0xdb) {
-    ensureRange(buffer, offset, 4);
-    const length = buffer.readUInt32BE(offset);
-    offset += 4;
-    ensureRange(buffer, offset, length);
-    const value = buffer.subarray(offset, offset + length).toString('utf8');
-    return { value, offset: offset + length };
-  }
-
-  if (prefix === 0xc4) {
-    ensureRange(buffer, offset, 1);
-    const length = buffer.readUInt8(offset);
-    offset += 1;
-    ensureRange(buffer, offset, length);
-    const payload = buffer.subarray(offset, offset + length);
-    return {
-      value: { type: 'bytes', base64: payload.toString('base64'), hex: payload.toString('hex') },
-      offset: offset + length,
-    };
-  }
-  if (prefix === 0xc5) {
-    ensureRange(buffer, offset, 2);
-    const length = buffer.readUInt16BE(offset);
-    offset += 2;
-    ensureRange(buffer, offset, length);
-    const payload = buffer.subarray(offset, offset + length);
-    return {
-      value: { type: 'bytes', base64: payload.toString('base64'), hex: payload.toString('hex') },
-      offset: offset + length,
-    };
-  }
-  if (prefix === 0xc6) {
-    ensureRange(buffer, offset, 4);
-    const length = buffer.readUInt32BE(offset);
-    offset += 4;
-    ensureRange(buffer, offset, length);
-    const payload = buffer.subarray(offset, offset + length);
-    return {
-      value: { type: 'bytes', base64: payload.toString('base64'), hex: payload.toString('hex') },
-      offset: offset + length,
-    };
-  }
-
-  if (prefix === 0xdc) {
-    ensureRange(buffer, offset, 2);
-    const length = buffer.readUInt16BE(offset);
-    offset += 2;
-    return decodeMsgPackArray(buffer, offset, length, depth + 1);
-  }
-  if (prefix === 0xdd) {
-    ensureRange(buffer, offset, 4);
-    const length = buffer.readUInt32BE(offset);
-    offset += 4;
-    return decodeMsgPackArray(buffer, offset, length, depth + 1);
-  }
-
-  if (prefix === 0xde) {
-    ensureRange(buffer, offset, 2);
-    const length = buffer.readUInt16BE(offset);
-    offset += 2;
-    return decodeMsgPackMap(buffer, offset, length, depth + 1);
-  }
-  if (prefix === 0xdf) {
-    ensureRange(buffer, offset, 4);
-    const length = buffer.readUInt32BE(offset);
-    offset += 4;
-    return decodeMsgPackMap(buffer, offset, length, depth + 1);
-  }
-
-  if (prefix >= 0xd4 && prefix <= 0xd8) {
-    const sizeByPrefix: Record<number, number> = {
-      0xd4: 1,
-      0xd5: 2,
-      0xd6: 4,
-      0xd7: 8,
-      0xd8: 16,
-    };
-    const size = sizeByPrefix[prefix]!;
-    ensureRange(buffer, offset, 1 + size);
-    const extType = buffer.readInt8(offset);
-    const payload = buffer.subarray(offset + 1, offset + 1 + size);
-    return {
-      value: {
-        type: 'ext',
-        extType,
-        base64: payload.toString('base64'),
-        hex: payload.toString('hex'),
-      },
-      offset: offset + 1 + size,
-    };
-  }
-
-  if (prefix === 0xc7 || prefix === 0xc8 || prefix === 0xc9) {
-    const lengthBytes = prefix === 0xc7 ? 1 : prefix === 0xc8 ? 2 : 4;
-    ensureRange(buffer, offset, lengthBytes);
-
-    const length =
-      lengthBytes === 1
-        ? buffer.readUInt8(offset)
-        : lengthBytes === 2
-          ? buffer.readUInt16BE(offset)
-          : buffer.readUInt32BE(offset);
-
-    offset += lengthBytes;
-    ensureRange(buffer, offset, 1 + length);
-
-    const extType = buffer.readInt8(offset);
-    const payload = buffer.subarray(offset + 1, offset + 1 + length);
-    return {
-      value: {
-        type: 'ext',
-        extType,
-        base64: payload.toString('base64'),
-        hex: payload.toString('hex'),
-      },
-      offset: offset + 1 + length,
-    };
-  }
-
-  throw new Error(
-    `Unsupported MessagePack prefix 0x${prefix.toString(16)} at offset ${startOffset}`,
-  );
+/** grpc-raw-style binary wrapper: base64 authoritative, hex derived on demand. */
+function binPayload(payload: Buffer, includeHex: boolean): { base64: string; hex?: string } {
+  return {
+    base64: payload.toString('base64'),
+    ...(includeHex ? { hex: payload.toString('hex') } : {}),
+  };
 }
 
-export function decodeMsgPackArray(
-  buffer: Buffer,
-  startOffset: number,
-  length: number,
-  depth: number,
-): MsgPackDecodeResult {
-  let offset = startOffset;
-  const values: unknown[] = [];
-
-  for (let index = 0; index < length; index += 1) {
-    const decoded = decodeMsgPackValue(buffer, offset, depth);
-    values.push(decoded.value);
-    offset = decoded.offset;
-  }
-
-  return { value: values, offset };
+/** grpc-raw-style ext wrapper: extType always retained, payload as base64 (+hex on demand). */
+function extPayload(
+  extType: number,
+  payload: Buffer,
+  includeHex: boolean,
+): { extType: number; base64: string; hex?: string } {
+  return {
+    extType,
+    ...binPayload(payload, includeHex),
+  };
 }
 
-export function decodeMsgPackMap(
-  buffer: Buffer,
-  startOffset: number,
-  length: number,
-  depth: number,
-): MsgPackDecodeResult {
-  let offset = startOffset;
-  const mapValue: Record<string, unknown> = {};
+/** Disable the package's built-in timestamp (ext -1) decoding; keep raw bytes. */
+const RAW_EXT_CODEC: ExtensionCodec = (() => {
+  const codec = new ExtensionCodec();
+  codec.register({
+    type: -1,
+    encode: () => null,
+    decode: (data: Uint8Array, extType: number): unknown => new ExtData(extType, data),
+  });
+  return codec;
+})();
 
-  for (let index = 0; index < length; index += 1) {
-    const keyDecoded = decodeMsgPackValue(buffer, offset, depth);
-    offset = keyDecoded.offset;
-
-    const valueDecoded = decodeMsgPackValue(buffer, offset, depth);
-    offset = valueDecoded.offset;
-
-    const key = msgPackMapKey(keyDecoded.value);
-    mapValue[key] = valueDecoded.value;
+function adapt(value: unknown, includeHex: boolean): unknown {
+  if (value instanceof Uint8Array) {
+    return binPayload(Buffer.from(value), includeHex);
   }
-
-  return { value: mapValue, offset };
+  if (value instanceof ExtData) {
+    const raw = typeof value.data === 'function' ? value.data(0) : value.data;
+    return extPayload(value.type, Buffer.from(raw as Uint8Array), includeHex);
+  }
+  if (typeof value === 'bigint') {
+    return bigIntToSafeValue(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => adapt(item, includeHex));
+  }
+  if (typeof value === 'object' && value !== null) {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      out[key] = adapt(item, includeHex);
+    }
+    return out;
+  }
+  return value;
 }
 
 export function msgPackMapKey(value: unknown): string {
@@ -297,11 +94,5 @@ export function msgPackMapKey(value: unknown): string {
     return JSON.stringify(value);
   } catch {
     return String(value);
-  }
-}
-
-export function ensureRange(buffer: Buffer, offset: number, length: number): void {
-  if (offset < 0 || length < 0 || offset + length > buffer.length) {
-    throw new Error(`Unexpected EOF while reading ${length} bytes at offset ${offset}`);
   }
 }

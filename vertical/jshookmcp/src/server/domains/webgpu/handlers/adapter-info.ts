@@ -14,12 +14,12 @@ import type { WebGPUDomainDependencies } from '../types';
  * adapter selection stable across the session.
  */
 export class AdapterInfoHandler {
+  private deps: WebGPUDomainDependencies;
   private pageLockManager = getPageLockManager();
 
-  constructor(
-    _ctx: MCPServerContext,
-    private deps: WebGPUDomainDependencies,
-  ) {}
+  constructor(_ctx: MCPServerContext, deps: WebGPUDomainDependencies) {
+    this.deps = deps;
+  }
 
   async handle(_args: Record<string, unknown>): Promise<ToolResponse> {
     return handleSafe(async () => {

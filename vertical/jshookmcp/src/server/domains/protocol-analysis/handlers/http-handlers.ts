@@ -3,10 +3,8 @@
  */
 
 import type { ToolArgs } from '@server/types';
-import { parseHttpMessage, type ParsedHttpMessage } from './shared';
+import { parseHexPayload, parseHttpMessage, type ParsedHttpMessage } from './shared';
 import { ProtocolAnalysisDnsHandlers } from './dns-handlers';
-
-const HEX_RE = /^[0-9a-f]*$/iu;
 
 export class ProtocolAnalysisHttpHandlers extends ProtocolAnalysisDnsHandlers {
   async handleProtoDissectHttp(args: ToolArgs): Promise<{
@@ -16,7 +14,7 @@ export class ProtocolAnalysisHttpHandlers extends ProtocolAnalysisDnsHandlers {
     error?: string;
   }> {
     try {
-      const payload = parseHexInput(args.packetHex);
+      const payload = parseHexPayload(args.packetHex, 'packetHex');
       const message = parseHttpMessage(payload);
       this.emitEvent('protocol:http_dissected', {
         byteLength: payload.length,
@@ -39,13 +37,4 @@ export class ProtocolAnalysisHttpHandlers extends ProtocolAnalysisDnsHandlers {
   }
 }
 
-function parseHexInput(value: unknown): Buffer {
-  if (typeof value !== 'string') {
-    throw new Error('packetHex must be a hex string');
-  }
-  const normalized = value.replace(/\s+/g, '').replace(/^0x/iu, '').toLowerCase();
-  if (normalized.length % 2 !== 0 || !HEX_RE.test(normalized)) {
-    throw new Error('packetHex must be valid even-length hex');
-  }
-  return Buffer.from(normalized, 'hex');
-}
+// parseHexInput removed — now imported from ./shared (parseHexPayload)

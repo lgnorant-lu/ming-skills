@@ -395,7 +395,7 @@ describe('ExternalToolRunner', () => {
       'tool-bin',
       [],
       expect.objectContaining({
-        cwd: expect.stringContaining('/repo/root/src'.replace(/\//g, require('path').sep)),
+        cwd: expect.stringContaining('/repo/root/src'.replace(/\//g, require('node:path').sep)),
       }),
     );
   });
@@ -484,7 +484,7 @@ describe('ExternalToolRunner', () => {
         'tool-bin',
         [],
         expect.objectContaining({
-          cwd: expect.stringContaining('/mock/tmp'.replace(/\//g, require('path').sep)),
+          cwd: expect.stringContaining('/mock/tmp'.replace(/\//g, require('node:path').sep)),
         }),
       );
     } finally {

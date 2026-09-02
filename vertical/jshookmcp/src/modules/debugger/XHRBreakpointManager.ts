@@ -10,10 +10,12 @@ export interface XHRBreakpoint {
 }
 
 export class XHRBreakpointManager {
+  private cdpSession: CDPSession;
   private xhrBreakpoints: Map<string, XHRBreakpoint> = new Map();
   private breakpointCounter = 0;
 
-  constructor(private cdpSession: CDPSession) {
+  constructor(cdpSession: CDPSession) {
+    this.cdpSession = cdpSession;
     logger.info('XHRBreakpointManager initialized with shared CDP session');
   }
 
@@ -76,12 +78,12 @@ export class XHRBreakpointManager {
         await this.cdpSession.send('DOMDebugger.removeXHRBreakpoint', {
           url: bp.urlPattern,
         });
+        this.xhrBreakpoints.delete(bp.id);
       } catch (error) {
         logger.warn(`Failed to remove XHR breakpoint ${bp.id}:`, error);
       }
     }
 
-    this.xhrBreakpoints.clear();
     logger.info('All XHR breakpoints cleared');
   }
 

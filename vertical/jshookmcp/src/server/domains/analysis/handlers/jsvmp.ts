@@ -3,24 +3,18 @@
  */
 
 import { argBool, argNumber } from '@server/domains/shared/parse-args';
+import { cpuLimit } from '@utils/concurrency';
 import { asJsonResponse } from '@server/domains/shared/response';
 import type { ToolArgs, ToolResponse } from '@server/types';
 import { JSVMPDeobfuscator } from '@modules/deobfuscator/JSVMPDeobfuscator';
 import { buildVmAnalysisResponse } from '@server/domains/analysis/handlers/vm-analysis';
-
-function requireCodeArg(args: ToolArgs, _toolName: string): string | null {
-  const code = args.code;
-  if (typeof code !== 'string' || code.trim().length === 0) {
-    return null;
-  }
-  return code;
-}
+import { requireCodeArg } from './shared';
 
 export async function handleJsDeobfuscateJsvmp(
   args: ToolArgs,
   jsvmpDeobfuscator: JSVMPDeobfuscator,
 ): Promise<ToolResponse> {
-  const code = requireCodeArg(args, 'js_deobfuscate_jsvmp');
+  const code = requireCodeArg(args);
   if (!code) {
     return asJsonResponse({
       success: false,
@@ -29,35 +23,41 @@ export async function handleJsDeobfuscateJsvmp(
   }
 
   const detectOnly = argBool(args, 'detectOnly', false);
-  const result = await jsvmpDeobfuscator.deobfuscate({
-    code,
-    aggressive: argBool(args, 'aggressive', false),
-    extractInstructions: argBool(args, 'extractInstructions', true),
-    timeout: argNumber(args, 'timeout', 30000),
-  });
+  const aggressive = argBool(args, 'aggressive', false);
+  const extractInstructions = argBool(args, 'extractInstructions', true);
+  const timeout = argNumber(args, 'timeout', 30000);
 
-  if (detectOnly) {
+  return cpuLimit(async (): Promise<ToolResponse> => {
+    const result = await jsvmpDeobfuscator.deobfuscate({
+      code,
+      aggressive,
+      extractInstructions,
+      timeout,
+    });
+
+    if (detectOnly) {
+      return asJsonResponse({
+        success: true,
+        isJSVMP: result.isJSVMP,
+        vmType: result.vmType,
+        vmFeatures: result.vmFeatures,
+        confidence: result.confidence,
+        instructionCount: result.instructions?.length,
+      });
+    }
+
     return asJsonResponse({
-      success: true,
+      success: result.isJSVMP,
       isJSVMP: result.isJSVMP,
       vmType: result.vmType,
       vmFeatures: result.vmFeatures,
+      instructions: result.instructions,
+      deobfuscatedCode: result.deobfuscatedCode,
       confidence: result.confidence,
-      instructionCount: result.instructions?.length,
+      warnings: result.warnings,
+      unresolvedParts: result.unresolvedParts,
+      stats: result.stats,
     });
-  }
-
-  return asJsonResponse({
-    success: result.isJSVMP,
-    isJSVMP: result.isJSVMP,
-    vmType: result.vmType,
-    vmFeatures: result.vmFeatures,
-    instructions: result.instructions,
-    deobfuscatedCode: result.deobfuscatedCode,
-    confidence: result.confidence,
-    warnings: result.warnings,
-    unresolvedParts: result.unresolvedParts,
-    stats: result.stats,
   });
 }
 
@@ -65,7 +65,7 @@ export async function handleJsAnalyzeVm(
   args: ToolArgs,
   jsvmpDeobfuscator: JSVMPDeobfuscator,
 ): Promise<ToolResponse> {
-  const code = requireCodeArg(args, 'js_analyze_vm');
+  const code = requireCodeArg(args);
   if (!code) {
     return asJsonResponse({ success: false, error: 'code is required' });
   }
@@ -73,18 +73,20 @@ export async function handleJsAnalyzeVm(
   const extractBytecode = argBool(args, 'extractBytecode', true);
   const mapOpcodes = argBool(args, 'mapOpcodes', true);
 
-  const vmResult = await jsvmpDeobfuscator.deobfuscate({
-    code,
-    aggressive: false,
-    extractInstructions: extractBytecode,
-    timeout: 15000,
-  });
-  return asJsonResponse(
-    buildVmAnalysisResponse({
+  return cpuLimit(async (): Promise<ToolResponse> => {
+    const vmResult = await jsvmpDeobfuscator.deobfuscate({
       code,
-      extractBytecode,
-      mapOpcodes,
-      vmResult,
-    }),
-  );
+      aggressive: false,
+      extractInstructions: extractBytecode,
+      timeout: 15000,
+    });
+    return asJsonResponse(
+      buildVmAnalysisResponse({
+        code,
+        extractBytecode,
+        mapOpcodes,
+        vmResult,
+      }),
+    );
+  });
 }

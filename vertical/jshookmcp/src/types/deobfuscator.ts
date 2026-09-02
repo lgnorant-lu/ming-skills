@@ -1,6 +1,8 @@
 export type ObfuscationType =
   | 'javascript-obfuscator'
   | 'webpack'
+  | 'esbuild'
+  | 'bun-build'
   | 'uglify'
   | 'vm-protection'
   | 'wasm-vm'

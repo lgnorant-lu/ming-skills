@@ -4,6 +4,44 @@
 from .._functions.bidi_values import serialize_value
 
 
+_LOCAL_VALUE_TYPES = {
+    "array",
+    "bigint",
+    "boolean",
+    "channel",
+    "date",
+    "map",
+    "null",
+    "number",
+    "object",
+    "regexp",
+    "set",
+    "string",
+    "undefined",
+}
+
+
+def _is_serialized_local_value(value):
+    if not isinstance(value, dict):
+        return False
+    if "sharedId" in value or "handle" in value:
+        return True
+    return value.get("type") in _LOCAL_VALUE_TYPES
+
+
+def _normalize_local_value(value):
+    return value if _is_serialized_local_value(value) else serialize_value(value)
+
+
+def _normalize_channel_value(value):
+    if not isinstance(value, dict) or value.get("type") != "channel":
+        raise ValueError("preload script arguments must be BiDi ChannelValue objects")
+    channel = value.get("value")
+    if not isinstance(channel, dict) or not isinstance(channel.get("channel"), str):
+        raise ValueError("ChannelValue requires value.channel")
+    return value
+
+
 def evaluate(driver, context, expression, await_promise=True,
              result_ownership='root', serialization_options=None,
              user_activation=False, sandbox=None, timeout=None):
@@ -20,7 +58,7 @@ def evaluate(driver, context, expression, await_promise=True,
         timeout: 超时时间（秒），None 使用默认值
 
     Returns:
-        {'type': str, 'result': RemoteValue} 或 {'type': str, 'exceptionDetails': ...}
+        包含必需 ``realm`` 字段的成功结果或异常结果。
     """
     target = {'context': context}
     if sandbox:
@@ -58,7 +96,7 @@ def call_function(driver, context, function_declaration, arguments=None,
         sandbox: 沙箱名称
 
     Returns:
-        {'type': str, 'result': RemoteValue} 或 {'type': str, 'exceptionDetails': ...}
+        包含必需 ``realm`` 字段的成功结果或异常结果。
     """
     target = {'context': context}
     if sandbox:
@@ -72,19 +110,10 @@ def call_function(driver, context, function_declaration, arguments=None,
     }
 
     if arguments is not None:
-        serialized_args = []
-        for arg in arguments:
-            if isinstance(arg, dict) and ('sharedId' in arg or 'type' in arg):
-                serialized_args.append(arg)
-            else:
-                serialized_args.append(serialize_value(arg))
-        params['arguments'] = serialized_args
+        params['arguments'] = [_normalize_local_value(arg) for arg in arguments]
 
     if this is not None:
-        if isinstance(this, dict) and ('sharedId' in this or 'type' in this):
-            params['this'] = this
-        else:
-            params['this'] = serialize_value(this)
+        params['this'] = _normalize_local_value(this)
 
     if serialization_options:
         params['serializationOptions'] = serialization_options
@@ -108,9 +137,8 @@ def add_preload_script(driver, function_declaration, arguments=None,
         {'script': str}  预加载脚本 ID
     """
     params = {'functionDeclaration': function_declaration}
-    if arguments:
-        params['arguments'] = [serialize_value(a) if not isinstance(a, dict) else a
-                               for a in arguments]
+    if arguments is not None:
+        params['arguments'] = [_normalize_channel_value(a) for a in arguments]
     if contexts and user_contexts:
         raise ValueError('contexts and user_contexts cannot both be provided')
     if contexts:

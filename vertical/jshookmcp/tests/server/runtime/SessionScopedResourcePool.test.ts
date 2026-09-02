@@ -6,9 +6,12 @@ import {
 import { runWithToolRequestContext } from '@server/runtime/ToolRequestContext';
 
 class TestResource {
+  readonly sessionId: string;
   readonly values: string[] = [];
 
-  constructor(readonly sessionId: string) {}
+  constructor(sessionId: string) {
+    this.sessionId = sessionId;
+  }
 
   add(value: string): string {
     this.values.push(value);

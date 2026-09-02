@@ -86,9 +86,10 @@ describe('PageEvaluationHandlers – Security (CRIT-01)', () => {
       );
 
       // This malicious code is syntactically invalid, so it should fail
-      // This is CORRECT behavior - the injection attempt is blocked
+      // This is CORRECT behavior - the injection attempt is blocked (either
+      // by the pre-wrapper safety gate or by the browser-side parse)
       expect(body.success).toBe(false);
-      expect(body.error).toMatch(/Unexpected token|SyntaxError/i);
+      expect(body.error).toMatch(/Unexpected token|SyntaxError|potentially dangerous pattern/i);
     });
 
     it('rejects code with constructor property access', async () => {
@@ -101,14 +102,16 @@ describe('PageEvaluationHandlers – Security (CRIT-01)', () => {
       );
 
       // In browser context, process doesn't exist, so this will fail
-      // Either with ReferenceError or returning undefined
-      // The key is that it doesn't escape to Node.js
+      // Either with ReferenceError, the pre-wrapper safety gate, or returning
+      // undefined. The key is that it doesn't escape to Node.js.
       if (body.success) {
         // If it succeeds, process should be undefined in browser context
         expect(body.result).toBeUndefined();
       } else {
-        // Or it fails because process is not defined
-        expect(body.error).toMatch(/process|ReferenceError|undefined/i);
+        // Or it fails because process is not defined / the safety gate fired
+        expect(body.error).toMatch(
+          /process|ReferenceError|undefined|potentially dangerous pattern/i,
+        );
       }
     });
 

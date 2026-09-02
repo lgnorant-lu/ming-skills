@@ -45,6 +45,30 @@ export class ObfuscationDetector {
       recommendations.push('Use deobfuscate(engine="webcrack", unpack=true) to recover modules');
     }
 
+    if (this.detectEsbuild(code)) {
+      if (this.detectBunBuild(code)) {
+        types.push('bun-build');
+        confidence['bun-build'] = 0.85;
+        features.push(
+          'Bun bundler signals (// @bun pragma / import.meta.require) alongside esbuild-family helpers',
+        );
+        recommendations.push(
+          'webcrack does not support Bun.build module-boundary recovery (webpack/browserify only); ' +
+            'use deobfuscate(engine="webcrack", unpack=false, unminify=true) to clean up formatting only',
+        );
+      } else {
+        types.push('esbuild');
+        confidence['esbuild'] = 0.8;
+        features.push('esbuild runtime helpers (__commonJS/__toESM/__toCommonJS/__esm/...)');
+        recommendations.push(
+          'webcrack does not support esbuild module-boundary recovery (webpack/browserify only); ' +
+            'use deobfuscate(engine="webcrack", unpack=false, unminify=true) to clean up formatting only. ' +
+            'Note: these helper names are also produced by Bun.build with target:"browser" — this ' +
+            'classification cannot distinguish the two without a Bun-specific pragma.',
+        );
+      }
+    }
+
     if (this.detectUglify(code)) {
       types.push('uglify');
       confidence['uglify'] = 0.7;
@@ -307,6 +331,27 @@ export class ObfuscationDetector {
       );
     }
 
+    if (types.includes('esbuild')) {
+      addRecommendation(
+        'deobfuscate',
+        'esbuild runtime helpers detected; webcrack does not support esbuild module-boundary ' +
+          'recovery (only webpack/browserify unpack is implemented), so only unminify formatting ' +
+          'cleanup is recommended here — do not expect unpack=true to split this into modules. ' +
+          'Note: Bun.build with target:"browser" produces the same helper names; this signal alone ' +
+          'cannot distinguish the two.',
+        { code, engine: 'webcrack', unpack: false, unminify: true },
+      );
+    }
+
+    if (types.includes('bun-build')) {
+      addRecommendation(
+        'deobfuscate',
+        'Bun bundler pragma/API detected alongside esbuild-family helpers; webcrack does not support ' +
+          'Bun.build module-boundary recovery, so only unminify formatting cleanup is recommended here.',
+        { code, engine: 'webcrack', unpack: false, unminify: true },
+      );
+    }
+
     if (
       types.some((type) =>
         [
@@ -407,6 +452,51 @@ export class ObfuscationDetector {
       code.includes('webpackJsonp') ||
       /\/\*\*\*\*\*\*\/\s*\(/m.test(code)
     );
+  }
+
+  /**
+   * esbuild does not mangle its own runtime helper names by default (unlike
+   * webpack's single `__webpack_require__` entry point, esbuild emits several
+   * distinct `__`-prefixed helpers depending on which transforms a build
+   * needed). Requiring at least 2 of them to co-occur avoids false positives
+   * from user code that happens to define one similarly-named identifier —
+   * real esbuild output emits these as a set, not in isolation. Names verified
+   * against esbuild's own runtime source (internal/runtime/runtime.go).
+   *
+   * Bun.build() emits near-identical helper names (verified against real
+   * Bun-built npm packages: elysia, bunup) because its bundler API and
+   * codegen intentionally mirror esbuild's. This method therefore only
+   * confirms "esbuild-family helpers present" — callers must additionally
+   * check detectBunBuild() to disambiguate the two when target:"bun" pragmas
+   * are absent, the two are genuinely indistinguishable from this signal
+   * alone and detection honestly reports "esbuild" rather than guessing.
+   */
+  private detectEsbuild(code: string): boolean {
+    const helperNames = [
+      '__commonJS',
+      '__toESM',
+      '__toCommonJS',
+      '__esm',
+      '__export',
+      '__publicField',
+    ];
+    const hitCount = helperNames.filter((name) => code.includes(name)).length;
+    return hitCount >= 2;
+  }
+
+  /**
+   * Bun-specific signals that esbuild never produces: the `// @bun` pragma
+   * (emitted whenever target:"bun" is used, per Bun's own bundler docs — it
+   * tells the Bun runtime the file needs no re-transpilation) and
+   * `import.meta.require` (a Bun runtime API standing in for CJS require()
+   * in ESM output). Verified against real Bun-built packages (bunup's
+   * dist/shared/*.js carries both). Absence of these signals does NOT prove
+   * esbuild — a Bun.build with target:"browser" (the default) produces
+   * helpers indistinguishable from esbuild's; that ambiguity is a known,
+   * documented gap rather than a false "esbuild" classification.
+   */
+  private detectBunBuild(code: string): boolean {
+    return code.includes('// @bun') || code.includes('import.meta.require');
   }
 
   private detectUglify(code: string): boolean {

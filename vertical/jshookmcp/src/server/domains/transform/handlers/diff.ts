@@ -1,8 +1,22 @@
+import { diffLines } from 'diff';
+
 export interface LineDiffOptions {
   maxLcsCells: number;
   fallback?: (oldLines: string[], newLines: string[]) => string;
 }
 
+/**
+ * Build a unified line-level diff between `original` and `transformed`.
+ *
+ * Uses the `diff` package (Myers O(ND) algorithm) with a budget guard
+ * (`maxEditLength`) and a wall-clock timeout. When the edit distance exceeds
+ * the budget, the call returns `undefined`; we then fall back to a cheap
+ * prefix/suffix-aware line diff that avoids the O(n*m) blowup entirely.
+ *
+ * Output: lines prefixed with ` ` (context), `+` (added), `-` (removed).
+ * Prefix/suffix context is identified automatically by Myers' extractCommon;
+ * the manual trim the previous hand-rolled LCS did is no longer needed.
+ */
 export function buildLineDiff(
   original: string,
   transformed: string,
@@ -36,15 +50,41 @@ export function buildLineDiff(
 
   const oldMiddle = oldLines.slice(prefixEnd, oldSuffixStart);
   const newMiddle = newLines.slice(prefixEnd, newSuffixStart);
-  if (exceedsLcsBudget(oldMiddle.length, newMiddle.length, options.maxLcsCells)) {
+
+  // Keep the cell budget guard: the legacy `maxLcsCells` bound is a cell count
+  // (m*n), which `diff`'s `maxEditLength` (edit-distance bound) cannot express.
+  // Cheap pre-check routes oversized middles to the fallback before we ever
+  // allocate a Myers diff. `maxEditLength` + `timeout` below remain as a
+  // second, stronger line of defense for adversarial inputs.
+  if (exceedsCellBudget(oldMiddle.length, newMiddle.length, options.maxLcsCells)) {
     return fallback(oldLines, newLines);
   }
 
-  const diffLines: string[] = [];
-  for (let i = 0; i < prefixEnd; i++) diffLines.push(` ${oldLines[i]}`);
-  diffLines.push(...buildLcsMiddleDiff(oldMiddle, newMiddle));
-  for (let i = oldSuffixStart; i < oldLines.length; i++) diffLines.push(` ${oldLines[i]}`);
-  return diffLines.join('\n');
+  const changes = diffLines(oldMiddle.join('\n'), newMiddle.join('\n'), {
+    maxEditLength: options.maxLcsCells,
+    timeout: 1000,
+  });
+
+  // Defensive: after the cell-budget pre-check above, `maxEditLength` can only
+  // trip on degenerate inputs; `timeout` is the real backstop. `diffLines`
+  // returns undefined when either fires — route to the cheap fallback.
+  if (changes === undefined) {
+    return fallback(oldLines, newLines);
+  }
+
+  const diffLinesOut: string[] = [];
+  for (let i = 0; i < prefixEnd; i++) diffLinesOut.push(` ${oldLines[i]}`);
+  for (const change of changes) {
+    const prefix = change.added ? '+' : change.removed ? '-' : ' ';
+    // `change.value` carries a trailing newline on every line except possibly
+    // the last; strip the trailing newline and re-prefix each line.
+    const lines = change.value.replace(/\n$/, '').split('\n');
+    for (const line of lines) {
+      diffLinesOut.push(prefix + line);
+    }
+  }
+  for (let i = oldSuffixStart; i < oldLines.length; i++) diffLinesOut.push(` ${oldLines[i]}`);
+  return diffLinesOut.join('\n');
 }
 
 export function buildFallbackLineDiff(oldLines: string[], newLines: string[]): string {
@@ -69,58 +109,6 @@ export function buildFallbackLineDiff(oldLines: string[], newLines: string[]): s
   return [...removed, ...added].join('\n');
 }
 
-function exceedsLcsBudget(m: number, n: number, maxCells: number): boolean {
+function exceedsCellBudget(m: number, n: number, maxCells: number): boolean {
   return m > 0 && n > Math.floor(maxCells / m);
-}
-
-function buildLcsMiddleDiff(oldLines: string[], newLines: string[]): string[] {
-  const m = oldLines.length;
-  const n = newLines.length;
-  if (m === 0) return newLines.map((line) => `+${line}`);
-  if (n === 0) return oldLines.map((line) => `-${line}`);
-
-  const width = n + 1;
-  const dp = new Uint32Array((m + 1) * width);
-
-  for (let i = m - 1; i >= 0; i--) {
-    const row = i * width;
-    const nextRow = (i + 1) * width;
-    for (let j = n - 1; j >= 0; j--) {
-      dp[row + j] =
-        oldLines[i] === newLines[j]
-          ? dp[nextRow + j + 1]! + 1
-          : Math.max(dp[nextRow + j]!, dp[row + j + 1]!);
-    }
-  }
-
-  const diffLines: string[] = [];
-  let i = 0;
-  let j = 0;
-
-  while (i < m && j < n) {
-    if (oldLines[i] === newLines[j]) {
-      diffLines.push(` ${oldLines[i]}`);
-      i += 1;
-      j += 1;
-      continue;
-    }
-    if (dp[(i + 1) * width + j]! >= dp[i * width + j + 1]!) {
-      diffLines.push(`-${oldLines[i]}`);
-      i += 1;
-    } else {
-      diffLines.push(`+${newLines[j]}`);
-      j += 1;
-    }
-  }
-
-  while (i < m) {
-    diffLines.push(`-${oldLines[i]}`);
-    i += 1;
-  }
-  while (j < n) {
-    diffLines.push(`+${newLines[j]}`);
-    j += 1;
-  }
-
-  return diffLines;
 }

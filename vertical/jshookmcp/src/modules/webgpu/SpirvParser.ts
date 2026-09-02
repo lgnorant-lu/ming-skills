@@ -70,6 +70,37 @@ const OpImageSample = 80;
 const OpMemoryBarrier = 226;
 const OpControlBarrier = 227;
 const OpExtInst = 11;
+const OpFunctionCall = 57;
+const OpBranchConditional = 250;
+const OpSwitch = 251;
+const OpReturnValue = 254;
+const OpKill = 2520;
+
+// Texture-sampling opcode family (OpImageSample* / OpImageFetch / OpImageGather
+// and the sparse variants). Used for the textureSamples stat.
+const OpImageSampleImplicitLod = 87;
+const OpImageSampleExplicitLod = 88;
+const OpImageSampleDrefImplicitLod = 89;
+const OpImageSampleDrefExplicitLod = 90;
+const OpImageSampleProjImplicitLod = 91;
+const OpImageSampleProjExplicitLod = 92;
+const OpImageSampleProjDrefImplicitLod = 93;
+const OpImageSampleProjDrefExplicitLod = 94;
+const OpImageFetch = 95;
+const OpImageGather = 96;
+const OpImageDrefGather = 97;
+const OpImageSparseSampleImplicitLod = 100;
+const OpImageSparseSampleExplicitLod = 101;
+const OpImageSparseSampleDrefImplicitLod = 102;
+const OpImageSparseSampleDrefExplicitLod = 103;
+const OpImageSparseSampleProjImplicitLod = 104;
+const OpImageSparseSampleProjExplicitLod = 105;
+const OpImageSparseSampleProjDrefImplicitLod = 106;
+const OpImageSparseSampleProjDrefExplicitLod = 107;
+const OpImageSparseFetch = 108;
+const OpImageSparseGather = 109;
+const OpImageSparseDrefGather = 110;
+const OpImageSparseTexelsResident = 111;
 
 /** Opcode → human-readable name (used by disassembler). */
 export const OPCODE_NAMES: Record<number, string> = {
@@ -107,6 +138,50 @@ export const OPCODE_NAMES: Record<number, string> = {
   [OpMemoryBarrier]: 'OpMemoryBarrier',
   [OpControlBarrier]: 'OpControlBarrier',
   [OpExtInst]: 'OpExtInst',
+  [OpFunctionCall]: 'OpFunctionCall',
+  [OpBranchConditional]: 'OpBranchConditional',
+  [OpSwitch]: 'OpSwitch',
+  [OpReturnValue]: 'OpReturnValue',
+  [OpKill]: 'OpKill',
+  // Common arithmetic opcodes (named so the histogram reads naturally).
+  [128]: 'OpIAdd',
+  [129]: 'OpFAdd',
+  [131]: 'OpISub',
+  [132]: 'OpIMul',
+  [133]: 'OpFMul',
+  [135]: 'OpFDiv',
+  [127]: 'OpFNegate',
+  [130]: 'OpFSub',
+  [134]: 'OpUDiv',
+  [136]: 'OpUMod',
+  [142]: 'OpBitwiseAnd',
+  [143]: 'OpBitwiseOr',
+  [144]: 'OpBitwiseXor',
+  [145]: 'OpShiftLeftLogical',
+  [146]: 'OpShiftRightLogical',
+  [OpImageSampleImplicitLod]: 'OpImageSampleImplicitLod',
+  [OpImageSampleExplicitLod]: 'OpImageSampleExplicitLod',
+  [OpImageSampleDrefImplicitLod]: 'OpImageSampleDrefImplicitLod',
+  [OpImageSampleDrefExplicitLod]: 'OpImageSampleDrefExplicitLod',
+  [OpImageSampleProjImplicitLod]: 'OpImageSampleProjImplicitLod',
+  [OpImageSampleProjExplicitLod]: 'OpImageSampleProjExplicitLod',
+  [OpImageSampleProjDrefImplicitLod]: 'OpImageSampleProjDrefImplicitLod',
+  [OpImageSampleProjDrefExplicitLod]: 'OpImageSampleProjDrefExplicitLod',
+  [OpImageFetch]: 'OpImageFetch',
+  [OpImageGather]: 'OpImageGather',
+  [OpImageDrefGather]: 'OpImageDrefGather',
+  [OpImageSparseSampleImplicitLod]: 'OpImageSparseSampleImplicitLod',
+  [OpImageSparseSampleExplicitLod]: 'OpImageSparseSampleExplicitLod',
+  [OpImageSparseSampleDrefImplicitLod]: 'OpImageSparseSampleDrefImplicitLod',
+  [OpImageSparseSampleDrefExplicitLod]: 'OpImageSparseSampleDrefExplicitLod',
+  [OpImageSparseSampleProjImplicitLod]: 'OpImageSparseSampleProjImplicitLod',
+  [OpImageSparseSampleProjExplicitLod]: 'OpImageSparseSampleProjExplicitLod',
+  [OpImageSparseSampleProjDrefImplicitLod]: 'OpImageSparseSampleProjDrefImplicitLod',
+  [OpImageSparseSampleProjDrefExplicitLod]: 'OpImageSparseSampleProjDrefExplicitLod',
+  [OpImageSparseFetch]: 'OpImageSparseFetch',
+  [OpImageSparseGather]: 'OpImageSparseGather',
+  [OpImageSparseDrefGather]: 'OpImageSparseDrefGather',
+  [OpImageSparseTexelsResident]: 'OpImageSparseTexelsResident',
 };
 
 // ─── Decoration enum values (SPIR-V spec) ────────────────────────────────────
@@ -330,7 +405,8 @@ export function isSpirv(input: string | Uint8Array): boolean {
 
 // ─── Internal reflection state ───────────────────────────────────────────────
 
-interface Instruction {
+/** A decoded SPIR-V instruction. Exported so stats/cost consumers can iterate. */
+export interface Instruction {
   opcode: number;
   /** Full word slice including the opcode word. */
   words: number[];
@@ -613,6 +689,152 @@ export function parseSpirv(data: Uint8Array): SpirvReflectResult {
     structs,
     warnings,
     instructions,
+  };
+}
+
+// ─── Instruction statistics & cost estimate ─────────────────────────────────
+
+/**
+ * Opcode → relative-cost weight used by `computeSpirvStats`.
+ *
+ * Weights are order-of-magnitude approximations based on publicly documented
+ * GPU architecture characteristics (texture fetches and barriers are
+ * substantially more expensive than ALU/memory ops; function calls and
+ * control flow add scheduling overhead). They are NOT calibrated to any
+ * specific vendor/die — use `costScore` for relative comparison between
+ * shaders, not as an absolute cycle count.
+ */
+export const SPIRV_OP_WEIGHTS: Record<number, number> = {
+  // Memory-class ops: weight 1 (default).
+  [OpLoad]: 1,
+  [OpStore]: 1,
+  [OpAccessChain]: 1,
+  // Texture sampling/fetch/gather: dominant cost (weight 8).
+  [OpImageSample]: 8,
+  [OpImageSampleImplicitLod]: 8,
+  [OpImageSampleExplicitLod]: 8,
+  [OpImageSampleDrefImplicitLod]: 8,
+  [OpImageSampleDrefExplicitLod]: 8,
+  [OpImageSampleProjImplicitLod]: 8,
+  [OpImageSampleProjExplicitLod]: 8,
+  [OpImageSampleProjDrefImplicitLod]: 8,
+  [OpImageSampleProjDrefExplicitLod]: 8,
+  [OpImageFetch]: 8,
+  [OpImageGather]: 8,
+  [OpImageDrefGather]: 8,
+  // Sparse variants: same texture path, minor masking overhead (weight 6).
+  [OpImageSparseSampleImplicitLod]: 6,
+  [OpImageSparseSampleExplicitLod]: 6,
+  [OpImageSparseSampleDrefImplicitLod]: 6,
+  [OpImageSparseSampleDrefExplicitLod]: 6,
+  [OpImageSparseSampleProjImplicitLod]: 6,
+  [OpImageSparseSampleProjExplicitLod]: 6,
+  [OpImageSparseSampleProjDrefImplicitLod]: 6,
+  [OpImageSparseSampleProjDrefExplicitLod]: 6,
+  [OpImageSparseFetch]: 6,
+  [OpImageSparseGather]: 6,
+  [OpImageSparseDrefGather]: 6,
+  [OpImageSparseTexelsResident]: 4,
+  // Memory/execution barriers: pipeline flush cost (weight 12).
+  [OpMemoryBarrier]: 12,
+  [OpControlBarrier]: 12,
+  // Control flow & calls: scheduling overhead (weight 4 for calls, 1 for flow).
+  [OpFunctionCall]: 4,
+  [OpBranch]: 1,
+  [OpBranchConditional]: 1,
+  [OpSwitch]: 1,
+  [OpLoopMerge]: 1,
+  [OpSelectionMerge]: 1,
+};
+
+/** Default weight for opcodes without an explicit entry. */
+const DEFAULT_OP_WEIGHT = 1;
+
+/** Texture-sampling opcode set (used for `textureSamples`). */
+const TEXTURE_SAMPLE_OPCODES = new Set<number>([
+  OpImageSample,
+  OpImageSampleImplicitLod,
+  OpImageSampleExplicitLod,
+  OpImageSampleDrefImplicitLod,
+  OpImageSampleDrefExplicitLod,
+  OpImageSampleProjImplicitLod,
+  OpImageSampleProjExplicitLod,
+  OpImageSampleProjDrefImplicitLod,
+  OpImageSampleProjDrefExplicitLod,
+  OpImageFetch,
+  OpImageGather,
+  OpImageDrefGather,
+  OpImageSparseSampleImplicitLod,
+  OpImageSparseSampleExplicitLod,
+  OpImageSparseSampleDrefImplicitLod,
+  OpImageSparseSampleDrefExplicitLod,
+  OpImageSparseSampleProjImplicitLod,
+  OpImageSparseSampleProjExplicitLod,
+  OpImageSparseSampleProjDrefImplicitLod,
+  OpImageSparseSampleProjDrefExplicitLod,
+  OpImageSparseFetch,
+  OpImageSparseGather,
+  OpImageSparseDrefGather,
+]);
+
+/** Control-flow instruction set (used for `controlFlowComplexity`). */
+const CONTROL_FLOW_OPCODES = new Set<number>([
+  OpBranch,
+  OpBranchConditional,
+  OpSwitch,
+  OpLoopMerge,
+  OpSelectionMerge,
+  OpFunctionCall,
+  OpReturn,
+  OpReturnValue,
+  OpKill,
+]);
+
+/** Instruction statistics + cost estimate for a SPIR-V module. */
+export interface SpirvInstructionStats {
+  totalInstructions: number;
+  /** Opcode-name → occurrence count (e.g. `{ OpLoad: 12, OpStore: 5 }`). */
+  byOpcode: Record<string, number>;
+  /** Number of texture sample/fetch/gather instructions. */
+  textureSamples: number;
+  /** Number of control-flow instructions (branches, merges, calls, kills). */
+  controlFlowComplexity: number;
+  /** Σ(opWeight × count) — relative cost, see SPIRV_OP_WEIGHTS. */
+  costScore: number;
+}
+
+/**
+ * Compute instruction statistics from a decoded SPIR-V module.
+ *
+ * Pure and side-effect free: consumes the instruction slice produced by
+ * `parseSpirv` and produces a histogram plus aggregate metrics. Unknown
+ * opcodes are counted with their numeric-name fallback and default weight.
+ */
+export function computeSpirvStats(instructions: readonly Instruction[]): SpirvInstructionStats {
+  const byOpcode: Record<string, number> = {};
+  let textureSamples = 0;
+  let controlFlowComplexity = 0;
+  let costScore = 0;
+
+  for (const inst of instructions) {
+    const name = OPCODE_NAMES[inst.opcode] ?? `Op_${inst.opcode}`;
+    byOpcode[name] = (byOpcode[name] ?? 0) + 1;
+
+    if (TEXTURE_SAMPLE_OPCODES.has(inst.opcode)) {
+      textureSamples++;
+    }
+    if (CONTROL_FLOW_OPCODES.has(inst.opcode)) {
+      controlFlowComplexity++;
+    }
+    costScore += SPIRV_OP_WEIGHTS[inst.opcode] ?? DEFAULT_OP_WEIGHT;
+  }
+
+  return {
+    totalInstructions: instructions.length,
+    byOpcode,
+    textureSamples,
+    controlFlowComplexity,
+    costScore,
   };
 }
 

@@ -6,7 +6,7 @@ import pytest
 @pytest.mark.feature
 @pytest.mark.local_server
 def test_data_collector_can_collect_response_body(page, server):
-    collector = page.network.add_data_collector(["responseCompleted"], data_types=["response"])
+    collector = page.network.add_data_collector(data_types=["response"])
     page.get("about:blank")
     page.intercept.start_requests()
     page.listen.start("/api/collector")

@@ -194,21 +194,25 @@ export async function extractFunctionTreeCore(
   const toExtract = [functionName];
   let currentDepth = 0;
 
+  // Level-order traversal: maxDepth counts dependency layers, not visited
+  // functions — a per-function counter would truncate wide shallow branches
+  // and misrepresent the documented "maximum dependency traversal depth".
   while (toExtract.length > 0 && currentDepth < maxDepth) {
-    const current = toExtract.shift()!;
-    if (extracted.has(current)) continue;
+    const layer = toExtract.splice(0);
+    for (const current of layer) {
+      if (extracted.has(current)) continue;
 
-    const func = allFunctions.get(current);
-    if (!func) continue;
+      const func = allFunctions.get(current);
+      if (!func) continue;
 
-    extracted.add(current);
+      extracted.add(current);
 
-    for (const dep of func.dependencies) {
-      if (!extracted.has(dep) && allFunctions.has(dep)) {
-        toExtract.push(dep);
+      for (const dep of func.dependencies) {
+        if (!extracted.has(dep) && allFunctions.has(dep)) {
+          toExtract.push(dep);
+        }
       }
     }
-
     currentDepth++;
   }
 

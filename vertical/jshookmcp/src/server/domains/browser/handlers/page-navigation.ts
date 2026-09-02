@@ -30,7 +30,10 @@ interface PageNavigationHandlersDeps {
 }
 
 export class PageNavigationHandlers {
-  constructor(private deps: PageNavigationHandlersDeps) {}
+  private deps: PageNavigationHandlersDeps;
+  constructor(deps: PageNavigationHandlersDeps) {
+    this.deps = deps;
+  }
 
   private syncCurrentTabMeta(page: unknown, meta: { url?: string; title?: string }): void {
     const registry = this.deps.getTabRegistry?.();

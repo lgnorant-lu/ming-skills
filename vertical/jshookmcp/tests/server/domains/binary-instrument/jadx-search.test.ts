@@ -7,8 +7,25 @@
  * Kept in a dedicated file (no node:fs / child_process / yauzl mocks) so the
  * tool's real filesystem search over the fixture runs unmocked.
  */
+import { mkdir as fsMkdir, access } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+const probeCommandMock = vi.fn();
+const mkdtempMock = vi.fn();
+
+vi.mock('@modules/external/ToolProbe', () => ({
+  probeCommand: (...args: unknown[]) => probeCommandMock(...args),
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    mkdtemp: (...args: Parameters<typeof actual.mkdtemp>) => mkdtempMock(...args),
+  };
+});
 
 import { BinaryInstrumentHandlers } from '@server/domains/binary-instrument/handlers';
 import { R } from '@server/domains/shared/ResponseBuilder';
@@ -22,6 +39,7 @@ interface ParsedResponse {
   filesMatched?: number;
   matches?: unknown[];
   truncated?: boolean;
+  autoDecompiled?: boolean;
 }
 
 function makeHandlers(): BinaryInstrumentHandlers {
@@ -110,5 +128,68 @@ describe('binary-instrument · handleJadxSearchCode (merged from jadx-search)', 
         globs: ['**/*.java', 42],
       }),
     ).rejects.toThrow(/globs/);
+  });
+
+  it('cleans up the auto-decompiled temp dir after a successful search', async () => {
+    // Auto-decompile path: probe succeeds, jadx CLI is stubbed, and the
+    // mkdtemp scratch dir (with its sources/ subdir) must be removed by the
+    // time the handler returns — no disk leak per request.
+    probeCommandMock.mockResolvedValue({ available: true, path: 'jadx', reason: undefined });
+    let createdDir: string | undefined;
+    mkdtempMock.mockImplementation(async (prefix: string) => {
+      // Build a real scratch dir + sources/ subdir. The handler already passes
+      // an absolute tmpdir prefix; the mock must not call the mocked mkdtemp
+      // itself (that would recurse).
+      const dir = `${prefix}${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      createdDir = dir;
+      await fsMkdir(join(dir, 'sources'), { recursive: true });
+      return dir;
+    });
+
+    const handlers = new BinaryInstrumentHandlers() as unknown as {
+      jadx: { runJadx: ReturnType<typeof vi.fn> };
+      handleJadxSearchCode: (args: Record<string, unknown>) => Promise<unknown>;
+    };
+    handlers.jadx.runJadx = vi.fn(async () => undefined);
+
+    const result = await handlers.handleJadxSearchCode({
+      apkPath: join(tmpdir(), 'auto-decompile-test.apk'),
+      query: 'AES',
+    });
+    const parsed = R.parse<ParsedResponse>(result as Parameters<typeof R.parse>[0]);
+
+    expect(parsed.success).toBe(true);
+    expect(parsed.autoDecompiled).toBe(true);
+    expect(createdDir).toBeDefined();
+    expect(handlers.jadx.runJadx).toHaveBeenCalledTimes(1);
+    // The scratch dir must be gone after the call.
+    await expect(access(createdDir!)).rejects.toThrow();
+  });
+
+  it('cleans up the auto-decompiled temp dir when the search throws', async () => {
+    probeCommandMock.mockResolvedValue({ available: true, path: 'jadx', reason: undefined });
+    let createdDir: string | undefined;
+    mkdtempMock.mockImplementation(async (prefix: string) => {
+      const dir = `${prefix}${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      createdDir = dir;
+      await fsMkdir(join(dir, 'sources'), { recursive: true });
+      return dir;
+    });
+
+    const handlers = new BinaryInstrumentHandlers() as unknown as {
+      jadx: { runJadx: ReturnType<typeof vi.fn> };
+      handleJadxSearchCode: (args: Record<string, unknown>) => Promise<unknown>;
+    };
+    handlers.jadx.runJadx = vi.fn(async () => undefined);
+
+    // globs validation throws inside the try block — cleanup must still run.
+    await expect(
+      handlers.handleJadxSearchCode({
+        apkPath: join(tmpdir(), 'auto-decompile-throw.apk'),
+        query: 'AES',
+        globs: 'not-an-array',
+      }),
+    ).rejects.toThrow(/globs/);
+    await expect(access(createdDir!)).rejects.toThrow();
   });
 });

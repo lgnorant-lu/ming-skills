@@ -1,32 +1,35 @@
 /**
- * Performance & profiling handlers — coverage, tracing, CPU/heap profiling.
+ * Performance & profiling handlers — metrics, tracing, CPU profiling.
  *
  * Extracted from NetworkHandlersPerformance (handlers.base.performance.ts).
+ * Coverage / heap snapshot / heap sampling were retired (superseded by
+ * page_coverage_*, v8_heap_snapshot_capture, v8_heap_sampling).
  */
 
 import { PerformanceMonitor } from '@server/domains/shared/modules';
 import type { CodeCollector } from '@server/domains/shared/modules/collector';
-import type { TraceRecorder } from '@modules/trace/TraceRecorder';
-import { argEnum } from '@server/domains/shared/parse-args';
 import {
   asOptionalBoolean,
   asOptionalNumber,
   asOptionalString,
   asOptionalStringArray,
+  buildHotFunctions,
   toCpuProfilePayload,
 } from '../handlers.base.types';
-import { handleSafe, R } from '@server/domains/shared/ResponseBuilder';
+import { handleSafe } from '@server/domains/shared/ResponseBuilder';
 import type { ToolResponse } from '@server/types';
 
 export interface PerformanceHandlerDeps {
   collector: CodeCollector;
   /** Lazy factory for PerformanceMonitor — avoids creating until first use. */
   getPerformanceMonitor: () => PerformanceMonitor;
-  getTraceRecorder?: () => TraceRecorder | null;
 }
 
 export class PerformanceHandlers {
-  constructor(private deps: PerformanceHandlerDeps) {}
+  private deps: PerformanceHandlerDeps;
+  constructor(deps: PerformanceHandlerDeps) {
+    this.deps = deps;
+  }
 
   async handlePerformanceGetMetrics(args: Record<string, unknown>): Promise<ToolResponse> {
     return handleSafe(async () => {
@@ -39,77 +42,6 @@ export class PerformanceHandlers {
       }
       return result;
     });
-  }
-
-  async handlePerformanceCoverage(args: Record<string, unknown>): Promise<ToolResponse> {
-    const action = argEnum(args, 'action', new Set(['start', 'stop'] as const));
-    return action === 'stop'
-      ? this.handlePerformanceStopCoverage(args)
-      : this.handlePerformanceStartCoverage(args);
-  }
-
-  async handlePerformanceStartCoverage(_args: Record<string, unknown>): Promise<ToolResponse> {
-    return handleSafe(async () => {
-      const monitor = this.deps.getPerformanceMonitor();
-      await monitor.startCoverage();
-      return { message: 'Code coverage collection started' };
-    });
-  }
-
-  async handlePerformanceStopCoverage(_args: Record<string, unknown>): Promise<ToolResponse> {
-    return handleSafe(async () => {
-      const monitor = this.deps.getPerformanceMonitor();
-      const coverage = await monitor.stopCoverage();
-      const avgCoverage =
-        coverage.length > 0
-          ? coverage.reduce((sum, info) => sum + info.coveragePercentage, 0) / coverage.length
-          : 0;
-      return { coverage, totalScripts: coverage.length, avgCoverage };
-    });
-  }
-
-  async handlePerformanceTakeHeapSnapshot(_args: Record<string, unknown>): Promise<ToolResponse> {
-    try {
-      const traceRecorder = this.deps.getTraceRecorder?.() ?? null;
-      if (traceRecorder?.getState() === 'recording') {
-        try {
-          const snapshotSize = await traceRecorder.captureActiveHeapSnapshot();
-          return R.ok()
-            .merge({
-              snapshotSize,
-              persistedToTrace: true,
-              message:
-                'Heap snapshot taken and persisted to the active trace recording (data too large to return)',
-            })
-            .json();
-        } catch (traceError) {
-          const monitor = this.deps.getPerformanceMonitor();
-          const snapshotSize = await monitor.takeHeapSnapshot();
-          return R.ok()
-            .merge({
-              snapshotSize,
-              persistedToTrace: false,
-              tracePersistenceError:
-                traceError instanceof Error ? traceError.message : String(traceError),
-              message:
-                'Heap snapshot taken, but the active trace recording could not persist it (data too large to return)',
-            })
-            .json();
-        }
-      }
-
-      const monitor = this.deps.getPerformanceMonitor();
-      const snapshotSize = await monitor.takeHeapSnapshot();
-      return R.ok()
-        .merge({
-          snapshotSize,
-          persistedToTrace: false,
-          message: 'Heap snapshot taken (data too large to return, saved internally)',
-        })
-        .json();
-    } catch (error) {
-      return R.fail(error).json();
-    }
   }
 
   async handlePerformanceTraceStart(args: Record<string, unknown>): Promise<ToolResponse> {
@@ -135,15 +67,24 @@ export class PerformanceHandlers {
         eventCount: result.eventCount,
         sizeBytes: result.sizeBytes,
         sizeKB: (result.sizeBytes / 1024).toFixed(1),
-        hint: 'Open the trace file in Chrome DevTools -> Performance tab -> Load profile',
+        ...(result.truncated
+          ? {
+              truncated: true,
+              originalSizeBytes: result.originalSizeBytes,
+              hint: '⚠️ Trace was truncated (exceeded size limit). Open in Chrome DevTools may fail.',
+            }
+          : {
+              hint: 'Open the trace file in Chrome DevTools -> Performance tab -> Load profile',
+            }),
       };
     });
   }
 
-  async handleProfilerCpuStart(_args: Record<string, unknown>): Promise<ToolResponse> {
+  async handleProfilerCpuStart(args: Record<string, unknown>): Promise<ToolResponse> {
     return handleSafe(async () => {
       const monitor = this.deps.getPerformanceMonitor();
-      await monitor.startCPUProfiling();
+      const samplingInterval = asOptionalNumber(args.samplingInterval);
+      await monitor.startCPUProfiling({ samplingInterval });
       return {
         message: 'CPU profiling started. Call profiler_cpu with action="stop" to save the profile.',
       };
@@ -184,16 +125,7 @@ export class PerformanceHandlers {
         savedPath = displayPath;
       }
 
-      const hotFunctions = profile.nodes
-        .filter((n) => (n.hitCount || 0) > 0)
-        .toSorted((a, b) => (b.hitCount || 0) - (a.hitCount || 0))
-        .slice(0, 20)
-        .map((n) => ({
-          functionName: n.callFrame?.functionName || '(anonymous)',
-          url: n.callFrame?.url,
-          line: n.callFrame?.lineNumber,
-          hitCount: n.hitCount,
-        }));
+      const { hotFunctions, message } = buildHotFunctions(profile);
 
       return {
         artifactPath: savedPath,
@@ -201,33 +133,8 @@ export class PerformanceHandlers {
         totalSamples: profile.samples?.length || 0,
         durationMs: profile.endTime - profile.startTime,
         hotFunctions,
+        ...(message ? { message } : {}),
         hint: 'Open the .cpuprofile file in Chrome DevTools -> Performance tab',
-      };
-    });
-  }
-
-  async handleProfilerHeapSamplingStart(args: Record<string, unknown>): Promise<ToolResponse> {
-    return handleSafe(async () => {
-      const monitor = this.deps.getPerformanceMonitor();
-      const samplingInterval = asOptionalNumber(args.samplingInterval);
-      await monitor.startHeapSampling({ samplingInterval });
-      return {
-        message:
-          'Heap sampling started. Call profiler_heap_sampling with action="stop" to save the report.',
-      };
-    });
-  }
-
-  async handleProfilerHeapSamplingStop(args: Record<string, unknown>): Promise<ToolResponse> {
-    return handleSafe(async () => {
-      const monitor = this.deps.getPerformanceMonitor();
-      const artifactPath = asOptionalString(args.artifactPath);
-      const topN = asOptionalNumber(args.topN);
-      const result = await monitor.stopHeapSampling({ artifactPath, topN });
-      return {
-        artifactPath: result.artifactPath,
-        sampleCount: result.sampleCount,
-        topAllocations: result.topAllocations,
       };
     });
   }

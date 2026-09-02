@@ -47,6 +47,49 @@ describe('ConsoleMonitor object cache helpers', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it('deduplicates concurrent inspections of the same objectId into one CDP request', async () => {
+    const send = vi.fn(async () => ({
+      result: [{ name: 'count', value: { type: 'number', value: 3 } }],
+    }));
+    const ctx = {
+      ensureSession: vi.fn(async () => {}),
+      cdpSession: { send },
+      objectCache: new Map(),
+      inflight: new Map(),
+      MAX_OBJECT_CACHE_SIZE: 2,
+      extractValue: vi.fn((value: any) => value.value),
+    };
+
+    // First call is still awaiting the CDP response when the second arrives —
+    // both must resolve with the same properties and send() runs only once.
+    let resolveSend!: (v: any) => void;
+    send.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+
+    const first = inspectObjectCore(ctx, 'obj-1');
+    const second = inspectObjectCore(ctx, 'obj-1');
+
+    // Both calls first await ensureSession() — wait until the first call has
+    // issued its CDP request (and the second is sharing it) before resolving.
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(ctx.inflight.size).toBe(1);
+
+    resolveSend({ result: [{ name: 'count', value: { type: 'number', value: 3 } }] });
+
+    await expect(first).resolves.toEqual({
+      count: { value: 3, type: 'number', objectId: undefined, description: undefined },
+    });
+    await expect(second).resolves.toEqual({
+      count: { value: 3, type: 'number', objectId: undefined, description: undefined },
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(ctx.inflight.size).toBe(0);
+  });
+
   it('evicts the oldest cached entry when the cache is at capacity and can be cleared', async () => {
     const send = vi.fn(async ({ objectId }: any) => ({
       result: [{ name: 'id', value: { type: 'string', value: objectId } }],

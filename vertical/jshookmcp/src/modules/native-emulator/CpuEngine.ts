@@ -98,7 +98,7 @@ export interface NativeRuntimeImportDiagnostic {
 }
 
 const EM_AARCH64 = 183;
-const MAX_STEPS = 100_000_000; // Runaway guard for the M0 linear executor.
+const MAX_STEPS = 1_000_000; // Runaway guard for the M0 linear executor.
 const RETURN_SENTINEL = 0; // LR value that marks "return out of callSymbol".
 const STACK_BASE = 0x7fff_0000; // Guest stack region base (grows down from the top).
 const STACK_SIZE = 0x20000; // 128 KiB (some .so's need deeper stacks).
@@ -124,7 +124,7 @@ interface GuestInvocationPolicy {
   resetStack: boolean;
   /** Registers to set AFTER the default zeroing loop (x0-x28). Key=register index. */
   initRegisters?: Record<number, bigint>;
-  /** Max instruction steps before aborting; defaults to MAX_STEPS (1M). 0 = unlimited. */
+  /** Max instruction steps before aborting; defaults to MAX_STEPS (1M) when omitted, 0, or negative. */
   maxSteps?: number;
 }
 
@@ -1178,7 +1178,7 @@ export class CpuEngine implements ExecutionContext {
   private run(begin: number, stopAt: number, maxSteps?: number): void {
     this.registerFile.pc = begin;
     this.stopRequested = false;
-    const limit = maxSteps !== undefined ? maxSteps : MAX_STEPS;
+    const limit = maxSteps !== undefined && maxSteps > 0 ? maxSteps : MAX_STEPS;
     let steps = 0;
     while (this.registerFile.pc !== stopAt) {
       if (this.stopRequested) return; // exit()/exit_group() halts the program.

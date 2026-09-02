@@ -1,4 +1,4 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import { tool } from '@server/registry/tool-builder';
 
 export const canvasTools: Tool[] = [
@@ -99,7 +99,8 @@ export const canvasTools: Tool[] = [
     t
       .desc(
         'Intercept Canvas 2D (drawImage/fillText/strokeText) and WebGL (drawArrays/drawElements) draw calls into a ring buffer on the page. ' +
-          'Actions: install (wrap prototypes), read (dump captured calls), uninstall (restore).',
+          'Actions: install (wrap prototypes), read (dump captured calls), uninstall (restore). ' +
+          'Set timing=true at install to also sample a requestAnimationFrame loop; then includeTiming=true at read to get frame-level stats (avg/p95 frame time, dropped frames, 60fps budget misses).',
       )
       .enum('action', ['install', 'read', 'uninstall'], 'Hook action', { default: 'install' })
       .boolean('persistent', 'Re-inject on every navigation (install only)', { default: false })
@@ -109,6 +110,27 @@ export const canvasTools: Tool[] = [
         maximum: 100000,
       })
       .boolean('clear', 'Clear the buffer after reading (read only)', { default: false })
+      .boolean(
+        'timing',
+        'Start a requestAnimationFrame sampler alongside the hook (install only)',
+        {
+          default: false,
+        },
+      )
+      .number(
+        'maxFrames',
+        'Frame-timeline ring-buffer cap before sampling self-stops (install + timing only, bounds page-heap growth)',
+        {
+          default: 1800,
+          minimum: 1,
+          maximum: 100000,
+        },
+      )
+      .boolean(
+        'includeTiming',
+        'Include frame timeline + stats (avg/p95 frame time, dropped frames, budget misses) in the read result (read only, requires timing=true at install)',
+        { default: false },
+      )
       .query(),
   ),
 ];

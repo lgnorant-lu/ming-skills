@@ -45,6 +45,11 @@ export async function handleHeapSampling(
     Math.max(500, Number.isFinite(durationRaw) ? durationRaw : 5000),
   );
   const topN = Math.min(500, Math.max(1, argNumber(args, 'topN', 50)));
+  const samplingIntervalRaw = argNumber(args, 'samplingInterval', 32768);
+  const samplingInterval = Math.min(
+    1048576,
+    Math.max(256, Number.isFinite(samplingIntervalRaw) ? samplingIntervalRaw : 32768),
+  );
 
   const { session, owned } = await resolveTargetSession(normalizeSessionSource(source));
   if (!session) {
@@ -63,7 +68,7 @@ export async function handleHeapSampling(
   const startTime = Date.now();
   try {
     await session.send('HeapProfiler.enable');
-    await session.send('HeapProfiler.startSampling', { samplingInterval: 32768 });
+    await session.send('HeapProfiler.startSampling', { samplingInterval });
 
     // Capture window — resolve after durationMs.
     await new Promise<void>((resolve) => setTimeout(resolve, durationMs));
@@ -91,9 +96,14 @@ export async function handleHeapSampling(
 
     // Flatten the call tree into a sorted site list. Collect only nodes that
     // directly allocated (selfSize > 0); interior call-tree nodes are
-    // traversal scaffolding, not allocation sites of interest.
+    // traversal scaffolding, not allocation sites of interest. Per-node
+    // sampleCount uses the direct children count (identityGroups is not a CDP
+    // field and was always 0); the profile-level sampleCount is the total
+    // node count of the sampled call tree (mirrors collectTopHeapAllocations).
     const sites: SamplingNode[] = [];
+    let nodeCount = 0;
     const walk = (node: SamplingProfileNode): number => {
+      nodeCount++;
       const children = Array.isArray(node.children) ? node.children : [];
       const childTotal = children.reduce((sum, child) => sum + walk(child), 0);
       const selfSize = node.selfSize ?? 0;
@@ -107,7 +117,7 @@ export async function handleHeapSampling(
           columnNumber: cf.columnNumber ?? -1,
           selfSize,
           totalSize: selfSize + childTotal,
-          sampleCount: node.identityGroups?.length ?? 0,
+          sampleCount: children.length,
         });
       }
       return selfSize + childTotal;
@@ -116,7 +126,7 @@ export async function handleHeapSampling(
 
     sites.sort((a, b) => b.totalSize - a.totalSize);
     const top = sites.slice(0, topN);
-    const sampleCount = sites.reduce((sum, s) => sum + s.sampleCount, 0);
+    const sampleCount = nodeCount;
 
     return {
       success: true,
@@ -124,7 +134,7 @@ export async function handleHeapSampling(
       totalSampledBytes: totalBytes,
       sampleCount,
       sites: top,
-      summary: `${top.length} top allocation sites; ${totalBytes} bytes sampled across ${sites.length} nodes`,
+      summary: `${top.length} top allocation sites; ${totalBytes} bytes sampled across ${nodeCount} call-tree nodes`,
     };
   } catch (err) {
     await session.send('HeapProfiler.stopSampling').catch(() => undefined);
@@ -154,5 +164,4 @@ interface SamplingProfileNode {
   callFrame?: SamplingProfileCallFrame;
   selfSize?: number;
   children?: SamplingProfileNode[];
-  identityGroups?: unknown[];
 }

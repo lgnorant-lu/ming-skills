@@ -1,3 +1,14 @@
+/**
+ * NOTE (2026-08-09): This handler is a bare-CDP heap-snapshot path for quick
+ * in-page heap string search only — NOT the canonical heap snapshot pipeline.
+ * It calls HeapProfiler.takeHeapSnapshot directly on a fresh CDP session and
+ * never removes its addHeapSnapshotChunk listener (the session is detached
+ * instead, which releases the listener). For production profiling use
+ * `v8_heap_snapshot_capture` (v8-inspector domain, V8InspectorClient with
+ * session ownership), which mirrors the WeakMap-deduped listener + finally-off
+ * pattern of monitor/PerformanceMonitor.snapshot.ts. Do not grow this path
+ * into a profiling pipeline.
+ */
 import { DetailedDataManager } from '@utils/DetailedDataManager';
 import { cdpLimit } from '@utils/concurrency';
 import { logger } from '@utils/logger';
@@ -62,9 +73,11 @@ function isHeapSnapshotChunk(value: unknown): value is HeapSnapshotChunk {
 }
 
 export class JSHeapSearchHandlers {
+  private deps: JSHeapSearchDeps;
   private detailedDataManager: DetailedDataManager;
 
-  constructor(private deps: JSHeapSearchDeps) {
+  constructor(deps: JSHeapSearchDeps) {
+    this.deps = deps;
     this.detailedDataManager = DetailedDataManager.getInstance();
   }
 
@@ -135,7 +148,9 @@ export class JSHeapSearchHandlers {
               : 'No matches found. The value may be encrypted, compressed, or stored in a non-string form.',
         };
 
-        return R.ok().build(this.detailedDataManager.smartHandle(result, 51200) as any);
+        // Threshold comes from DETAILED_DATA_SMART_THRESHOLD_BYTES (configurable
+        // via env) — do not pass a hard-coded size here, or env config is bypassed.
+        return R.ok().build((await this.detailedDataManager.smartHandle(result)) as any);
       } catch (error) {
         logger.error('[js_heap_search] Error:', error);
         return R.fail(error).build();

@@ -106,9 +106,12 @@ export function buildUnhookGuardBootstrap(hookId: string, opts: UnhookGuardOptio
 }
 
 export class AIHookToolHandlers {
+  private pageController: PageController;
   private injectedHooks: Map<string, { code: string; injectionTime: number }> = new Map();
 
-  constructor(private pageController: PageController) {}
+  constructor(pageController: PageController) {
+    this.pageController = pageController;
+  }
 
   private hasAttachedTargetSession(): boolean {
     return this.pageController.hasAttachedTargetSession();

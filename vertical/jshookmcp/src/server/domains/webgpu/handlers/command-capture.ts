@@ -19,13 +19,12 @@ const COMMAND_CAPTURE_POLL_INTERVAL_MS = 50;
  * Captures GPU command queue submissions (render passes, compute dispatches)
  */
 export class CommandCaptureHandler {
+  private deps: WebGPUDomainDependencies;
   private ddm: DetailedDataManager;
   private pageLockManager = getPageLockManager();
 
-  constructor(
-    _ctx: MCPServerContext,
-    private deps: WebGPUDomainDependencies,
-  ) {
+  constructor(_ctx: MCPServerContext, deps: WebGPUDomainDependencies) {
+    this.deps = deps;
     this.ddm = DetailedDataManager.getInstance();
   }
 
@@ -63,6 +62,9 @@ export class CommandCaptureHandler {
               duration: analyzed.captureEndTime - analyzed.captureStartTime,
             },
             inferredTypes: analyzed.inferredTypes,
+            // Timestamp-query capability + per-pass GPU timings (Fix 2).
+            // Commands carry gpuStartNs/gpuEndNs/gpuElapsedNs when supported.
+            timestampQuery: analyzed.timestampQuery ?? { supported: false },
           };
 
           // Handle large command arrays

@@ -92,10 +92,12 @@ function deriveTraceTid(category: string | undefined | null): number {
 }
 
 export class TraceToolHandlers {
-  constructor(
-    private readonly recorder: TraceRecorder,
-    private readonly ctx: MCPServerContext,
-  ) {}
+  private readonly recorder: TraceRecorder;
+  private readonly ctx: MCPServerContext;
+  constructor(recorder: TraceRecorder, ctx: MCPServerContext) {
+    this.recorder = recorder;
+    this.ctx = ctx;
+  }
 
   async handleTraceRecordingTool(args: Record<string, unknown>): Promise<ToolResponse> {
     return handleSafe(async () => await this.handleTraceRecording(args));
@@ -546,7 +548,7 @@ export class TraceToolHandlers {
         ? await readTraceBody(resource, { maxBodyBytes, returnSummary })
         : null;
 
-      const flowData = smartHandleDetailed(this.ctx, {
+      const flowData = await smartHandleDetailed(this.ctx, {
         requestId,
         request: formatNetworkResource(resource),
         body,

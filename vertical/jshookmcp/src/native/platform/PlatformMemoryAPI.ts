@@ -47,11 +47,17 @@ export interface PlatformMemoryAPI {
 
   // ── Memory Operations ──
 
-  /** Read bytes from target process memory */
-  readMemory(handle: ProcessHandle, address: bigint, size: number): MemoryReadResult;
+  /**
+   * Read bytes from target process memory.
+   *
+   * Async: implementations offload the native FFI call (koffi `.async` worker
+   * thread on Windows/macOS, `fs.promises` on Linux) so large reads do not
+   * block the event loop (a4-01).
+   */
+  readMemory(handle: ProcessHandle, address: bigint, size: number): Promise<MemoryReadResult>;
 
-  /** Write bytes to target process memory */
-  writeMemory(handle: ProcessHandle, address: bigint, data: Buffer): MemoryWriteResult;
+  /** Write bytes to target process memory (async — see {@link readMemory}). */
+  writeMemory(handle: ProcessHandle, address: bigint, data: Buffer): Promise<MemoryWriteResult>;
 
   // ── Region Operations ──
 

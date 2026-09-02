@@ -7,11 +7,13 @@ import { type MemoryReadResult, type MemoryMonitorEntry } from '@modules/process
 export class MemoryMonitorManager {
   private activeMonitors: Map<string, MemoryMonitorEntry & { inFlight?: boolean }> = new Map();
 
+  /** Canonical monitor defaults — facades (MemoryManager/memoryUtils) pass through. */
   start(
     pid: number,
     address: string,
-    size: number = 4,
-    intervalMs: number = 1000,
+    size: number = 4, // 32-bit read
+    intervalMs: number = 1000, // 1s poll
+
     readMemoryFn: (pid: number, address: string, size: number) => Promise<MemoryReadResult>,
     onChange?: (oldValue: string, newValue: string) => void,
   ): string {

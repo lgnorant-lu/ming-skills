@@ -7,14 +7,14 @@ import { argBool, argNumber, argString, argStringArray } from '@server/domains/s
 import { R } from '@server/domains/shared/ResponseBuilder';
 import type { ToolResponse } from '@server/types';
 import { logger } from '@utils/logger';
-import { projectRoot } from '@utils/config';
-import { readFile, writeFile } from 'fs/promises';
-import { join } from 'path';
+import { readFile, writeFile } from 'node:fs/promises';
 import type { BrowserAttachRuntimeSnapshot } from '@server/runtime/ServerRuntimeState';
 import type { BrowserSessionCoordinator } from '@server/runtime/BrowserSessionCoordinator';
 import type { BrowserFleetRouter } from '@server/runtime/BrowserFleetRouter';
+import { readEnvBoolean } from '@src/config/environment';
+import { bootstrapRuntimeEnv } from '@src/config/env-bootstrap';
 
-const projectEnvPath = join(projectRoot, '.env');
+const projectEnvPath = bootstrapRuntimeEnv().envPath;
 const CHROME_CHANNELS = new Set(['stable', 'beta', 'dev', 'canary'] as const);
 const BROWSER_DRIVERS = new Set(['chrome', 'camoufox'] as const);
 const BROWSER_LAUNCH_MODES = new Set(['launch', 'connect'] as const);
@@ -56,7 +56,10 @@ interface BrowserControlHandlersDeps {
 }
 
 export class BrowserControlHandlers {
-  constructor(private deps: BrowserControlHandlersDeps) {}
+  private deps: BrowserControlHandlersDeps;
+  constructor(deps: BrowserControlHandlersDeps) {
+    this.deps = deps;
+  }
 
   private pickPreferredAttachPage(
     pages: Array<{ index: number; url: string; title: string }>,
@@ -253,9 +256,9 @@ export class BrowserControlHandlers {
   ): boolean {
     const requestedHeadful =
       headlessArg === false ||
-      (headlessArg === undefined && process.env.PUPPETEER_HEADLESS === 'false');
+      (headlessArg === undefined && !readEnvBoolean('PUPPETEER_HEADLESS', false));
     const linuxRuntime =
-      process.platform === 'linux' || process.env.JSHOOK_FORCE_LINUX_FALLBACK === 'true';
+      process.platform === 'linux' || readEnvBoolean('JSHOOK_FORCE_LINUX_FALLBACK', false);
     if (!requestedHeadful || !linuxRuntime) {
       return false;
     }
@@ -424,7 +427,6 @@ export class BrowserControlHandlers {
 
         const reason = error instanceof Error ? error.message : String(error);
         logger.warn(`Headful launch failed on Linux, fallback to headless=true: ${reason}`);
-        process.env.PUPPETEER_HEADLESS = 'true';
         await this.persistHeadlessEnv('true');
         const launch = await this.deps.collector.launch({
           ...launchRequest,

@@ -28,7 +28,10 @@ function readStringArray(value: unknown): string[] | undefined {
 }
 
 export class PageDataHandlers {
-  constructor(private deps: PageDataHandlersDeps) {}
+  private deps: PageDataHandlersDeps;
+  constructor(deps: PageDataHandlersDeps) {
+    this.deps = deps;
+  }
 
   private readCookieInput(value: unknown): PageCookieInput[] {
     if (!Array.isArray(value) || value.length === 0) {

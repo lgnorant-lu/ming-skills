@@ -68,28 +68,84 @@ describe('TokenBudgetManager', () => {
   });
 
   it('manual cleanup removes old call history and recalculates usage', () => {
+    vi.useFakeTimers();
+    try {
+      const manager = TokenBudgetManager.getInstance();
+      const cleanupFn = vi.fn();
+      manager.setExternalCleanup(cleanupFn);
+
+      // Record a call, then advance past the retention window so it becomes stale.
+      manager.recordToolCall('old_call', { x: 1 }, { y: 2 });
+      vi.advanceTimersByTime(10 * 60 * 1000);
+
+      manager.manualCleanup();
+
+      expect(cleanupFn).toHaveBeenCalledTimes(1);
+      expect(manager.getStats().toolCallCount).toBe(0);
+      expect(manager.getStats().currentUsage).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps toolCallHistory at a hard record limit', () => {
     const manager = TokenBudgetManager.getInstance();
-    const cleanupFn = vi.fn();
-    manager.setExternalCleanup(cleanupFn);
+    for (let i = 0; i < 5000; i++) {
+      manager.recordToolCall(`tool_${i % 10}`, { i }, null);
+    }
 
-    const now = Date.now();
-    (manager as any).toolCallHistory = [
-      {
-        toolName: 'old_call',
-        timestamp: now - 10 * 60 * 1000,
-        requestSize: 100,
-        responseSize: 100,
-        estimatedTokens: 50,
-        cumulativeTokens: 50,
-      },
-    ];
-    (manager as any).currentUsage = 50;
+    const stats = manager.getStats();
+    expect(stats.toolCallCount).toBe(2000);
+  });
 
-    manager.manualCleanup();
+  it('prunes over-age records on push', () => {
+    vi.useFakeTimers();
+    try {
+      const manager = TokenBudgetManager.getInstance();
+      manager.recordToolCall('old_tool', { x: 1 }, null);
 
-    expect(cleanupFn).toHaveBeenCalledTimes(1);
-    expect(manager.getStats().toolCallCount).toBe(0);
-    expect(manager.getStats().currentUsage).toBe(0);
+      // Six minutes later the old record is beyond retention and the next
+      // push must drop it instead of keeping it until auto-cleanup.
+      vi.advanceTimersByTime(6 * 60 * 1000);
+      manager.recordToolCall('new_tool', { x: 2 }, null);
+
+      const stats = manager.getStats();
+      expect(stats.toolCallCount).toBe(1);
+      expect(stats.recentCalls[0]?.toolName).toBe('new_tool');
+      expect(stats.currentUsage).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps usage accounting consistent when the cap evicts oldest records', () => {
+    const manager = TokenBudgetManager.getInstance();
+    // Each record: 10_000 (request) + 10_000 (response) bytes → 5_000 tokens.
+    const largeRef = { detailId: 'detail_x', summary: { size: 10_000 } };
+
+    for (let i = 0; i < 2010; i++) {
+      manager.recordToolCall('network_get_requests', largeRef, largeRef);
+    }
+
+    const stats = manager.getStats();
+    // 2000 retained records × 5_000 tokens each = 10_000_000.
+    expect(stats.toolCallCount).toBe(2000);
+    expect(stats.currentUsage).toBe(10_000_000);
+  });
+
+  it('advances the stale-prune head to the new oldest record after cap eviction', () => {
+    const manager = TokenBudgetManager.getInstance();
+    // 2005 pushes evict the first 5 records via the hard cap; the 6th becomes
+    // the oldest retained record and must drive future stale-pruning.
+    for (let i = 0; i < 2005; i++) {
+      manager.recordToolCall(`tool_${i}`, { i }, null);
+    }
+
+    const oldest = (
+      manager as unknown as { toolCallHistory: { peek(): { timestamp: number } | undefined } }
+    ).toolCallHistory.peek()?.timestamp;
+    const headTimestamp = (manager as unknown as { headTimestamp: number | null }).headTimestamp;
+    expect(headTimestamp).toBe(oldest);
   });
 
   it('handles errors gracefully in recordToolCall', () => {

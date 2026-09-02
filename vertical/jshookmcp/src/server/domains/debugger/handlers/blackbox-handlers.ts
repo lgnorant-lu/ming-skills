@@ -17,7 +17,10 @@ function getErrorMessage(error: unknown): string {
 }
 
 export class BlackboxHandlers {
-  constructor(private deps: BlackboxHandlersDeps) {}
+  private deps: BlackboxHandlersDeps;
+  constructor(deps: BlackboxHandlersDeps) {
+    this.deps = deps;
+  }
 
   private async getBlackboxManager(): Promise<BlackboxManager> {
     await (this.deps.debuggerManager as any).ensureAdvancedFeatures?.();

@@ -10,7 +10,7 @@
  *   SEARCH_VECTOR_LEARN_TOP_N
  *   Between [N, 2N) the up step is scaled by 0.3.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { FeedbackTracker } from '@server/search/FeedbackTracker';
 import {
   SEARCH_VECTOR_COSINE_WEIGHT,
@@ -18,6 +18,19 @@ import {
   SEARCH_VECTOR_LEARN_DOWN,
   SEARCH_VECTOR_LEARN_TOP_N,
 } from '@src/constants';
+
+// Block `.env` loading so the learning-rate constants resolve to their source
+// defaults. A local (gitignored, search-tune generated) `.env` would otherwise
+// be injected by the env-bootstrap that runs when the constants module loads,
+// overriding SEARCH_VECTOR_LEARN_UP/DOWN and breaking the bound assertions.
+// Mirrors the isolation pattern used by tests/utils/config.test.ts.
+const { dotenvMock } = vi.hoisted(() => ({
+  dotenvMock: {
+    config: vi.fn(() => ({ error: Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) })),
+  },
+}));
+
+vi.mock('dotenv', () => dotenvMock);
 
 const EPS = 1e-9;
 const INIT = SEARCH_VECTOR_COSINE_WEIGHT;

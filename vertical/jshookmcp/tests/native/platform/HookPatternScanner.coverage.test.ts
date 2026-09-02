@@ -54,6 +54,14 @@ describe('classifyHookPattern — all pattern types', () => {
     expect(classifyHookPattern(hexToBytes('68efbeaddec3'))).toBe('push_ret');
   });
 
+  it('push_ret on a short window (< 6 bytes) is not misread', () => {
+    // 0x68 without a full imm32+RET window must fall through to 'unknown' —
+    // reading bytes[5] past the window would otherwise be undefined.
+    expect(classifyHookPattern(hexToBytes('68efbe'))).toBe('unknown');
+    expect(classifyHookPattern(hexToBytes('68efbeaddec3'))).toBe('push_ret');
+    expect(classifyHookPattern(hexToBytes('68'))).toBe('unknown');
+  });
+
   it('unknown for unrecognised leading byte', () => {
     expect(classifyHookPattern(hexToBytes('01'))).toBe('unknown');
   });

@@ -11,6 +11,7 @@ import {
   identifySource,
   type SourceInfo,
 } from '@modules/analyzer/CodeAnalyzerDataFlow.summaries';
+import { DATAFLOW_MAX_FIXPOINT_ITERATIONS } from '@src/constants';
 
 type SinkType = DataFlow['sinks'][number]['type'];
 
@@ -21,7 +22,7 @@ interface SinkSite {
 }
 
 /** Cap on the monotonic taint fixpoint loop (taint only grows, so it converges). */
-const MAX_FIXPOINT_ITERATIONS = 100;
+const MAX_FIXPOINT_ITERATIONS = DATAFLOW_MAX_FIXPOINT_ITERATIONS;
 
 /**
  * Sanitizers / value-sinking builtins: taint identity drops when a value

@@ -36,8 +36,9 @@ export interface GetpropFingerprint {
 }
 
 // `[ro.product.cpu.abi]: [arm64-v8a]` — value may be empty (`[key]: []`).
-// Values do not contain `]` in practice; bracket contents are captured lazily.
-const GETPROP_LINE_RE = /^\[([^\]]*)\]:\s*\[([^\]]*)\]$/;
+// The value capture is greedy so properties whose value contains `]`
+// (e.g. `[a]b]`) are not truncated at the first bracket.
+const GETPROP_LINE_RE = /^\[([^\]]*)\]:\s*\[(.*)\]$/;
 
 /**
  * Parse raw `getprop` stdout into {key, value} entries.

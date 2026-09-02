@@ -18,7 +18,10 @@ import { argString } from '@server/domains/shared/parse-args';
 import { evaluateWithTimeout } from '@modules/collector/PageController';
 
 export class CallGraphHandlers {
-  constructor(private collector: CodeCollector) {}
+  private collector: CodeCollector;
+  constructor(collector: CodeCollector) {
+    this.collector = collector;
+  }
 
   async handleCallGraphAnalyze(args: Record<string, unknown>) {
     try {

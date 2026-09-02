@@ -2,9 +2,9 @@
  * Shared types and state for WASM sub-handlers.
  */
 
-import { resolve, normalize, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ExternalToolRunner } from '@server/domains/shared/modules';
+import { resolveSafeOutputPath } from '@utils/safeOutput';
 import type { CodeCollector } from '@server/domains/shared/modules/collector';
 
 export type UnknownRecord = Record<string, unknown>;
@@ -78,19 +78,27 @@ export interface WasmSharedState {
 }
 
 export const isRecord = (value: unknown): value is UnknownRecord =>
-  typeof value === 'object' && value !== null;
+  typeof value === 'object' && value !== null && !Array.isArray(value);
 
 export const hasErrorResult = (value: unknown): value is EvalErrorResult =>
   isRecord(value) && typeof value.error === 'string';
 
-export function validateOutputPath(outputPath: string): string {
-  const safe = resolve(outputPath);
-  const cwd = normalize(process.cwd());
-  const tmp = normalize(tmpdir());
-  if (!safe.startsWith(`${cwd}${sep}`) && !safe.startsWith(`${tmp}${sep}`)) {
+/**
+ * Validate an output path against the project root / temp directory, with
+ * symlink-aware containment. The previous `startsWith` check could be bypassed
+ * by a symlink planted inside a root but pointing outside it, and by
+ * parent-directory segments.
+ */
+export async function validateOutputPath(outputPath: string): Promise<string> {
+  try {
+    return await resolveSafeOutputPath(outputPath, {
+      allowedRoots: [process.cwd(), tmpdir()],
+      allowedRootsDescription: 'project root or temp directory',
+    });
+  } catch (error) {
     throw new Error(
-      'Path traversal blocked: outputPath must be under project root or temp directory',
+      `Path traversal blocked: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
-  return safe;
 }

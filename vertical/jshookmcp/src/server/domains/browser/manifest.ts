@@ -85,6 +85,10 @@ const registrations = defineMethodRegistrations<H, (typeof toolDefinitions)[numb
     { tool: 'tab_workflow', method: 'handleTabWorkflow' },
     { tool: 'browser_codegen_start', method: 'handleBrowserCodegenStart' },
     { tool: 'browser_codegen_stop', method: 'handleBrowserCodegenStop' },
+    { tool: 'browser_performance_observer', method: 'handleBrowserPerformanceObserver' },
+    { tool: 'browser_resource_timing', method: 'handleBrowserResourceTiming' },
+    { tool: 'browser_cdp_performance_metrics', method: 'handleBrowserCdpPerformanceMetrics' },
+    { tool: 'v8_type_profile', method: 'handleV8TypeProfile' },
     { tool: 'human_mouse', method: 'handleHumanMouse' },
     { tool: 'human_scroll', method: 'handleHumanScroll' },
     { tool: 'human_typing', method: 'handleHumanTyping' },
@@ -135,6 +139,7 @@ async function ensure(ctx: MCPServerContext): Promise<H> {
         getRuntimeState(ctx)?.setBrowserAttach(snapshot);
       },
       getDomainInstance?.<BrowserFleetRouter>('browserFleetRouter'),
+      ctx.elicitationBridge,
     );
   }
   return ctx.browserHandlers;

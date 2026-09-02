@@ -1,3 +1,9 @@
+import {
+  APK_SURFACE_HINTS_MAX_EVIDENCE,
+  APK_SURFACE_HINTS_MAX_CUSTOM_ENTRY_LINES,
+  APK_SURFACE_HINTS_MAX_CUSTOM_PATTERNS,
+} from '@src/constants';
+
 export interface ApkSurfaceHint {
   name: string;
   evidence: string[];
@@ -31,9 +37,9 @@ interface ApkSurfaceIndex {
   xml: EvidenceLine[];
 }
 
-const MAX_EVIDENCE = 10;
-const MAX_CUSTOM_ENTRY_LINES = 5000;
-const MAX_CUSTOM_PATTERNS = 50;
+const MAX_EVIDENCE = APK_SURFACE_HINTS_MAX_EVIDENCE;
+const MAX_CUSTOM_ENTRY_LINES = APK_SURFACE_HINTS_MAX_CUSTOM_ENTRY_LINES;
+const MAX_CUSTOM_PATTERNS = APK_SURFACE_HINTS_MAX_CUSTOM_PATTERNS;
 const EVIDENCE_CLIP_BYTES = 160;
 
 const NATIVE_LOADER_RE =

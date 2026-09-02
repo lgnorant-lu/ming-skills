@@ -1,15 +1,16 @@
 import { capabilityReport, type CapabilityEntryOptions } from '@server/domains/shared/capabilities';
 import { R, type ToolResponse } from '@server/domains/shared/ResponseBuilder';
 import type { CodeCollector } from '@server/domains/shared/modules/collector';
+import { readEnvNullableString, readEnvString } from '@src/config/environment';
 
 function getConfiguredProvider(): string {
-  return (process.env.CAPTCHA_PROVIDER || '').trim().toLowerCase() || 'manual';
+  return readEnvString('CAPTCHA_PROVIDER', 'manual', { trim: true }).toLowerCase();
 }
 
 function getConfiguredBaseUrl(): string {
   return (
-    process.env.CAPTCHA_SOLVER_BASE_URL?.trim() ||
-    process.env.CAPTCHA_2CAPTCHA_BASE_URL?.trim() ||
+    readEnvNullableString('CAPTCHA_SOLVER_BASE_URL', { trim: true }) ||
+    readEnvNullableString('CAPTCHA_2CAPTCHA_BASE_URL', { trim: true }) ||
     ''
   );
 }
@@ -19,15 +20,15 @@ function getProviderBaseUrl(provider: '2captcha' | 'anticaptcha' | 'capsolver'):
     return getConfiguredBaseUrl();
   }
   if (provider === 'anticaptcha') {
-    return process.env.CAPTCHA_ANTICAPTCHA_BASE_URL?.trim() || '';
+    return readEnvNullableString('CAPTCHA_ANTICAPTCHA_BASE_URL', { trim: true }) || '';
   }
-  return process.env.CAPTCHA_CAPSOLVER_BASE_URL?.trim() || '';
+  return readEnvNullableString('CAPTCHA_CAPSOLVER_BASE_URL', { trim: true }) || '';
 }
 
 function getTwoCaptchaCapability(): CapabilityEntryOptions {
   const configuredProvider = getConfiguredProvider();
   const baseUrl = getProviderBaseUrl('2captcha');
-  const apiKeyConfigured = Boolean(process.env.CAPTCHA_API_KEY?.trim());
+  const apiKeyConfigured = readEnvNullableString('CAPTCHA_API_KEY', { trim: true }) !== null;
   const baseUrlConfigured = baseUrl.length > 0;
   const available = apiKeyConfigured && baseUrlConfigured;
 
@@ -56,7 +57,7 @@ function getJsonTaskProviderCapability(
 ): CapabilityEntryOptions {
   const configuredProvider = getConfiguredProvider();
   const baseUrl = getProviderBaseUrl(provider);
-  const apiKeyConfigured = Boolean(process.env.CAPTCHA_API_KEY?.trim());
+  const apiKeyConfigured = readEnvNullableString('CAPTCHA_API_KEY', { trim: true }) !== null;
   const available = apiKeyConfigured && baseUrl.length > 0;
 
   return {

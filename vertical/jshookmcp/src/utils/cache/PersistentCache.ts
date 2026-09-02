@@ -1,5 +1,5 @@
-import { join } from 'path';
-import { mkdirSync, existsSync } from 'fs';
+import { dirname, join } from 'node:path';
+import { mkdirSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { logger } from '@utils/logger';
 
@@ -61,8 +61,12 @@ export class PersistentCache {
     try {
       const dbPath = this.resolveDbPath();
 
-      // Ensure directory exists
-      const dir = dbPath.substring(0, dbPath.lastIndexOf('/'));
+      // Ensure directory exists. dirname() is cross-platform: the old
+      // lastIndexOf('/') split produced an empty dir on Windows paths
+      // (C:\Users\...), so the parent directory was never created and init
+      // silently degraded to a no-op cache whenever the default
+      // ~/.jshookmcp/ directory did not already exist.
+      const dir = dirname(dbPath);
       if (dir && !existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
@@ -197,9 +201,33 @@ export class PersistentCache {
 
       // Unwrap the stored value (values are stored as { __cached: true, data: actualValue })
       const wrapped = JSON.parse(entry.value) as { __cached: boolean; data: T };
+
+      // Not our wrapped format (e.g. a row written by an external tool or an
+      // older cache version). Discard it instead of returning undefined and
+      // treating every subsequent get as a "hit" of nothing.
+      if (wrapped === null || typeof wrapped !== 'object' || wrapped['__cached'] !== true) {
+        logger.warn(
+          `PersistentCache[${this.options.name}] discarding entry with unexpected format for key "${key}"`,
+        );
+        this.db.prepare('DELETE FROM cache_entries WHERE key = ?').run(key);
+        this.stats.misses++;
+        return null;
+      }
+
       return wrapped.data;
     } catch (error) {
-      logger.error(`PersistentCache[${this.options.name}] get error:`, error);
+      // Corrupted JSON (e.g. torn write or manual DB edit). Delete the poison
+      // row so it stops erroring on every get instead of silently discarding
+      // and leaving the entry to fail forever.
+      logger.warn(
+        `PersistentCache[${this.options.name}] discarding corrupted entry for key "${key}": ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      try {
+        this.db.prepare('DELETE FROM cache_entries WHERE key = ?').run(key);
+      } catch {
+        // Deletion failing is not worth surfacing — the next get will retry it.
+      }
       this.stats.misses++;
       return null;
     }
@@ -293,6 +321,12 @@ export class PersistentCache {
       const now = Date.now();
       const stmt = this.db.prepare('DELETE FROM cache_entries WHERE expiresAt <= ?');
       const result = stmt.run(now);
+      if (result.changes > 0) {
+        // Deleted rows leave the db file and WAL at their old size. Checkpoint
+        // with TRUNCATE so a long-lived cache does not keep growing on disk
+        // with dead pages and orphaned -wal/-shm sidecar files.
+        this.db.pragma('wal_checkpoint(TRUNCATE)');
+      }
       return result.changes;
     } catch (error) {
       logger.error(`PersistentCache[${this.options.name}] cleanup error:`, error);

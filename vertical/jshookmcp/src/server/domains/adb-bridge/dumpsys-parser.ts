@@ -194,7 +194,6 @@ export function parseDumpsys(raw: string, service: string): DumpsysResult {
     if (kvMatch && !currentListKey) {
       ensureSection();
       const key = kvMatch[1]!.trim();
-      void key; // stored in result below
       const value = kvMatch[2]!.trim();
 
       // Handle array values: "[val1, val2, ...]"
@@ -237,6 +236,22 @@ export function parseDumpsys(raw: string, service: string): DumpsysResult {
     sections,
     sectionCount: sections.length,
   };
+}
+
+/**
+ * Flatten all parsed sections into one key → comma-joined-value map.
+ * Later sections win on key collisions (Object.assign merge order).
+ */
+function mergeSectionsFlat(result: DumpsysResult): Record<string, string> {
+  const entries: Record<string, string | string[]> = {};
+  for (const section of result.sections) {
+    Object.assign(entries, section.entries);
+  }
+  const flatRaw: Record<string, string> = {};
+  for (const [key, value] of Object.entries(entries)) {
+    flatRaw[key] = Array.isArray(value) ? value.join(', ') : value;
+  }
+  return flatRaw;
 }
 
 /**
@@ -345,10 +360,7 @@ export function parseBattery(raw: string): BatteryInfo {
     Object.assign(entries, section.entries);
   }
 
-  const flatRaw: Record<string, string> = {};
-  for (const [key, value] of Object.entries(entries)) {
-    flatRaw[key] = Array.isArray(value) ? value.join(', ') : value;
-  }
+  const flatRaw = mergeSectionsFlat(result);
 
   // Regex extraction for fields not captured by key-value parser
   const match = (pat: RegExp): string | undefined => raw.match(pat)?.[1];
@@ -424,15 +436,12 @@ const ACTIVITY_PATTERNS = {
   // Activity record line: "ActivityRecord{abc u0 com.pkg/.Class t123}"
   activityRecord:
     /^\s*(?:ActivityRecord|HistoryRecord)\{[^}]*\s+([^\s}]+)\/([^\s}]+)\s+t(-?\d+)\}(?:\s*(?:\([^)]*\))?)?$/,
-  // Task record: "* Task{abc #123 ...}"
-  taskRecord: /^\s*\*?\s*Task\{[^}]*#(\d+)\s.*\}\s*$/,
   // Recent task line
   recentTask: /^\s*\*?\s*Recent\s+#(\d+):\s*(.+)$/,
   // PID line in activity section
   pid: /pid=(\d+)/,
   // Standalone pid line (pid on separate line from ActivityRecord)
   pidLine: /^\s*pid=(\d+)/,
-  processName: /proc=([^\s}]+)/,
   activityState: /\}(?:\s*\(([^)]*)\))?/,
 };
 
@@ -533,7 +542,10 @@ export function parseActivity(raw: string): ActivityInfo {
   let topPid: number | undefined;
   if (resumedActivity) {
     const [resumedPkg] = resumedActivity.split('/');
-    const topAct = activities.find((a) => a.packageName === resumedPkg);
+    const topAct =
+      activities.find(
+        (a) => a.packageName === resumedPkg && (a.state === 'resumed' || a.state === 'focused'),
+      ) ?? activities.find((a) => a.packageName === resumedPkg);
     if (topAct) {
       topProcess = topAct.packageName;
       topPid = topAct.pid;
@@ -541,12 +553,7 @@ export function parseActivity(raw: string): ActivityInfo {
   }
 
   // Merge section entries into raw
-  const flatRaw: Record<string, string> = {};
-  for (const section of result.sections) {
-    for (const [key, value] of Object.entries(section.entries)) {
-      flatRaw[key] = Array.isArray(value) ? value.join(', ') : value;
-    }
-  }
+  const flatRaw = mergeSectionsFlat(result);
 
   return {
     focusedApp,
@@ -568,7 +575,6 @@ export function parseActivity(raw: string): ActivityInfo {
 const WIFI_PATTERNS = {
   wifiEnabled: /Wi-Fi[ is]* (enabled|disabled)/i,
   wifiEnabledAlt: /mWiFiEnabled[=:]?\s*(true|false)/i,
-  wifiState: /Wi-Fi state:\s*(\S+)/i,
   connected: /connected[=:]?\s*(true|false)/i,
   ssid: /SSID[=:]?\s*"?([^"\n]+)"?/i,
   bssid: /BSSID[=:]?\s*([0-9a-fA-F:]{17})/i,
@@ -576,7 +582,6 @@ const WIFI_PATTERNS = {
   macAddress: /MAC[ -]?address[=:]?\s*([0-9a-fA-F:]{17})/i,
   linkSpeed: /Link[ -]?speed[=:]?\s*(\d+)\s*(Mbps)?/i,
   rssi: /RSSI[=:]?\s*(-?\d+)/i,
-  frequency: /frequency[=:]?\s*(\d+)\s*(MHz)?/i,
   networkId: /(?:Network[ -]?)?[Nn]et[Ww]ork[ -]?[Ii][Dd][=:]?\s*(-?\d+)/i,
   supplicantState: /supplicant[ -]?state[=:]?\s*(\S+)/i,
   band24: /(?:2[.,]4\s*GHz|2400|2412|2437|2462|2472|2484)/i,
@@ -606,10 +611,7 @@ export function parseWifi(raw: string): WifiInfo {
     Object.assign(entries, section.entries);
   }
 
-  const flatRaw: Record<string, string> = {};
-  for (const [key, value] of Object.entries(entries)) {
-    flatRaw[key] = Array.isArray(value) ? value.join(', ') : value;
-  }
+  const flatRaw = mergeSectionsFlat(result);
 
   const match = (pat: RegExp): string | undefined => raw.match(pat)?.[1];
 

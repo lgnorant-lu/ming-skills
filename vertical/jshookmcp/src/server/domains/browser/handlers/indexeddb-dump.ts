@@ -23,12 +23,15 @@ interface CursorSpec {
 }
 
 export class IndexedDBDumpHandlers {
-  constructor(private deps: IndexedDBDumpHandlersDeps) {}
+  private deps: IndexedDBDumpHandlersDeps;
+  constructor(deps: IndexedDBDumpHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handleIndexedDBDump(args: Record<string, unknown>): Promise<ToolResponse> {
     const database = argString(args, 'database', '');
     const store = argString(args, 'store', '');
-    const maxRecords = argNumber(args, 'maxRecords', 100);
+    const maxRecords = Math.max(0, argNumber(args, 'maxRecords', 100));
     const indexName = argString(args, 'indexName', '');
     const countOnly = argBool(args, 'count', false);
     const keyRange = argObject(args, 'keyRange') as KeyRangeSpec | undefined;
@@ -97,6 +100,8 @@ export class IndexedDBDumpHandlers {
                 dbData[storeName] = await new Promise((resolve, reject) => {
                   try {
                     const tx = db.transaction(storeName, 'readonly');
+                    tx.addEventListener('error', () => reject(tx.error), { once: true });
+                    tx.addEventListener('abort', () => reject(tx.error), { once: true });
                     const objectStore = tx.objectStore(storeName);
                     const source = opts.indexName ? objectStore.index(opts.indexName) : objectStore;
 

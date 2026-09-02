@@ -25,6 +25,11 @@ import { join } from 'node:path';
 import { logger } from '@utils/logger';
 import { getArtifactDir } from '@utils/artifacts';
 import {
+  normalizeFunctionName,
+  parseStatusLine,
+  shouldWrapAsObjectMember,
+} from './isolated-v8-utils';
+import {
   parseTurboFanJSONFiles,
   type TurboFanIRGraph,
   type ParsedTurboFanResult,
@@ -35,6 +40,10 @@ import {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const TARGET_NAME = '__jshookTurbofanTarget__';
 const STATUS_PREFIX = '__JSHOOK_TURBOFAN_STATUS__:';
+/** Warm-up call count before the target is expected to reach TurboFan tier. */
+const TURBOFAN_WARMUP_CALLS = 10;
+/** stderr excerpt length used in process-error reasons. */
+const STDERR_EXCERPT_CHARS = 200;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -57,32 +66,6 @@ export interface TurboFanTraceResult {
 }
 
 // ── Bootstrap Script Builder ──────────────────────────────────────────────────
-
-function isValidFunctionName(value: string): boolean {
-  return /^[A-Za-z_$][\w$]*$/u.test(value);
-}
-
-function normalizeFunctionName(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.length === 0 || trimmed === 'anonymous') {
-    return TARGET_NAME;
-  }
-  return isValidFunctionName(trimmed) ? trimmed : TARGET_NAME;
-}
-
-function shouldWrapAsObjectMember(source: string): boolean {
-  const trimmed = source.trim();
-  if (
-    trimmed.startsWith('function') ||
-    trimmed.startsWith('async function') ||
-    trimmed.startsWith('class ') ||
-    trimmed.startsWith('(') ||
-    trimmed.includes('=>')
-  ) {
-    return false;
-  }
-  return /^(?:async\s+)?(?:get\s+|set\s+)?\*?\s*[A-Za-z_$][\w$]*\s*\(/u.test(trimmed);
-}
 
 function buildBootstrapScript(context: TurboFanSourceContext): string {
   const source = context.sourceSlice.trim();
@@ -118,7 +101,7 @@ if (typeof ${TARGET_NAME} !== 'function') {
         : 1;
     const __jshookArgs = Array.from({ length: __jshookArity }, () => undefined);
     // Multiple calls to trigger TurboFan optimization
-    for (let __jshookI = 0; __jshookI < 10; __jshookI += 1) {
+    for (let __jshookI = 0; __jshookI < ${TURBOFAN_WARMUP_CALLS}; __jshookI += 1) {
       Reflect.apply(${TARGET_NAME}, globalThis, __jshookArgs);
     }
   } catch (error) {
@@ -202,13 +185,6 @@ async function runTraceTurboProcess(
   });
 }
 
-function parseStatusFromOutput(output: string): string | null {
-  const line = output
-    .split(/\r?\n/u)
-    .find((entry) => entry.startsWith(STATUS_PREFIX) && entry.length > STATUS_PREFIX.length);
-  return line ? line.slice(STATUS_PREFIX.length) : null;
-}
-
 function readTraceDir(traceDir: string): Array<{ filename: string; content: string }> {
   const files: Array<{ filename: string; content: string }> = [];
   try {
@@ -259,13 +235,17 @@ export async function collectTurboFanIRIsolated(
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
   keepTraceDir: boolean = false,
 ): Promise<TurboFanTraceResult> {
-  const requestedName = normalizeFunctionName(context.functionName);
+  const requestedName = normalizeFunctionName(context.functionName, TARGET_NAME);
   const candidateNames = Array.from(new Set([requestedName, TARGET_NAME]));
   const traceDir = createTraceDir();
   const startTime = Date.now();
 
   try {
     for (const filterName of candidateNames) {
+      // Fresh trace dir per candidate — a partially-failed earlier candidate
+      // may have left turbo-*.json files that would mix into the next parse.
+      cleanupTraceDir(traceDir);
+      mkdirSync(traceDir, { recursive: true });
       const bootstrapScript = buildBootstrapScript(context);
 
       const { stdout, stderr, error } = await runTraceTurboProcess(
@@ -276,7 +256,7 @@ export async function collectTurboFanIRIsolated(
       );
 
       // Check if the function compiled
-      const status = parseStatusFromOutput(stdout);
+      const status = parseStatusLine(stdout, STATUS_PREFIX);
 
       if (error && !status) {
         // Process failed before function even ran — try next candidate
@@ -290,7 +270,7 @@ export async function collectTurboFanIRIsolated(
           graphCount: 0,
           reason:
             stderr.trim().length > 0
-              ? `Process error: ${stderr.trim().slice(0, 200)}`
+              ? `Process error: ${stderr.trim().slice(0, STDERR_EXCERPT_CHARS)}`
               : (error ?? 'Unknown process error'),
           traceDir: null,
           durationMs: Date.now() - startTime,

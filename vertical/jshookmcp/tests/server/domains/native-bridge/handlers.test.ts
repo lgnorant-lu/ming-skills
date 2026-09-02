@@ -232,15 +232,24 @@ describe('NativeBridgeHandlers', () => {
         }),
       );
 
-      const result = parseJson<any>(
-        await handlers.handleNativeBridgeStatus({
-          backend: 'rizin',
-          rizinEndpoint: 'http://evil.com:9999',
+      const result = parseJson<any>(await handlers.handleNativeBridgeStatus({ backend: 'rizin' }));
+      expect(result.success).toBe(true);
+      expect(result.backends[0].available).toBe(true);
+    });
+
+    it('reports a 200 with non-JSON body as unavailable (misconfigured sidecar)', async () => {
+      const handlers = new NativeBridgeHandlers();
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          status: 200,
+          json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
         }),
       );
 
+      const result = parseJson<any>(await handlers.handleNativeBridgeStatus({ backend: 'ghidra' }));
       expect(result.success).toBe(true);
-      expect(result.backends[0].endpoint).toBe('http://127.0.0.1:18082');
+      expect(result.backends[0].available).toBe(false);
     });
   });
 

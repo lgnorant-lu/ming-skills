@@ -181,9 +181,6 @@ vi.mock('@utils/artifactRetention', () => ({
 vi.mock('@utils/environmentDoctor', () => ({
   runEnvironmentDoctor: vi.fn(),
 }));
-vi.mock('@services/LLMService', () => ({
-  LLMService: vi.fn().mockImplementation(() => ({})),
-}));
 vi.mock('@utils/DetailedDataManager', () => ({
   DetailedDataManager: vi.fn().mockImplementation(() => ({})),
 }));

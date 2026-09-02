@@ -1,4 +1,4 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import { tool } from '@server/registry/tool-builder';
 
 export const captureTools: Tool[] = [
@@ -101,13 +101,6 @@ export const captureTools: Tool[] = [
       .boolean('includeTimeline', 'Include detailed timeline events', { default: false })
       .query(),
   ),
-  tool('performance_coverage', (t) =>
-    t
-      .desc('Start or stop code coverage recording.')
-      .enum('action', ['start', 'stop'], 'Coverage action')
-      .required('action'),
-  ),
-  tool('performance_take_heap_snapshot', (t) => t.desc('Take a V8 heap memory snapshot')),
   tool('performance_trace', (t) =>
     t
       .desc('Start or stop a Chrome performance trace.')
@@ -123,24 +116,12 @@ export const captureTools: Tool[] = [
     t
       .desc('Start or stop CPU profiling.')
       .enum('action', ['start', 'stop'], 'Profiler action')
+      .number(
+        'samplingInterval',
+        'Sampling interval in microseconds. Default: 1000 (1ms). 30-100 for high-res profiles. Range: 30-10000',
+        { minimum: 30, maximum: 10000 },
+      )
       .string('artifactPath', 'Custom output path')
-      .required('action'),
-  ),
-  tool('profiler_heap_sampling', (t) =>
-    t
-      .desc('Start or stop heap allocation sampling.')
-      .enum('action', ['start', 'stop'], 'Sampling action')
-      .number('samplingInterval', 'Sampling interval in bytes', {
-        default: 32768,
-        minimum: 256,
-        maximum: 1048576,
-      })
-      .string('artifactPath', 'Custom output path')
-      .number('topN', 'Number of top allocators to return', {
-        default: 20,
-        minimum: 1,
-        maximum: 100,
-      })
       .required('action'),
   ),
 ];

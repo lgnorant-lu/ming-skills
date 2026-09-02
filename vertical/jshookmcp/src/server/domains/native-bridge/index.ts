@@ -88,7 +88,9 @@ async function bridgeFetch(
     ...(body === undefined ? {} : { body }),
     signal: AbortSignal.timeout(NATIVE_BRIDGE_TIMEOUT_MS),
   });
-  const data = await res.json().catch(() => ({}));
+  // Parse failure (non-JSON body) yields null so health checks do not treat
+  // a misconfigured 200 HTML error page as a healthy bridge.
+  const data = await res.json().catch(() => null);
   return { status: res.status, data };
 }
 
@@ -101,7 +103,8 @@ async function checkBridgeHealth(
     const advertised = await checkBridgeCapabilities(endpoint, label);
     return {
       backend: label,
-      available: status === 200,
+      // A 200 with a non-JSON body is a misconfigured sidecar, not a healthy bridge.
+      available: status === 200 && data !== null,
       endpoint,
       version: data,
       capabilities: advertised.actions,

@@ -26,6 +26,26 @@ export const SEARCH_WORKFLOW_DOMAIN_BOOST_MULTIPLIER = float(
 );
 
 /**
+ * Per-tool score multipliers applied by the search engine while building
+ * ToolSearchEngine. Extension/plugin tools receive a flat boost so they
+ * surface alongside built-ins; `run_extension_workflow` and
+ * `list_extension_workflows` get an additional boost only while workflow
+ * runtimes are active at runtime.
+ */
+export const SEARCH_EXTENSION_TOOL_BOOST_MULTIPLIER = float(
+  'SEARCH_EXTENSION_TOOL_BOOST_MULTIPLIER',
+  1.12,
+);
+export const SEARCH_WORKFLOW_TOOL_BOOST_MULTIPLIER = float(
+  'SEARCH_WORKFLOW_TOOL_BOOST_MULTIPLIER',
+  1.35,
+);
+export const SEARCH_WORKFLOW_LIST_TOOL_BOOST_MULTIPLIER = float(
+  'SEARCH_WORKFLOW_LIST_TOOL_BOOST_MULTIPLIER',
+  1.25,
+);
+
+/**
  * When enabled, search_tools automatically activates domains of top
  * inactive results (with TTL). Default: true.
  */
@@ -92,6 +112,28 @@ export const SEARCH_SYNONYM_EXPANSION_LIMIT = int('SEARCH_SYNONYM_EXPANSION_LIMI
 export const SEARCH_PARAM_TOKEN_WEIGHT = float('SEARCH_PARAM_TOKEN_WEIGHT', 1.1);
 
 /**
+ * Token field weights for the BM25 inverted index. Relative ordering is
+ * significant: name tokens rank above domain tokens, which rank above
+ * description tokens. Parameter-name and scene keywords have their own
+ * weights (SEARCH_PARAM_TOKEN_WEIGHT / SEARCH_SCENE_KEYWORD_WEIGHT). All
+ * weights are enforced as floors (Math.max) during index construction.
+ *
+ * @env SEARCH_NAME_TOKEN_WEIGHT
+ * @default 3
+ */
+export const SEARCH_NAME_TOKEN_WEIGHT = float('SEARCH_NAME_TOKEN_WEIGHT', 3);
+/**
+ * @env SEARCH_DOMAIN_TOKEN_WEIGHT
+ * @default 2
+ */
+export const SEARCH_DOMAIN_TOKEN_WEIGHT = float('SEARCH_DOMAIN_TOKEN_WEIGHT', 2);
+/**
+ * @env SEARCH_DESC_TOKEN_WEIGHT
+ * @default 1
+ */
+export const SEARCH_DESC_TOKEN_WEIGHT = float('SEARCH_DESC_TOKEN_WEIGHT', 1);
+
+/**
  * Generic technology scene keywords — indexed per-tool with this weight
  * in the BM25 inverted index. Keywords describe abstract technical
  * capabilities ("parameter extraction", "bytecode tracing") without
@@ -131,7 +173,7 @@ export const SEARCH_BM25_B = float('SEARCH_BM25_B', 0.75);
  *   for stability.
  * SEARCH_VECTOR_LEARN_TOP_N: rank threshold that separates "hit" from "miss".
  */
-const sharedHttpTransport = process.env.MCP_TRANSPORT?.trim().toLowerCase() === 'http';
+const sharedHttpTransport = str('MCP_TRANSPORT', 'stdio').trim().toLowerCase() === 'http';
 export const SEARCH_VECTOR_ENABLED = bool('SEARCH_VECTOR_ENABLED', sharedHttpTransport);
 export const SEARCH_VECTOR_MODEL_ID = str('SEARCH_VECTOR_MODEL_ID', DEFAULT_SEARCH_VECTOR_MODEL_ID);
 export const SEARCH_VECTOR_COSINE_WEIGHT = float('SEARCH_VECTOR_COSINE_WEIGHT', 0.53);

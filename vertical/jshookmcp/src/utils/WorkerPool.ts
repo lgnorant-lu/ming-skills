@@ -359,9 +359,14 @@ export class WorkerPool<TPayload extends Record<string, unknown>, TResult> {
     this.workers.delete(workerId);
     if (worker.idleTimer) clearTimeout(worker.idleTimer);
     worker.idleTimer = null;
+    // Strip message/error handlers so a terminating worker's late events cannot
+    // touch pool state, but KEEP the 'exit' listener: removing it would also
+    // strip ProcessRegistry's auto-unregister once('exit') and leak the dead
+    // worker inside the registry forever. handleWorkerExit is already a no-op
+    // here because this worker is gone from the map.
     worker.worker.removeAllListeners('message');
     worker.worker.removeAllListeners('error');
-    worker.worker.removeAllListeners('exit');
+    ProcessRegistry.unregister(worker.worker);
     try {
       await worker.worker.terminate();
     } catch {

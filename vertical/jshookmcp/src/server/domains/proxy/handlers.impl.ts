@@ -8,6 +8,7 @@ import {
   PROXY_ADB_MAX_BUFFER_BYTES,
   PROXY_ADB_TIMEOUT_MS,
   PROXY_CAPTURE_BODY_PREVIEW_BYTES,
+  PROXY_CAPTURE_BODY_SKIP_BYTES,
   PROXY_CAPTURE_BUFFER_MAX,
   PROXY_CAPTURE_RETURN_LIMIT,
 } from '@src/constants';
@@ -46,6 +47,7 @@ interface CaptureEntry {
   bodyTruncated?: boolean;
   bodyEncoding?: 'utf8';
   bodyUnavailable?: string;
+  bodySkipped?: string;
   remoteIpAddress?: string;
   remotePort?: number;
   timing?: CaptureTiming;
@@ -543,9 +545,39 @@ function truncateUtf8(text: string): {
   };
 }
 
-async function readBodyPreview(body: CaptureBody | undefined): Promise<Partial<CaptureEntry>> {
+/** Extract a numeric content-length from a (possibly multi-valued) header map. */
+function getContentLength(headers: Record<string, unknown> | undefined): number | undefined {
+  if (!headers) return undefined;
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== 'content-length') continue;
+    const raw = Array.isArray(value) ? value[0] : value;
+    if (typeof raw === 'string') {
+      const n = Number(raw.trim());
+      if (Number.isFinite(n) && n >= 0) return n;
+    } else if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) {
+      return raw;
+    }
+  }
+  return undefined;
+}
+
+export async function readBodyPreview(
+  body: CaptureBody | undefined,
+  sizeHint?: number,
+): Promise<Partial<CaptureEntry>> {
   if (!body) {
     return {};
+  }
+  // Precheck: skip decoding bodies already known to be oversized, so the proxy
+  // never materializes a multi-MB request/response string on the hot path.
+  // Take the larger of the (attacker/transfer-encoding-controlled) Content-Length
+  // hint and the actual buffered size, so a small fake hint can't bypass the skip.
+  const knownSize = Math.max(sizeHint ?? 0, Buffer.isBuffer(body.buffer) ? body.buffer.length : 0);
+  if (knownSize > PROXY_CAPTURE_BODY_SKIP_BYTES) {
+    return {
+      bodyBytes: knownSize,
+      bodySkipped: `body exceeds ${PROXY_CAPTURE_BODY_SKIP_BYTES} bytes; preview not captured`,
+    };
   }
   try {
     let text: string | undefined;
@@ -579,6 +611,7 @@ export class ProxyHandlers {
   private readonly owners = new Set<string>();
   private readonly captureClearWatermarks = new Map<string, number>();
   private currentUseHttps: boolean | null = null;
+  private captureEnabled = true;
 
   constructor() {
     // Resolve CA dir without touching disk — actual mkdir happens lazily in ensureCa().
@@ -703,11 +736,16 @@ export class ProxyHandlers {
   async handleProxyStart(args: Record<string, unknown>) {
     const port = argNumber(args, 'port') || 8080;
     const useHttps = argBool(args, 'useHttps') ?? true;
+    const capture = argBool(args, 'capture') ?? true;
 
     if (this.server) {
-      if (port !== this.currentPort || useHttps !== this.currentUseHttps) {
+      if (
+        port !== this.currentPort ||
+        useHttps !== this.currentUseHttps ||
+        capture !== this.captureEnabled
+      ) {
         return ResponseBuilder.error(
-          `Proxy is already running on port ${this.currentPort} with useHttps=${this.currentUseHttps}. ` +
+          `Proxy is already running on port ${this.currentPort} with useHttps=${this.currentUseHttps} and capture=${this.captureEnabled}. ` +
             'Use the same configuration or stop all current leases first.',
         );
       }
@@ -740,40 +778,51 @@ export class ProxyHandlers {
       const eventEmitter = server as unknown as {
         on(event: string, handler: (payload: unknown) => void): void;
       };
-      eventEmitter.on('request', (raw) => {
-        const req = raw as CapturePayload;
-        this.appendCapture({
-          type: 'request',
-          id: req.id,
-          method: req.method,
-          url: req.url,
-          headers: normalizeHeaders(req.headers),
-          remoteIpAddress: req.remoteIpAddress,
-          remotePort: req.remotePort,
-          timing: buildTiming(req.timingEvents),
-          timestamp: Date.now(),
+      this.captureEnabled = capture;
+      if (this.captureEnabled) {
+        eventEmitter.on('request', (raw) => {
+          const req = raw as CapturePayload;
+          this.appendCapture({
+            type: 'request',
+            id: req.id,
+            method: req.method,
+            url: req.url,
+            headers: normalizeHeaders(req.headers),
+            remoteIpAddress: req.remoteIpAddress,
+            remotePort: req.remotePort,
+            timing: buildTiming(req.timingEvents),
+            timestamp: Date.now(),
+          });
+          void readBodyPreview(req.body, getContentLength(req.headers)).then((body) =>
+            this.updateCapture('request', req.id, body),
+          );
         });
-        void readBodyPreview(req.body).then((body) => this.updateCapture('request', req.id, body));
-      });
-      eventEmitter.on('response', (raw) => {
-        const res = raw as CapturePayload;
-        const matchingRequest = this.captureBuffer.find(
-          (entry) => entry.type === 'request' && entry.id === res.id,
-        );
-        this.appendCapture({
-          type: 'response',
-          id: res.id,
-          method: matchingRequest?.method,
-          url: matchingRequest?.url,
-          status: res.statusCode,
-          headers: normalizeHeaders(res.headers),
-          remoteIpAddress: res.remoteIpAddress,
-          remotePort: res.remotePort,
-          timing: buildTiming(res.timingEvents),
-          timestamp: Date.now(),
+        eventEmitter.on('response', (raw) => {
+          const res = raw as CapturePayload;
+          const matchingRequest = this.captureBuffer.find(
+            (entry) => entry.type === 'request' && entry.id === res.id,
+          );
+          this.appendCapture({
+            type: 'response',
+            id: res.id,
+            method: matchingRequest?.method,
+            url: matchingRequest?.url,
+            status: res.statusCode,
+            headers: normalizeHeaders(res.headers),
+            remoteIpAddress: res.remoteIpAddress,
+            remotePort: res.remotePort,
+            timing: buildTiming(res.timingEvents),
+            timestamp: Date.now(),
+          });
+          void readBodyPreview(res.body, getContentLength(res.headers)).then((body) =>
+            this.updateCapture('response', res.id, body),
+          );
         });
-        void readBodyPreview(res.body).then((body) => this.updateCapture('response', res.id, body));
-      });
+      } else {
+        // A prior capture=true session may have left stale traffic in the buffer.
+        // Clear it so a capture:false start never leaks another session's capture.
+        this.captureBuffer = [];
+      }
 
       await server.start(port);
       this.server = server;
@@ -836,6 +885,7 @@ export class ProxyHandlers {
       ruleCount: this.ruleRecords.filter((rule) => rule.ownerSessionId === sessionId).length,
       owned: this.isOwner(sessionId),
       totalOwners: this.owners.size,
+      capture: this.captureEnabled,
     });
   }
 
@@ -1080,6 +1130,14 @@ export class ProxyHandlers {
   }
 
   async handleProxyGetRequests(args: Record<string, unknown>) {
+    if (!this.captureEnabled) {
+      return ResponseBuilder.success({
+        count: 0,
+        logs: [],
+        captureEnabled: false,
+        note: 'Request capture is disabled for the running proxy; no captured traffic is available.',
+      });
+    }
     const urlFilter = argString(args, 'urlFilter');
     const clearedAt = this.captureClearWatermarks.get(this.currentSessionId()) ?? 0;
     let results: CaptureEntry[] = this.captureBuffer.filter((entry) => entry.timestamp > clearedAt);

@@ -19,32 +19,45 @@ interface FieldClassification {
 }
 
 export class FieldClassifier {
+  private provider: PlatformMemoryAPI;
+  private readCString: (
+    handle: ProcessHandle,
+    address: bigint,
+    maxLen: number,
+  ) => Promise<string | null>;
+  private isValidReadablePointer: (handle: ProcessHandle, address: bigint) => boolean;
+  private isValidExecutablePointer: (handle: ProcessHandle, address: bigint) => boolean;
   constructor(
-    private provider: PlatformMemoryAPI,
-    private readCString: (handle: ProcessHandle, address: bigint, maxLen: number) => string | null,
-    private isValidReadablePointer: (handle: ProcessHandle, address: bigint) => boolean,
-    private isValidExecutablePointer: (handle: ProcessHandle, address: bigint) => boolean,
-  ) {}
+    provider: PlatformMemoryAPI,
+    readCString: (handle: ProcessHandle, address: bigint, maxLen: number) => Promise<string | null>,
+    isValidReadablePointer: (handle: ProcessHandle, address: bigint) => boolean,
+    isValidExecutablePointer: (handle: ProcessHandle, address: bigint) => boolean,
+  ) {
+    this.provider = provider;
+    this.readCString = readCString;
+    this.isValidReadablePointer = isValidReadablePointer;
+    this.isValidExecutablePointer = isValidExecutablePointer;
+  }
 
   /**
    * Classify the value at a given offset in the buffer.
    */
-  classifyValue(
+  async classifyValue(
     buf: Buffer,
     handle: ProcessHandle,
     offset: number,
     remaining: number,
-  ): FieldClassification {
+  ): Promise<FieldClassification> {
     // Try 8-byte pointer first (most common in x64)
     if (remaining >= 8) {
       const val64 = buf.readBigUInt64LE(offset);
 
       // Check for vtable pointer (first field only)
-      const vtableCheck = this.checkVtablePointer(handle, offset, val64);
+      const vtableCheck = await this.checkVtablePointer(handle, offset, val64);
       if (vtableCheck) return vtableCheck;
 
       // Check for valid pointer
-      const pointerCheck = this.checkPointer(handle, val64);
+      const pointerCheck = await this.checkPointer(handle, val64);
       if (pointerCheck) return pointerCheck;
     }
 
@@ -102,18 +115,18 @@ export class FieldClassifier {
     };
   }
 
-  private checkVtablePointer(
+  private async checkVtablePointer(
     handle: ProcessHandle,
     offset: number,
     val64: bigint,
-  ): FieldClassification | null {
+  ): Promise<FieldClassification | null> {
     if (offset !== 0 || val64 === 0n) return null;
 
     if (!this.isValidExecutablePointer(handle, val64)) return null;
 
     // Verify it's a vtable: check if the pointed-to location is also full of executable pointers
     try {
-      const vtableCheck = this.provider.readMemory(handle, val64, 16).data;
+      const vtableCheck = (await this.provider.readMemory(handle, val64, 16)).data;
       const firstFunc = vtableCheck.readBigUInt64LE(0);
       if (this.isValidExecutablePointer(handle, firstFunc)) {
         return {
@@ -130,13 +143,16 @@ export class FieldClassifier {
     return null;
   }
 
-  private checkPointer(handle: ProcessHandle, val64: bigint): FieldClassification | null {
+  private async checkPointer(
+    handle: ProcessHandle,
+    val64: bigint,
+  ): Promise<FieldClassification | null> {
     if (val64 === 0n || val64 <= 0x10000n || val64 >= 0x7fffffffffffn) return null;
 
     if (!this.isValidReadablePointer(handle, val64)) return null;
 
     // Check if it points to a string
-    const stringCheck = this.checkStringPointer(handle, val64);
+    const stringCheck = await this.checkStringPointer(handle, val64);
     if (stringCheck) return stringCheck;
 
     return {
@@ -148,8 +164,11 @@ export class FieldClassifier {
     };
   }
 
-  private checkStringPointer(handle: ProcessHandle, val64: bigint): FieldClassification | null {
-    const str = this.readCString(handle, val64, 64);
+  private async checkStringPointer(
+    handle: ProcessHandle,
+    val64: bigint,
+  ): Promise<FieldClassification | null> {
+    const str = await this.readCString(handle, val64, 64);
     if (!str || str.length < 2) return null;
 
     return {

@@ -1,17 +1,18 @@
 import { createServer } from 'node:http';
 import type { Socket } from 'node:net';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { NodeMcpRequestHandler } from '@modelcontextprotocol/node';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import {
   HTTP_CAPACITY_RETRY_AFTER_MS,
-  MCP_HTTP_REQUEST_TIMEOUT_MS,
-  MCP_HTTP_HEADERS_TIMEOUT_MS,
-  MCP_HTTP_KEEPALIVE_TIMEOUT_MS,
-  MCP_HTTP_FORCE_CLOSE_TIMEOUT_MS,
-  MCP_HTTP_HOST,
-  MCP_HTTP_PORT,
-  MCP_HEALTH_VERBOSE,
-  MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
   MCP_BROWSER_FLEET_LEASE_TTL_MS,
+  MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
+  MCP_HEALTH_VERBOSE,
+  MCP_HTTP_FORCE_CLOSE_TIMEOUT_MS,
+  MCP_HTTP_HEADERS_TIMEOUT_MS,
+  MCP_HTTP_HOST,
+  MCP_HTTP_KEEPALIVE_TIMEOUT_MS,
+  MCP_HTTP_PORT,
+  MCP_HTTP_REQUEST_TIMEOUT_MS,
   STDIO_SEND_TIMEOUT_MS,
 } from '@src/constants';
 import {
@@ -86,13 +87,32 @@ export async function startStdioTransport(ctx: MCPServerContext): Promise<void> 
 }
 
 export async function startHttpTransport(ctx: MCPServerContext): Promise<void> {
-  const port = MCP_HTTP_PORT;
-  const host = MCP_HTTP_HOST;
+  const serverConfig = ctx.config?.server;
+  const httpConfig = serverConfig?.http;
+  const port = serverConfig?.port ?? MCP_HTTP_PORT;
+  const host = serverConfig?.host ?? MCP_HTTP_HOST;
+  const authConfig = serverConfig
+    ? {
+        authToken: serverConfig.authToken,
+        host: serverConfig.host,
+        allowInsecure: serverConfig.allowInsecure,
+      }
+    : undefined;
+  const rateLimitConfig = httpConfig
+    ? {
+        enabled: httpConfig.rateLimitEnabled,
+        trustProxy: httpConfig.trustProxy,
+        windowMs: httpConfig.rateLimitWindowMs,
+        maxRequests: httpConfig.rateLimitMax,
+      }
+    : undefined;
   const getDomainInstance =
     typeof ctx.getDomainInstance === 'function' ? ctx.getDomainInstance.bind(ctx) : null;
 
   const transport = new MultiplexedStreamableHttpTransport({
     maxSessions: ctx.config?.mcp?.browserFleetMaxLocalLeases ?? MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
+    maxInFlight: httpConfig?.maxInFlight,
+    maxSseInFlight: httpConfig?.maxSseInFlight,
     capacityRetryAfterMs: HTTP_CAPACITY_RETRY_AFTER_MS,
     sessionIdleTtlMs: ctx.config?.mcp?.browserFleetLeaseTtlMs ?? MCP_BROWSER_FLEET_LEASE_TTL_MS,
     onSessionOpened: async (sessionId) => {
@@ -163,6 +183,14 @@ export async function startHttpTransport(ctx: MCPServerContext): Promise<void> {
 
   await ctx.server.connect(transport);
 
+  // MCP 2.0 modern leg. The factory creates a fresh SDK server for every
+  // request while delegating execution to the shared runtime context. Keeping
+  // this on /mcp/v2 makes the migration opt-in and leaves existing /mcp
+  // sessionful clients untouched.
+  let modernHandlerPromise:
+    | Promise<{ node: NodeMcpRequestHandler; mcp: { close: () => Promise<void> } }>
+    | undefined;
+
   ctx.httpServer = createServer((req, res) => {
     const url = new URL(req.url ?? '/', `http://localhost:${port}`);
 
@@ -172,19 +200,66 @@ export async function startHttpTransport(ctx: MCPServerContext): Promise<void> {
       return;
     }
 
+    if (url.pathname === '/mcp/v2') {
+      if (!checkOrigin(req, res, authConfig)) return;
+      const authenticated = checkAuth(req, res, authConfig);
+      if (!authenticated) return;
+      if (!checkRateLimit(req, res, authenticated, rateLimitConfig)) return;
+      const dispatch = (parsedBody?: unknown) => {
+        modernHandlerPromise ??= (async () => {
+          const [{ createMcpHandler }, { toNodeHandler }, { createModernMcpServer }] =
+            await Promise.all([
+              import('@modelcontextprotocol/server'),
+              import('@modelcontextprotocol/node'),
+              import('@server/MCPServer.modern'),
+            ]);
+          const mcp = createMcpHandler(
+            (requestContext) => createModernMcpServer(ctx, requestContext),
+            {
+              legacy: 'reject',
+              onerror: (error) => logger.warn('[http/v2] MCP handler error:', error),
+            },
+          );
+          ctx.setDomainInstance?.('modernHttpHandler', mcp);
+          return { node: toNodeHandler(mcp), mcp };
+        })();
+        void modernHandlerPromise
+          .then(({ node }) => node(req, res, parsedBody))
+          .catch((error) => {
+            modernHandlerPromise = undefined;
+            logger.warn('[http/v2] failed to initialize MCP handler:', error);
+          });
+      };
+
+      // Parse every POST through the bounded streaming reader. This enforces
+      // maxBodyBytes for chunked requests as well as requests with a declared
+      // Content-Length; the parsed JSON is passed to toNodeHandler so the
+      // adapter does not need to consume the request stream a second time.
+      if (req.method === 'POST') {
+        const bodyPromise =
+          httpConfig?.maxBodyBytes === undefined
+            ? readBodyWithLimit(req, res)
+            : readBodyWithLimit(req, res, httpConfig.maxBodyBytes);
+        bodyPromise.then(dispatch).catch(() => undefined);
+      } else {
+        dispatch();
+      }
+      return;
+    }
+
     if (url.pathname !== '/mcp') {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('Not Found – use POST /mcp or GET /health');
       return;
     }
 
-    if (!checkOrigin(req, res)) return;
+    if (!checkOrigin(req, res, authConfig)) return;
     // Auth runs BEFORE rate limit so the verified result can be passed to the
     // rate limiter. This prevents attackers from spoofing Authorization headers
     // to obtain the higher (3x) rate limit without a valid token.
-    const authenticated = checkAuth(req, res);
+    const authenticated = checkAuth(req, res, authConfig);
     if (!authenticated) return;
-    if (!checkRateLimit(req, res, authenticated)) return;
+    if (!checkRateLimit(req, res, authenticated, rateLimitConfig)) return;
 
     if (req.method === 'GET' || req.method === 'DELETE') {
       void transport.handleRequest(req, res);
@@ -192,7 +267,11 @@ export async function startHttpTransport(ctx: MCPServerContext): Promise<void> {
     }
 
     if (req.method === 'POST') {
-      readBodyWithLimit(req, res)
+      const bodyPromise =
+        httpConfig?.maxBodyBytes === undefined
+          ? readBodyWithLimit(req, res)
+          : readBodyWithLimit(req, res, httpConfig.maxBodyBytes);
+      bodyPromise
         .then((body) => transport.handleRequest(req, res, body))
         .catch(() => {
           /* already responded by middleware */
@@ -210,9 +289,9 @@ export async function startHttpTransport(ctx: MCPServerContext): Promise<void> {
   }
 
   // Timeout configuration to prevent slow-loris and connection exhaustion
-  httpServer.requestTimeout = MCP_HTTP_REQUEST_TIMEOUT_MS;
-  httpServer.headersTimeout = MCP_HTTP_HEADERS_TIMEOUT_MS;
-  httpServer.keepAliveTimeout = MCP_HTTP_KEEPALIVE_TIMEOUT_MS;
+  httpServer.requestTimeout = httpConfig?.requestTimeoutMs ?? MCP_HTTP_REQUEST_TIMEOUT_MS;
+  httpServer.headersTimeout = httpConfig?.headersTimeoutMs ?? MCP_HTTP_HEADERS_TIMEOUT_MS;
+  httpServer.keepAliveTimeout = httpConfig?.keepAliveTimeoutMs ?? MCP_HTTP_KEEPALIVE_TIMEOUT_MS;
 
   httpServer.on('connection', (socket: Socket) => {
     ctx.httpSockets.add(socket);
@@ -236,7 +315,7 @@ function handleHealthCheck(ctx: MCPServerContext, res: HttpServerResponse): void
   // Minimal output by default to avoid exposing internal state (domains, tool
   // counts, token budget). Full details are gated behind MCP_AUTH_TOKEN or
   // MCP_HEALTH_VERBOSE=true for trusted environments.
-  const verbose = MCP_HEALTH_VERBOSE;
+  const verbose = ctx.config?.server?.healthVerbose ?? MCP_HEALTH_VERBOSE;
 
   const body: Record<string, unknown> = {
     status: 'ok',
@@ -274,6 +353,18 @@ function handleHealthCheck(ctx: MCPServerContext, res: HttpServerResponse): void
           typeof httpTransport?.getStats === 'function' ? httpTransport.getStats() : null,
       };
     }
+    // r1-1: event-loop lag (p50/p90/p99 + sample count), only present when a
+    // sampler is wired (start() has run). Non-verbose responses stay minimal.
+    const loopLag = ctx.loopLagSampler?.getSummary();
+    if (loopLag) {
+      body.loopLag = loopLag;
+    }
+    // r1-2: top-N slow tools by p99 (lazy ring-buffer histograms), only present
+    // when a tracker is wired (start() has run). Non-verbose stays minimal.
+    const toolLatency = ctx.toolLatencyTracker?.getSummary();
+    if (toolLatency) {
+      body.toolLatency = toolLatency;
+    }
   }
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -289,9 +380,34 @@ export async function closeServer(ctx: MCPServerContext): Promise<void> {
 
   ctx.shutdownStarted = true;
   ctx.shutdownPromise = (async () => {
+    // Release the artifact retention sweep wired in MCPServer.start() — every
+    // shutdown path funnels through closeServer, so the unref'd timer is
+    // stopped here exactly once (idempotent stop; a later start re-arms it).
+    ctx.artifactRetentionStop?.();
+    ctx.artifactRetentionStop = null;
+
+    // Stop the event-loop lag sampler (idempotent; a later start() re-arms it).
+    ctx.loopLagStop?.();
+    ctx.loopLagStop = null;
+    ctx.loopLagSampler = null;
+
+    // Stop the per-tool latency tracker (idempotent; a later start() re-arms it).
+    ctx.toolLatencyStop?.();
+    ctx.toolLatencyStop = null;
+    ctx.toolLatencyTracker?.dispose();
+    ctx.toolLatencyTracker = null;
+
     // Flush snapshots before any other cleanup
     const getInst =
       typeof ctx.getDomainInstance === 'function' ? ctx.getDomainInstance.bind(ctx) : null;
+    const modernHttpHandler = getInst?.<{ close: () => Promise<void> }>('modernHttpHandler');
+    if (modernHttpHandler) {
+      try {
+        await modernHttpHandler.close();
+      } catch (error) {
+        logger.warn('MCP 2.0 HTTP handler close failed:', error);
+      }
+    }
     if (getInst) {
       const scheduler =
         getInst<import('@server/persistence/RuntimeSnapshotScheduler').RuntimeSnapshotScheduler>(
@@ -334,12 +450,20 @@ export async function closeServer(ctx: MCPServerContext): Promise<void> {
         for (const socket of ctx.httpSockets) {
           socket.destroy();
         }
-      }, MCP_HTTP_FORCE_CLOSE_TIMEOUT_MS);
+      }, ctx.config?.server?.http?.forceCloseTimeoutMs ?? MCP_HTTP_FORCE_CLOSE_TIMEOUT_MS);
       await closePromise;
       clearTimeout(forceTimeout);
       ctx.httpSockets.clear();
       ctx.httpServer = undefined;
     }
+
+    // Drain background tasks: cancel working operations (running their cancel
+    // handlers) so shutdown does not abandon in-flight work or leave orphaned
+    // child processes behind. Optional-chained because closeServer must
+    // tolerate partial contexts (tests, degraded mode). Deliberately placed
+    // AFTER the httpServer force-close timer registration so the synchronous
+    // lead-in of closeServer is unchanged (fake-timer tests rely on it).
+    await ctx.taskManager?.shutdown();
 
     // Unified disposable cleanup: iterate all closable domain instances.
     // Each entry: [field name for logging, instance ref, close method name].
@@ -387,6 +511,9 @@ export async function closeServer(ctx: MCPServerContext): Promise<void> {
       // Lazy domain — undefined when never activated (or in a partial context),
       // skipped by the guard below.
       ['nativeEmulatorHandlers', getInst?.('nativeEmulatorHandlers'), 'dispose'],
+      // Stops the browser session sweep timer (idempotent). Wired here so
+      // embedded/multi-instance deployments don't leak an interval on shutdown.
+      ['browserSessionCoordinator', getInst?.('browserSessionCoordinator'), 'dispose'],
     ];
 
     for (const [name, instance, method] of closables) {
@@ -413,6 +540,23 @@ export async function closeServer(ctx: MCPServerContext): Promise<void> {
       }
       ctx.collector = undefined;
     }
+
+    // Release the lazily-created deobfuscation / heap-parse worker pools
+    // (best-effort, fire-and-forget). Each pool module keeps a shared
+    // singleton whose min-1 warm worker is never idle-evicted at the
+    // `minWorkers` floor; `dispose*()` closes it and resets the singleton.
+    // Not awaited: the workers are unref'd and ProcessRegistry.terminateAll()
+    // below already guarantees termination, so this must not delay shutdown.
+    void Promise.allSettled([
+      import('@modules/deobfuscator/webcrack-worker').then((m) => m.disposeWebcrackPool()),
+      import('@modules/deobfuscator/jscrambler-worker').then((m) => m.disposeJscramblerPool()),
+      import('@modules/deobfuscator/decode-string-array-worker').then((m) =>
+        m.disposeDecodeStringArrayPool(),
+      ),
+      import('@server/domains/v8-inspector/handlers/heap-parse-worker').then((m) =>
+        m.disposeHeapParsePool(),
+      ),
+    ]);
 
     try {
       await ctx.server.close();

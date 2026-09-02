@@ -50,9 +50,12 @@ function normalizeSocketName(socketName: string): string {
 }
 
 export class WebViewDebugger {
+  private readonly adbClient: ADBClient;
   private readonly forwardedPorts = new Map<string, number>();
 
-  constructor(private readonly adbClient: ADBClient = new ADBClient()) {}
+  constructor(adbClient: ADBClient = new ADBClient()) {
+    this.adbClient = adbClient;
+  }
 
   private getPortKey(deviceId: string, webviewId: string): string {
     return `${deviceId}:${webviewId}`;

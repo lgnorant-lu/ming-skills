@@ -2,8 +2,13 @@ import { handleSafe, type ToolResponse } from '@server/domains/shared/ResponseBu
 import { argString } from '@server/domains/shared/parse-args';
 import { getPageLockManager } from '@modules/webgpu/PageLockManager';
 import { getShaderCompileCache } from '@modules/webgpu/ShaderCache';
-import { extractShaderMetadata } from '@modules/webgpu/WgslParser';
-import { isSpirv, decodeSpirvInput, parseSpirv } from '@modules/webgpu/SpirvParser';
+import { extractShaderMetadata, extractShaderCostEstimate } from '@modules/webgpu/WgslParser';
+import {
+  isSpirv,
+  decodeSpirvInput,
+  parseSpirv,
+  computeSpirvStats,
+} from '@modules/webgpu/SpirvParser';
 import { ensureDevice } from '@modules/webgpu/CDPIntegration';
 import type { MCPServerContext } from '@server/domains/shared/registry';
 import type { WebGPUDomainDependencies, ShaderMetadata } from '../types';
@@ -22,13 +27,13 @@ import type { WebGPUDomainDependencies, ShaderMetadata } from '../types';
  *             to WGSL when GPU-side validation is required.
  */
 export class ShaderCompileHandler {
+  private deps: WebGPUDomainDependencies;
   private pageLockManager = getPageLockManager();
   private compileCache = getShaderCompileCache();
 
-  constructor(
-    _ctx: MCPServerContext,
-    private deps: WebGPUDomainDependencies,
-  ) {}
+  constructor(_ctx: MCPServerContext, deps: WebGPUDomainDependencies) {
+    this.deps = deps;
+  }
 
   async handle(args: Record<string, unknown>): Promise<ToolResponse> {
     return handleSafe(async () => {
@@ -91,8 +96,18 @@ export class ShaderCompileHandler {
       // Extract metadata from shader source (pure parsing, no GPU needed)
       const metadata = extractShaderMetadata(shaderCode);
 
+      // Instruction-cost estimate (Fix 3) — static analysis, no GPU needed.
+      const wgslCost = extractShaderCostEstimate(shaderCode);
+      const costEstimate = {
+        totalInstructions: wgslCost.totalInstructions,
+        textureSamples: wgslCost.textureSamples,
+        controlFlowComplexity: wgslCost.controlFlowComplexity,
+        costScore: wgslCost.costScore,
+        basis: 'wgsl-estimate',
+      } as const;
+
       // Cache and return combined result
-      const combined = { ...result, metadata };
+      const combined = { ...result, metadata, costEstimate };
       this.compileCache.set(cacheKey, combined);
       return combined;
     });
@@ -118,6 +133,17 @@ export class ShaderCompileHandler {
     }
 
     const reflect = parseSpirv(decoded.bytes);
+
+    // Instruction stats + cost estimate (Fix 3) from the decoded module.
+    const stats = computeSpirvStats(reflect.instructions ?? []);
+    const costEstimate = {
+      totalInstructions: stats.totalInstructions,
+      byOpcode: stats.byOpcode,
+      textureSamples: stats.textureSamples,
+      controlFlowComplexity: stats.controlFlowComplexity,
+      costScore: stats.costScore,
+      basis: 'spirv-opcode',
+    } as const;
 
     // Map SPIR-V reflection into the ShaderMetadata shape so consumers get a
     // uniform structure regardless of input format. SPIR-V has many more
@@ -148,6 +174,7 @@ export class ShaderCompileHandler {
         bound: reflect.bound,
       },
       metadata,
+      costEstimate,
     };
   }
 

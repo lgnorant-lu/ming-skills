@@ -1,5 +1,6 @@
 import type { PageController } from '@server/domains/shared/modules/collector';
 import type { DetailedDataManager } from '@utils/DetailedDataManager';
+import { PAGE_EVAL_MAX_SIZE_BYTES } from '@src/constants/browser';
 import { argString, argNumber, argBool, argStringArray } from '@server/domains/shared/parse-args';
 import { applyEvaluationPostFilters } from '@server/domains/browser/handlers/evaluation-utils';
 import { R, type ToolResponse } from '@server/domains/shared/ResponseBuilder';
@@ -11,7 +12,10 @@ interface TargetEvaluationHandlersDeps {
 }
 
 export class TargetEvaluationHandlers {
-  constructor(private deps: TargetEvaluationHandlersDeps) {}
+  private deps: TargetEvaluationHandlersDeps;
+  constructor(deps: TargetEvaluationHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handleBrowserEvaluateCdpTarget(args: Record<string, unknown>): Promise<ToolResponse> {
     try {
@@ -20,7 +24,7 @@ export class TargetEvaluationHandlers {
         argString(args, 'code', '') ||
         argString(args, 'expression', '');
       const autoSummarize = argBool(args, 'autoSummarize', true);
-      const maxSize = argNumber(args, 'maxSize', 51200);
+      const maxSize = argNumber(args, 'maxSize', PAGE_EVAL_MAX_SIZE_BYTES);
       const fieldFilterArg = argStringArray(args, 'fieldFilter');
       const doStripBase64 = argBool(args, 'stripBase64', false);
       const returnByValue = argBool(args, 'returnByValue', true);
@@ -42,12 +46,16 @@ export class TargetEvaluationHandlers {
         awaitPromise,
       });
 
-      const processedResult = applyEvaluationPostFilters(rawResult, this.deps.detailedDataManager, {
-        autoSummarize,
-        maxSize,
-        fieldFilter: fieldFilterArg ?? undefined,
-        stripBase64: doStripBase64,
-      });
+      const processedResult = await applyEvaluationPostFilters(
+        rawResult,
+        this.deps.detailedDataManager,
+        {
+          autoSummarize,
+          maxSize,
+          fieldFilter: fieldFilterArg ?? undefined,
+          stripBase64: doStripBase64,
+        },
+      );
 
       return R.ok().build({
         target: activeTarget,

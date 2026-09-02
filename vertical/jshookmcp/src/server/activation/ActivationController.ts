@@ -9,7 +9,7 @@
  *
  * Requirements addressed: BOOST-01, BOOST-02, BOOST-03, BOOST-04
  */
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import type { EventBus, ServerEventMap } from '@server/EventBus';
 import type { MCPServerContext } from '@server/MCPServer.context';
 import { handleActivateDomain } from '@server/MCPServer.search.handlers.domain';
@@ -19,6 +19,7 @@ import { PredictiveBooster } from './PredictiveBooster';
 import { AutoPruner } from './AutoPruner';
 import { getToolDomain, getProfileDomains } from '@server/ToolCatalog';
 import { logger } from '@utils/logger';
+import { RingBuffer } from '@utils/RingBuffer';
 import {
   ACTIVATION_BOOST_WINDOW_MS,
   ACTIVATION_COMPOUND_EVAL_EVERY,
@@ -164,8 +165,8 @@ export class ActivationController {
   /** Per-domain last activity timestamp. */
   private readonly lastActivity = new Map<string, number>();
 
-  /** Sliding window of recent events for pattern matching. */
-  private readonly eventHistory: EventRecord[] = [];
+  /** Sliding window of recent events for pattern matching (bounded O(1) ring buffer). */
+  private readonly eventHistory: RingBuffer<EventRecord>;
 
   /** Max events to keep in sliding window. */
   private readonly maxEventHistory: number;
@@ -192,6 +193,7 @@ export class ActivationController {
     this.ctx = ctx;
     this.cooldownMs = options.cooldownMs ?? ACTIVATION_COOLDOWN_MS;
     this.maxEventHistory = ACTIVATION_EVENT_HISTORY_MAX;
+    this.eventHistory = new RingBuffer<EventRecord>(this.maxEventHistory);
     this.compoundEvalEvery = Math.max(1, ACTIVATION_COMPOUND_EVAL_EVERY);
 
     // Merge default + custom boost rules, sort by priority descending
@@ -265,12 +267,14 @@ export class ActivationController {
     }
   }
 
-  /** Record an event in the sliding window. */
+  /** Record an event in the bounded sliding window (O(1) ring-buffer push). */
   private recordEvent(event: string, payload: unknown): void {
-    this.eventHistory.push({ event, timestamp: Date.now(), payload });
-    if (this.eventHistory.length > this.maxEventHistory) {
-      this.eventHistory.splice(0, this.eventHistory.length - this.maxEventHistory);
-    }
+    // Event-history consumers only read `toolName` back out of the payload
+    // (recentToolCalls + the tool_called_recently predicate), so retain a
+    // lightweight summary instead of the full payload to keep memory bounded.
+    const toolName = (payload as { toolName?: unknown } | null | undefined)?.toolName;
+    const summary = typeof toolName === 'string' ? { toolName } : undefined;
+    this.eventHistory.push({ event, timestamp: Date.now(), payload: summary });
   }
 
   /** Evaluate all boost rules for a given event. */
@@ -283,9 +287,9 @@ export class ActivationController {
 
       // Count matching events within the window
       const windowStart = now - rule.windowMs;
-      const matchCount = this.eventHistory.filter(
-        (e) => e.event.startsWith(rule.eventPattern) && e.timestamp >= windowStart,
-      ).length;
+      const matchCount = this.eventHistory
+        .toArray()
+        .filter((e) => e.event.startsWith(rule.eventPattern) && e.timestamp >= windowStart).length;
 
       if (matchCount >= rule.threshold) {
         await Promise.all(
@@ -335,11 +339,12 @@ export class ActivationController {
 
   /** Evaluate compound conditions and boost matching domains. */
   private evaluateCompoundConditions(): void {
+    const history = this.eventHistory.toArray();
     const state: ConditionState = {
       platform: process.platform,
       activeDomains: this.ctx.enabledDomains,
-      eventHistory: this.eventHistory,
-      recentToolCalls: this.eventHistory
+      eventHistory: history,
+      recentToolCalls: history
         .filter((e) => e.event === 'tool:called')
         .map((e) => (e.payload as { toolName?: string })?.toolName ?? ''),
     };
@@ -357,7 +362,7 @@ export class ActivationController {
 
   /** Get all event history for testing/debugging. */
   getEventHistory(): readonly EventRecord[] {
-    return this.eventHistory;
+    return this.eventHistory.toArray();
   }
 
   /** Get the last boost time for a domain (for testing). */
@@ -384,7 +389,7 @@ export class ActivationController {
     this.unsubscribers.length = 0;
     this.lastBoostTime.clear();
     this.lastActivity.clear();
-    this.eventHistory.length = 0;
+    this.eventHistory.clear();
     this.autoPruner.dispose();
     this.predictiveBooster.reset();
     logger.info('[ActivationController] Disposed');

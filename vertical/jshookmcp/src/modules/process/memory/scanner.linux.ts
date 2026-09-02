@@ -3,6 +3,7 @@
  */
 import { readFileSync, openSync, readSync, closeSync } from 'node:fs';
 import { logger } from '@utils/logger';
+import { MEMORY_SCAN_MAX_RESULTS, MEMORY_SCAN_REGION_MAX_BYTES } from '@src/constants';
 import type { MemoryScanResult } from '@modules/process/memory/types';
 import { parseProcMaps } from '@src/modules/process/memory/linux/mapsParser';
 import { findPatternInBuffer } from '@native/NativeMemoryManager.utils';
@@ -72,8 +73,9 @@ export async function scanMemoryLinux(
     }
 
     const foundAddresses = new Set<string>();
-    const chunkSize = 16 * 1024 * 1024;
-    const maxResults = 10000;
+    // Read/write caps are env-tunable via @src/constants (MEMORY_SCAN_*).
+    const chunkSize = MEMORY_SCAN_REGION_MAX_BYTES; // bytes per /proc/pid/mem read
+    const maxResults = MEMORY_SCAN_MAX_RESULTS;
     const overlap = Math.max(patternBytes.length - 1, 0);
 
     try {

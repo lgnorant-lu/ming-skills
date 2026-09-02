@@ -2,6 +2,7 @@ import type { Page } from 'rebrowser-puppeteer-core';
 import { logger } from '@utils/logger';
 import type { CodeFile } from '@internal-types/index';
 import { truncateUtf16Safe } from '@modules/collector/collector-utils';
+import { SMART_COLLECTOR_MAX_EXTRACTED_FUNCTIONS } from '@src/constants/browser';
 
 /** Priority score weights by file characteristic. */
 const PRIORITY_INLINE_SCORE = 10;
@@ -18,7 +19,7 @@ const HUGE_FILE_BYTES = 500 * 1024;
 /** avgLineLength above this marks a file as obfuscated. */
 const OBFUSCATION_AVG_LINE_LENGTH = 200;
 /** Cap on extracted function names per file. */
-const MAX_EXTRACTED_FUNCTIONS = 20;
+const MAX_EXTRACTED_FUNCTIONS = SMART_COLLECTOR_MAX_EXTRACTED_FUNCTIONS;
 
 export interface SmartCollectOptions {
   mode: 'summary' | 'priority' | 'incremental' | 'full';

@@ -1,4 +1,4 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import { tool } from '@server/registry/tool-builder';
 
 /**
@@ -42,11 +42,14 @@ export const browserJsdomToolDefinitions: Tool[] = [
 
   tool('browser_jsdom_execute', (t) =>
     t
-      .desc('Evaluate JS inside a JSDOM session.')
+      .desc(
+        'Evaluate JS inside a JSDOM session. Requires explicit authorization — arbitrary code execution.',
+      )
       .string('sessionId', 'Session ID')
       .string('code', 'JavaScript code')
       .number('timeoutMs', 'Timeout hint ms', { default: 5000 })
-      .required('sessionId', 'code'),
+      .required('sessionId', 'code')
+      .destructive(),
   ),
 
   tool('browser_jsdom_serialize', (t) =>

@@ -2,6 +2,18 @@
 """BiDi session 模块命令"""
 
 
+def _string_list(value, name):
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple)):
+        values = list(value)
+    else:
+        raise TypeError("{} must be a string or sequence of strings".format(name))
+    if not values or not all(isinstance(item, str) and item for item in values):
+        raise ValueError("{} must contain at least one non-empty string".format(name))
+    return values
+
+
 def status(driver):
     """查询远程端状态
 
@@ -46,13 +58,13 @@ def subscribe(driver, events, contexts=None, user_contexts=None):
     Returns:
         {'subscription': str}  订阅 ID
     """
-    params = {"events": events if isinstance(events, list) else [events]}
+    params = {"events": _string_list(events, "events")}
     if contexts and user_contexts:
         raise ValueError("contexts and user_contexts cannot both be provided")
     if contexts:
-        params["contexts"] = contexts if isinstance(contexts, list) else [contexts]
+        params["contexts"] = _string_list(contexts, "contexts")
     if user_contexts:
-        params["userContexts"] = user_contexts if isinstance(user_contexts, list) else [user_contexts]
+        params["userContexts"] = _string_list(user_contexts, "user_contexts")
     return driver.run("session.subscribe", params)
 
 
@@ -119,15 +131,17 @@ def unsubscribe(driver, events=None, contexts=None, subscription=None):
 
     Args:
         events: 事件名列表
-        contexts: 可选，限定 context 列表
+        contexts: 已废弃；当前 W3C unsubscribe 不接受 context
         subscription: 可选，通过订阅 ID 取消
     """
-    params = {}
+    if contexts is not None:
+        raise ValueError("session.unsubscribe does not accept contexts")
+    if bool(events) == bool(subscription):
+        raise ValueError("provide exactly one of events or subscription")
     if subscription:
-        params["subscriptions"] = (
-            [subscription] if isinstance(subscription, str) else subscription
-        )
+        params = {
+            "subscriptions": _string_list(subscription, "subscription")
+        }
     else:
-        if events:
-            params["events"] = events if isinstance(events, list) else [events]
+        params = {"events": _string_list(events, "events")}
     return driver.run("session.unsubscribe", params)

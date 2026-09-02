@@ -3,7 +3,7 @@
  * Prefixes: MEMORY_*, SCAN_*, POINTER_*, STRUCT_*, HEAP_*, BREAKPOINT_*, CODE_CAVE_*, FREEZE_*, WRITE_*, USERSPACE_*, NATIVE_*
  */
 
-import { bool, int } from './helpers.js';
+import { bool, float, int } from './helpers.js';
 
 /* ================================================================== */
 /*  Windows API call path                                               */
@@ -195,3 +195,55 @@ export const BREAKPOINT_TRACE_MAX_HITS = int('BREAKPOINT_TRACE_MAX_HITS', 100);
 export const FREEZE_DEFAULT_INTERVAL_MS = int('FREEZE_DEFAULT_INTERVAL_MS', 100);
 /** Max entries kept in the write-value undo history. */
 export const WRITE_HISTORY_MAX = int('WRITE_HISTORY_MAX', 200);
+
+/* ================================================================== */
+/*  Anti-detection / Deep Hardening                                     */
+/* ================================================================== */
+
+/** Enable chaos mode for memory scan randomization.
+ *  When set to '1', randomizes chunk ordering, sizes, read direction,
+ *  interleaves dummy reads, and simulates human think-time pauses.
+ *  Default: off (performance). */
+export const SCAN_CHAOS_MODE = bool('JSHOOK_SCAN_CHAOS_MODE', false);
+
+/** Probability of backward reads in chaos mode (0.0-1.0). */
+export const SCAN_CHAOS_BACKWARD_PROB = float('JSHOOK_CHAOS_BACKWARD_PROB', 0.3);
+
+/** Minimum think-time pause in ms (simulates user inspection). */
+export const SCAN_CHAOS_THINK_MIN_MS = int('JSHOOK_CHAOS_THINK_MIN_MS', 500);
+
+/** Maximum think-time pause in ms. */
+export const SCAN_CHAOS_THINK_MAX_MS = int('JSHOOK_CHAOS_THINK_MAX_MS', 5000);
+
+/** Dummy reads to unrelated processes per 100 real reads in chaos mode. */
+export const SCAN_CHAOS_DUMMY_RATE = int('JSHOOK_CHAOS_DUMMY_RATE', 5);
+
+/** Enable process self-defense (handle monitoring, window hiding).
+ *  Requires JSHOOK_SELFDEFENSE=1. */
+export const SELFDEFENSE_ENABLED = bool('JSHOOK_SELFDEFENSE', false);
+
+/** Enable EXTREME self-defense (ProcessBreakOnTermination — PERMANENTLY DISABLED stub).
+ *  The actual feature has been disabled after causing 6 BSOD crashes. See BSOD-CRITICAL_PROCESS_DIED-Analysis.md. */
+export const SELFDEFENSE_EXTREME = bool('JSHOOK_SELFDEFENSE_EXTREME', false);
+
+/** Poll interval in ms for self-defense handle monitoring. */
+export const SELFDEFENSE_POLL_MS = int('JSHOOK_SELFDEFENSE_POLL_MS', 5000);
+
+/** Enable process masquerade (mitigation policies, background priority, etc.). */
+export const MASQUERADE_ENABLED = bool('JSHOOK_MASQUERADE', false);
+
+/** Spoof parent process ID for masquerade (0 = don't spoof). */
+export const MASQUERADE_PARENT_PID = int('JSHOOK_MASQUERADE_PARENT_PID', 0);
+
+/* ================================================================== */
+/*  Disk-backed scan persistence                                       */
+/* ================================================================== */
+
+/** Max concurrent disk-backed scan sessions; createDiskScanSession throws once exceeded. */
+export const DISK_SCAN_MAX_SESSIONS = int('DISK_SCAN_MAX_SESSIONS', 16);
+
+/** Idle threshold before a disk scan session is swept and its backing file unlinked (ms). */
+export const DISK_SCAN_SESSION_TTL_MS = int('DISK_SCAN_SESSION_TTL_MS', 10 * 60_000);
+
+/** Sweep interval for expired disk scan sessions (ms). */
+export const DISK_SCAN_SESSION_SWEEP_MS = int('DISK_SCAN_SESSION_SWEEP_MS', 60_000);

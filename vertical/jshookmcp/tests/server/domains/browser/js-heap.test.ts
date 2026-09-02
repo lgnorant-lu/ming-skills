@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { parseJson } from '@tests/server/domains/shared/mock-factories';
 import type { BrowserStatusResponse } from '@tests/shared/common-test-types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -37,6 +38,20 @@ describe('JSHeapSearchHandlers', () => {
     vi.clearAllMocks();
     cdpLimitMock.mockImplementation(async (fn: () => Promise<any>) => fn());
     smartHandleMock.mockImplementation((value: any) => value);
+  });
+
+  it('marks itself as a quick-search path, not the canonical snapshot pipeline', () => {
+    const source = readFileSync(
+      new URL('../../../../src/server/domains/browser/handlers/js-heap.ts', import.meta.url),
+      'utf8',
+    );
+    const header = source.slice(0, 1000);
+    // This handler takes bare-CDP snapshots with a chunk listener that is never
+    // explicitly removed (the session is detached instead). The header NOTE
+    // must keep pointing at the canonical pipeline so this path is not grown
+    // into a production profiling tool.
+    expect(header).toContain('NOTE');
+    expect(header).toContain('v8_heap_snapshot_capture');
   });
 
   it('returns a validation error when pattern is missing', async () => {
@@ -117,7 +132,6 @@ describe('JSHeapSearchHandlers', () => {
         matchCount: 1,
         truncated: false,
       }),
-      51200,
     );
     expect(body.success).toBe(true);
     expect(body.matchCount).toBe(1);

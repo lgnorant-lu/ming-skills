@@ -3,7 +3,7 @@
  *   - tests/server/search/SearchQuality.test.ts (regression)
  *   - scripts/search-tune/ (offline parameter tuning)
  */
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import type { ToolProfile } from '@server/ToolCatalog';
 
 // ── public types ──
@@ -233,7 +233,7 @@ const TOOLS: readonly Tool[] = [
   makeTool('v8_heap_snapshot_capture', 'Capture V8 heap snapshot via CDP'),
   makeTool('v8_heap_snapshot_analyze', 'Analyze V8 heap snapshot for leaks'),
   makeTool('v8_bytecode_extract', 'Attempt V8 bytecode extraction for a script'),
-  makeTool('v8_jit_inspect', 'Inspect JIT status and optimization'),
+  makeTool('v8_turbofan_inspect', 'Inspect JIT/TurboFan status and optimization'),
   // boringssl-inspector
   makeTool('tls_keylog_enable', 'Enable TLS key logging via BoringSSL'),
   makeTool('tls_cert_extract', 'Extract TLS certificates from connections'),

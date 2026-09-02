@@ -130,7 +130,6 @@ vi.mock('@server/domains/browser/handlers/camoufox-flow', () => ({
   handleCamoufoxLaunchFlow: vi.fn(),
   handleCamoufoxNavigateFlow: vi.fn(),
 }));
-vi.mock('@services/LLMService', () => ({ LLMService: vi.fn().mockImplementation(() => ({})) }));
 vi.mock('@utils/DetailedDataManager', () => ({
   DetailedDataManager: vi.fn().mockImplementation(() => ({})),
 }));

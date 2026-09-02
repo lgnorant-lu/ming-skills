@@ -1441,8 +1441,11 @@ export class ADBBridgeHandlers {
             event !== undefined,
         );
 
+      // `am start -W` exits 0 even when the launch fails (e.g. missing
+      // activity) — detect the error line in stdout so success stays honest.
+      const launchFailed = /^Error:/m.test(startResult.stdout);
       return {
-        success: startResult.exitCode === 0,
+        success: startResult.exitCode === 0 && !launchFailed,
         serial,
         packageName,
         activity: component,

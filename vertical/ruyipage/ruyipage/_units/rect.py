@@ -92,24 +92,28 @@ class ElementRect(object):
     @property
     def viewport_location(self):
         """元素相对于视口的位置 (x, y)"""
-        result = self._ele._call_js_on_self("""(el) => {
+        result = self._ele._read_geometry(
+            """(el) => {
             const r = el.getBoundingClientRect();
             return {x: Math.round(r.x), y: Math.round(r.y)};
-        }""")
-        if result:
-            return result.get("x", 0), result.get("y", 0)
-        return 0, 0
+        }""",
+            ("x", "y"),
+            "视口坐标",
+        )
+        return result["x"], result["y"]
 
     @property
     def viewport_midpoint(self):
         """元素相对于视口的中心点"""
-        result = self._ele._call_js_on_self("""(el) => {
+        result = self._ele._read_geometry(
+            """(el) => {
             const r = el.getBoundingClientRect();
             return {x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)};
-        }""")
-        if result:
-            return result.get("x", 0), result.get("y", 0)
-        return 0, 0
+        }""",
+            ("x", "y"),
+            "视口中心坐标",
+        )
+        return result["x"], result["y"]
 
     @property
     def corners(self):

@@ -21,13 +21,12 @@ const DEFAULT_MAX_PIPELINES = 10;
  * draw/dispatch operated on.
  */
 export class PipelineDumpHandler {
+  private deps: WebGPUDomainDependencies;
   private ddm: DetailedDataManager;
   private pageLockManager = getPageLockManager();
 
-  constructor(
-    _ctx: MCPServerContext,
-    private deps: WebGPUDomainDependencies,
-  ) {
+  constructor(_ctx: MCPServerContext, deps: WebGPUDomainDependencies) {
+    this.deps = deps;
     this.ddm = DetailedDataManager.getInstance();
   }
 

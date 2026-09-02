@@ -18,6 +18,13 @@ export const PROXY_CAPTURE_RETURN_LIMIT = int('PROXY_CAPTURE_RETURN_LIMIT', 100)
 /** Max decoded request/response body preview bytes stored per captured proxy record. */
 export const PROXY_CAPTURE_BODY_PREVIEW_BYTES = int('PROXY_CAPTURE_BODY_PREVIEW_BYTES', 16 * 1024);
 
+/**
+ * Bodies with a known size above this threshold are skipped entirely during
+ * capture (only their byte count is recorded), avoiding a full getText()
+ * materialization of multi-MB requests/responses on the proxy hot path.
+ */
+export const PROXY_CAPTURE_BODY_SKIP_BYTES = int('PROXY_CAPTURE_BODY_SKIP_BYTES', 1 * 1024 * 1024);
+
 /** Timeout for adb commands issued by proxy_setup_adb_device. */
 export const PROXY_ADB_TIMEOUT_MS = int('PROXY_ADB_TIMEOUT_MS', 60_000);
 

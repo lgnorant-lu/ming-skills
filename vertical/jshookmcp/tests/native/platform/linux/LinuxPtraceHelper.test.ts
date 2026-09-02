@@ -76,8 +76,8 @@ beforeEach(() => {
     return buf.length;
   });
 
-  // waitpid always reports a stop (status value irrelevant here).
-  mockWaitpid.mockReturnValue(0);
+  // waitpid always reports the stopped pid (status value irrelevant here).
+  mockWaitpid.mockReturnValue(999);
 
   mockPtrace.mockImplementation((req: bigint, _pid: number, _addr: unknown, data: unknown) => {
     const r = Number(req);
@@ -159,6 +159,27 @@ describe('remoteSyscall / PTRACE_SYSCALL handshake', () => {
     expect(() => remoteMunmap(999, 0x7f001000n, 0x1000)).not.toThrow();
     // attach + 2 SYSCALL stops + (restore + detach do not wait) per call.
     expect(mockWaitpid).toHaveBeenCalledTimes(6);
+  });
+
+  it('throws and detaches when waitpid fails mid-handshake', () => {
+    // Attach stop succeeds, then the syscall-stop waitpid fails (ret = -1).
+    mockWaitpid.mockReturnValueOnce(999).mockReturnValue(-1);
+
+    expect(() => remoteMmap(999, 0x1000, 7)).toThrow(/waitpid failed for pid 999/);
+
+    // The finally block still detaches (regs were saved before the failure).
+    const detachCalls = mockPtrace.mock.calls.filter((c) => Number(c[0]) === 17);
+    expect(detachCalls).toHaveLength(1);
+  });
+
+  it('does not SETREGS a zero buffer when the attach stop never arrives', () => {
+    // waitpid fails at the attach stop — original regs were never read.
+    mockWaitpid.mockReturnValue(-1);
+
+    expect(() => remoteMmap(999, 0x1000, 7)).toThrow(/waitpid failed for pid 999/);
+
+    const setRegsCalls = mockPtrace.mock.calls.filter((c) => Number(c[0]) === 13);
+    expect(setRegsCalls).toHaveLength(0);
   });
 
   it('restores the original registers and detaches after the syscall', () => {

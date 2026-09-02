@@ -81,17 +81,21 @@ describe('AdvancedDeobfuscator', () => {
       mappings: [{ path: './main.js', pattern: 'App', matchType: 'includes', target: 'code' }],
     });
 
-    expect(webcrackState.runWebcrack).toHaveBeenCalledWith('packed', {
-      unpack: true,
-      unminify: false,
-      jsx: true,
-      mangle: true,
-      mappings: [{ path: './main.js', pattern: 'App', matchType: 'includes', target: 'code' }],
-      includeModuleCode: true,
-      maxBundleModules: 5,
-      outputDir: 'artifacts/advanced',
-      forceOutput: true,
-    });
+    expect(webcrackState.runWebcrack).toHaveBeenCalledWith(
+      'packed',
+      {
+        unpack: true,
+        unminify: false,
+        jsx: true,
+        mangle: true,
+        mappings: [{ path: './main.js', pattern: 'App', matchType: 'includes', target: 'code' }],
+        includeModuleCode: true,
+        maxBundleModules: 5,
+        outputDir: 'artifacts/advanced',
+        forceOutput: true,
+      },
+      undefined,
+    );
     expect(result.webcrackApplied).toBe(true);
     expect(result.bundle?.type).toBe('browserify');
     expect(result.savedTo).toBe('D:/tmp/advanced-webcrack');

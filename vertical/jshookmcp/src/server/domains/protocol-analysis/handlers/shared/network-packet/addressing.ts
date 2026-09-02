@@ -1,5 +1,5 @@
 import { isIP } from 'node:net';
-import { normalizeHexString, parseNonNegativeInteger, parsePositiveInteger } from '../payload/core';
+import { normalizeHexString } from '../payload/core';
 import { ETHER_TYPE_MAP, IP_PROTOCOL_MAP, PCAP_LINK_TYPE_MAP } from './types';
 import type {
   ChecksumEndian,
@@ -171,5 +171,3 @@ export function parseHexPayload(value: unknown, label: string): Buffer {
   }
   return Buffer.from(normalizeHexString(value, label), 'hex');
 }
-
-export { parseNonNegativeInteger, parsePositiveInteger };

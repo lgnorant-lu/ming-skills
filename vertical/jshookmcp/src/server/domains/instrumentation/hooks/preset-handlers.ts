@@ -192,6 +192,9 @@ export class HookPresetToolHandlers {
       if (PRESETS[id]) {
         throw new Error(`Custom template id conflicts with built-in preset: ${id}`);
       }
+      if (customPresets[id]) {
+        throw new Error(`Duplicate custom template id in the same call: ${id}`);
+      }
       const mutateReturn = template.mutateReturn?.trim() || undefined;
       customPresets[id] = {
         description: template.description?.trim() || `Custom inline preset: ${id}`,

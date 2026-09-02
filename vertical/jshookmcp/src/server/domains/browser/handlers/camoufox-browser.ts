@@ -6,6 +6,7 @@ import {
   argBool,
   argStringArray,
   argObject,
+  argEnum,
 } from '@server/domains/shared/parse-args';
 import { formatBetterSqlite3Error, isBetterSqlite3RelatedError } from '@utils/betterSqlite3';
 import { R } from '@server/domains/shared/ResponseBuilder';
@@ -24,7 +25,7 @@ function extractCamoufoxServerConfig(args: Record<string, unknown>): CamoufoxBro
   const fonts = argStringArray(args, 'fonts');
   return {
     headless: argBool(args, 'headless', true),
-    os: argString(args, 'os', 'windows') as 'windows' | 'macos' | 'linux',
+    os: argEnum(args, 'os', new Set(['windows', 'macos', 'linux'] as const), 'windows'),
     geoip: argBool(args, 'geoip', false),
     humanize: argBool(args, 'humanize', false),
     proxy: argString(args, 'proxy') || undefined,
@@ -36,8 +37,8 @@ function extractCamoufoxServerConfig(args: Record<string, unknown>): CamoufoxBro
     fonts: fonts.length > 0 ? fonts : undefined,
     excludeAddons: excludeAddons.length > 0 ? excludeAddons : undefined,
     customFontsOnly: argBool(args, 'customFontsOnly', false),
-    screen: args.screen as { width: number; height: number } | undefined,
-    window: args.window as { width: number; height: number } | undefined,
+    screen: argObject(args, 'screen') as { width: number; height: number } | undefined,
+    window: argObject(args, 'window') as { width: number; height: number } | undefined,
     fingerprint: argObject(args, 'fingerprint'),
     webglConfig: argObject(args, 'webglConfig'),
     firefoxUserPrefs: argObject(args, 'firefoxUserPrefs'),
@@ -73,7 +74,10 @@ async function checkCamoufoxDependencies(): Promise<string | null> {
 }
 
 export class CamoufoxBrowserHandlers {
-  constructor(private deps: CamoufoxBrowserHandlersDeps) {}
+  private deps: CamoufoxBrowserHandlersDeps;
+  constructor(deps: CamoufoxBrowserHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handleCamoufoxServerLaunch(args: Record<string, unknown>): Promise<ToolResponse> {
     try {

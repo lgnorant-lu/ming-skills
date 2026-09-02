@@ -140,10 +140,8 @@ function updateEnglishReadme(readme, summary) {
   ].join('\n');
 
   let next = readme;
-  next = next.replace(
-    '[![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)',
-    '[![Node.js >= 20](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)',
-  );
+  // One-time legacy badge migration was removed: README badges (Node.js 22.12+)
+  // no longer match the old `node->=20` pattern, so the replaces were dead no-ops.
   next = replaceSection(
     next,
     /An MCP[\s\S]*?(?=\n## Documentation \/ Quick Links\n)/,
@@ -171,10 +169,8 @@ function updateChineseReadme(readme, summary) {
   ].join('\n');
 
   let next = readme;
-  next = next.replace(
-    '[![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)',
-    '[![Node.js >= 20](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org/)',
-  );
+  // One-time legacy badge migration was removed: README badges (Node.js 22.12+)
+  // no longer match the old `node->=20` pattern, so the replaces were dead no-ops.
   next = replaceSection(next, /面向 AI[\s\S]*?(?=\n## 文档与快速导航\n)/, `${intro}\n`);
   if (/## 注册表快照[\s\S]*?(?=\n## 项目统计\n)/.test(next)) {
     next = next.replace(/## 注册表快照[\s\S]*?(?=\n## 项目统计\n)/, `${snapshotSection}\n`);

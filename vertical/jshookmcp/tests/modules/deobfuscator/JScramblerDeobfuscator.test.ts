@@ -77,13 +77,6 @@ describe('JScramberDeobfuscator', () => {
     expect(result.code).toContain('const n = 5');
   });
 
-  it('calculates confidence from transformation count', () => {
-    const deobfuscator = new JScramberDeobfuscator() as any;
-    expect(deobfuscator.calculateConfidence(0)).toBe(0);
-    expect(deobfuscator.calculateConfidence(3)).toBeCloseTo(0.6);
-    expect(deobfuscator.calculateConfidence(9)).toBe(1);
-  });
-
   it('returns failure payload when parse pipeline throws', async () => {
     const result = await new JScramberDeobfuscator().deobfuscate({
       code: 'function broken( {',

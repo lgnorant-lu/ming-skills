@@ -10,12 +10,13 @@ import logging
 logger = logging.getLogger('ruyipage')
 
 
-def install(driver, path):
+def install(driver, path=None, base64_value=None):
     """安装Web扩展
 
     Args:
         driver: BiDi driver
         path: 扩展文件路径（.xpi文件或解压目录）
+        base64_value: base64 编码的扩展归档；与 path 二选一
 
     Returns:
         {'extension': str}  扩展ID 或 None（不支持时）
@@ -27,8 +28,11 @@ def install(driver, path):
     """
     import os
 
-    # 判断是xpi文件还是目录
-    if os.path.isfile(path):
+    if (path is None) == (base64_value is None):
+        raise ValueError("provide exactly one of path or base64_value")
+    if base64_value is not None:
+        params = {'extensionData': {'type': 'base64', 'value': base64_value}}
+    elif os.path.isfile(path):
         params = {'extensionData': {'type': 'archivePath', 'path': path}}
     else:
         params = {'extensionData': {'type': 'path', 'path': path}}

@@ -21,6 +21,12 @@ function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${(++nextId).toString(36)}`;
 }
 
+/** Hard cap on concurrently active instrumentation sessions. */
+export const MAX_SESSIONS = 64;
+
+/** Hard cap on retained read-only archives of destroyed sessions (LRU). */
+export const MAX_ARCHIVED_SESSIONS = 8;
+
 interface HookPresetInvoker {
   handleHookPreset(args: Record<string, unknown>): Promise<ToolResponse>;
 }
@@ -93,6 +99,8 @@ export class InstrumentationSessionManager {
   private readonly artifacts = new Map<string, InstrumentationArtifact[]>();
   /** Operation ID → owning session ID (reverse index). */
   private readonly operationIndex = new Map<string, string>();
+  /** Read-only snapshots of the most recently destroyed sessions (LRU cap). */
+  private readonly archivedSessions = new Map<string, InstrumentationSessionSnapshot>();
   /** Optional evidence graph bridge for auto-population (EVID-04). */
   private evidenceBridge?: EvidenceGraphBridge;
 
@@ -104,6 +112,11 @@ export class InstrumentationSessionManager {
   // ── Session lifecycle ──
 
   createSession(name?: string): SessionInfo {
+    if (this.sessions.size >= MAX_SESSIONS) {
+      throw new Error(
+        `Instrumentation session limit reached (${MAX_SESSIONS}). Destroy existing sessions before creating new ones.`,
+      );
+    }
     const id = uid('sess');
     const info: SessionInfo = {
       id,
@@ -119,16 +132,36 @@ export class InstrumentationSessionManager {
     return info;
   }
 
-  destroySession(sessionId: string): void {
+  destroySession(sessionId: string): { archived: true; unexportedArtifactCount: number } {
     const session = this.sessions.get(sessionId);
-    if (!session) throw new Error(`Session "${sessionId}" not found`);
-    session.status = 'destroyed';
-    // Mark all operations as completed
-    /* istanbul ignore next */
-    const ops = this.operations.get(sessionId) ?? [];
-    for (const op of ops) {
-      if (op.status === 'active') op.status = 'completed';
+    if (!session) {
+      throw new Error(`Session "${sessionId}" not found`);
     }
+
+    const ops = [...(this.operations.get(sessionId) ?? [])];
+    const arts = [...(this.artifacts.get(sessionId) ?? [])];
+
+    // Preserve a read-only archive before releasing the live records, so the
+    // standard audit flow (destroy to stop recording → export to preserve) is
+    // not severed. Bounded by MAX_ARCHIVED_SESSIONS with LRU eviction.
+    this.archivedSessions.set(sessionId, {
+      session: { ...session, status: 'destroyed' },
+      stats: { operationCount: ops.length, artifactCount: arts.length },
+      operations: ops,
+      artifacts: arts,
+    });
+    this.evictOldestArchivedIfNeeded();
+
+    // Release every live record owned by the session so destroy still frees
+    // memory: the reverse index, then the three per-session collections.
+    for (const op of ops) {
+      this.operationIndex.delete(op.id);
+    }
+    this.operations.delete(sessionId);
+    this.artifacts.delete(sessionId);
+    this.sessions.delete(sessionId);
+
+    return { archived: true, unexportedArtifactCount: arts.length };
   }
 
   listSessions(): SessionInfo[] {
@@ -136,7 +169,7 @@ export class InstrumentationSessionManager {
   }
 
   getSession(sessionId: string): SessionInfo | undefined {
-    return this.sessions.get(sessionId);
+    return this.sessions.get(sessionId) ?? this.archivedSessions.get(sessionId)?.session;
   }
 
   // ── Operation management ──
@@ -238,7 +271,9 @@ export class InstrumentationSessionManager {
   getSessionSnapshot(sessionId: string): InstrumentationSessionSnapshot | undefined {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      return undefined;
+      // Fall back to the read-only archive so export/diff/merge/status can
+      // still inspect a destroyed session.
+      return this.archivedSessions.get(sessionId);
     }
 
     return {
@@ -383,12 +418,21 @@ export class InstrumentationSessionManager {
   // ── Stats ──
 
   getSessionStats(sessionId: string): { operationCount: number; artifactCount: number } {
-    const session = this.sessions.get(sessionId);
+    const session = this.getSession(sessionId);
     if (!session) return { operationCount: 0, artifactCount: 0 };
     return {
       operationCount: session.operationCount,
       artifactCount: session.artifactCount,
     };
+  }
+
+  /** Evict the oldest archived session when over the read-only archive cap. */
+  private evictOldestArchivedIfNeeded(): void {
+    while (this.archivedSessions.size > MAX_ARCHIVED_SESSIONS) {
+      const oldestKey = this.archivedSessions.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.archivedSessions.delete(oldestKey);
+    }
   }
 
   private findOperation(operationId: string): InstrumentationOperation | undefined {

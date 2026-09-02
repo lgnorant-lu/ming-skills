@@ -67,6 +67,50 @@ const NR_MMAP = 222;
 const NR_MPROTECT = 226;
 const NR_GETRANDOM = 278;
 
+/**
+ * Symbolic name + parameter register layout for each implemented syscall.
+ *
+ * Used by the trace layer to annotate `svc #0` traps with the syscall name and
+ * argument values (e.g. `svc write(fd=1, buf=0x401000, count=12)`), mirroring
+ * upstream unidbg's DefaultSyscallParser (commit b298d619). Only syscalls this
+ * emulator actually handles are listed — this is our own handler table, not an
+ * external signature database, so it stays in sync with the registrations in
+ * `installAndroidSyscalls` below.
+ *
+ * `params` lists the AArch64 ABI argument registers (x0..x5) by name; the trace
+ * formatter renders each as `name=0xVALUE` without dereferencing pointers
+ * (pointer-bearing args stay as raw addresses — the formatter has no memory
+ * read accessor on TraceEvent, and a failing dereference would corrupt trace).
+ */
+export interface SyscallMeta {
+  name: string;
+  /** Argument names in x0..x5 order; trailing unspecified args are omitted. */
+  params: readonly string[];
+}
+
+export const SYSCALL_NAMES: Readonly<Record<number, SyscallMeta>> = {
+  [NR_IOCTL]: { name: 'ioctl', params: ['fd', 'request', 'argp'] },
+  [NR_OPENAT]: { name: 'openat', params: ['dirfd', 'pathname', 'flags', 'mode'] },
+  [NR_CLOSE]: { name: 'close', params: ['fd'] },
+  [NR_LSEEK]: { name: 'lseek', params: ['fd', 'offset', 'whence'] },
+  [NR_READ]: { name: 'read', params: ['fd', 'buf', 'count'] },
+  [NR_WRITE]: { name: 'write', params: ['fd', 'buf', 'count'] },
+  [NR_FSTAT]: { name: 'fstat', params: ['fd', 'statbuf'] },
+  [NR_EXIT]: { name: 'exit', params: ['code'] },
+  [NR_EXIT_GROUP]: { name: 'exit_group', params: ['code'] },
+  [NR_SET_TID_ADDRESS]: { name: 'set_tid_address', params: ['tidptr'] },
+  [NR_FUTEX]: { name: 'futex', params: ['uaddr', 'op', 'val'] },
+  [NR_CLOCK_GETTIME]: { name: 'clock_gettime', params: ['clk_id', 'tp'] },
+  [NR_RT_SIGPROCMASK]: { name: 'rt_sigprocmask', params: ['how', 'set', 'oset', 'sigsetsize'] },
+  [NR_GETTIMEOFDAY]: { name: 'gettimeofday', params: ['tv', 'tz'] },
+  [NR_GETPID]: { name: 'getpid', params: [] },
+  [NR_GETTID]: { name: 'gettid', params: [] },
+  [NR_MUNMAP]: { name: 'munmap', params: ['addr', 'length'] },
+  [NR_MMAP]: { name: 'mmap', params: ['addr', 'length', 'prot', 'flags', 'fd', 'offset'] },
+  [NR_MPROTECT]: { name: 'mprotect', params: ['addr', 'len', 'prot'] },
+  [NR_GETRANDOM]: { name: 'getrandom', params: ['buf', 'len', 'flags'] },
+};
+
 /** mmap hint base for MAP_ANONYMOUS allocations the emulator backs on demand. */
 const MMAP_BASE = 0x5000_0000;
 const MMAP_ALIGN = getReverseEngineeringConfig().nativeEmulator.guestPageSizeBytes;

@@ -266,7 +266,29 @@ function parseStructFields(
 function stripComments(s: string): string {
   let out = '';
   let i = 0;
+  let inString: '"' | "'" | null = null;
   while (i < s.length) {
+    // Track string-literal state to avoid stripping comment-like
+    // patterns ("//" or "/*") that appear inside string literals.
+    if (inString !== null) {
+      if (s[i] === '\\') {
+        out += s[i];
+        i++;
+        out += s[i] ?? '';
+        i++;
+        continue;
+      }
+      if (s[i] === inString) inString = null;
+      out += s[i];
+      i++;
+      continue;
+    }
+    if (s[i] === '"' || s[i] === "'") {
+      inString = s[i] as '"' | "'";
+      out += s[i];
+      i++;
+      continue;
+    }
     if (s[i] === '/' && s[i + 1] === '/') {
       while (i < s.length && s[i] !== '\n') i++;
       continue;
@@ -342,6 +364,73 @@ export interface ShaderAst {
   uniforms: ShaderMetadata['uniforms'];
   attributes: ShaderMetadata['attributes'];
   parseWarnings?: string[];
+}
+
+// ─── Cost estimate (Fix 3) ──────────────────────────────────────────────────
+
+/**
+ * Estimated instruction cost of a WGSL shader.
+ *
+ * `totalInstructions` is a heuristic statement count (`;` + control-flow
+ * keywords), NOT a real instruction count — WGSL has no direct machine-code
+ * mapping without compilation. `costScore` reuses the same order-of-magnitude
+ * weights as the SPIR-V stats (`texture` fetches ≫ ALU) so relative shader
+ * cost is comparable across both formats.
+ */
+export interface WgslCostEstimate {
+  /** Estimated statement/instruction count (heuristic). */
+  totalInstructions: number;
+  /** Number of texture sample/fetch/gather/load/store calls. */
+  textureSamples: number;
+  /** Number of control-flow constructs (if/for/while/loop/switch). */
+  controlFlowComplexity: number;
+  /** Relative cost score: Σ(opWeight × count). */
+  costScore: number;
+}
+
+/** Texture-access builtin call names (WGSL). */
+const WGSL_TEXTURE_CALL_RE =
+  /\btexture(?:Sample|SampleLevel|SampleBias|SampleCompare|SampleCompareLevel|SampleGrad|Gather|GatherCompare|Load|Store|AtomicLoad|AtomicStore)\s*\(/g;
+
+/** Control-flow keywords counted toward complexity. */
+const WGSL_CONTROL_FLOW_RE = /\b(?:if|else|for|while|loop|switch)\b/g;
+
+/** Statement terminators: `;` plus control-flow keywords. */
+const WGSL_STATEMENT_RE =
+  /;|(?:\b(?:if|else|for|while|loop|switch|case|return|break|continue|discard|let|var|const|fn)\b)/g;
+
+/**
+ * Extract a lightweight instruction-cost estimate from WGSL source.
+ *
+ * Pure static analysis (no GPU). Comments and string literals are stripped
+ * before counting so doc examples cannot skew the numbers.
+ */
+export function extractShaderCostEstimate(code: string): WgslCostEstimate {
+  const clean = stripComments(code);
+  if (clean.trim() === '') {
+    return { totalInstructions: 0, textureSamples: 0, controlFlowComplexity: 0, costScore: 0 };
+  }
+
+  const textureSamples = countRegex(clean, WGSL_TEXTURE_CALL_RE);
+  const controlFlowComplexity = countRegex(clean, WGSL_CONTROL_FLOW_RE);
+  const totalInstructions = Math.max(countRegex(clean, WGSL_STATEMENT_RE), 1);
+
+  // Same order-of-magnitude weights as SPIRV_OP_WEIGHTS: texture fetch 8,
+  // control flow 2, baseline statement 1.
+  const costScore = textureSamples * 8 + controlFlowComplexity * 2 + totalInstructions;
+
+  return { totalInstructions, textureSamples, controlFlowComplexity, costScore };
+}
+
+/** Count regex matches (global regexes only). */
+function countRegex(input: string, re: RegExp): number {
+  const matches = input.matchAll(re);
+  let count = 0;
+  for (const match of matches) {
+    void match;
+    count++;
+  }
+  return count;
 }
 
 export function extractShaderAst(code: string): ShaderAst {

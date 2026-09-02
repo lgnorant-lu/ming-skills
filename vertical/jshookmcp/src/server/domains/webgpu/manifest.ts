@@ -23,6 +23,7 @@ const registrations = defineMethodRegistrations<H, (typeof toolDefinitions)[numb
     { tool: 'webgpu_shader_compile', method: 'webgpu_shader_compile' },
     { tool: 'webgpu_shader_disassemble', method: 'webgpu_shader_disassemble' },
     { tool: 'webgpu_timing_analysis', method: 'webgpu_timing_analysis' },
+    { tool: 'webgpu_frame_timing', method: 'webgpu_frame_timing' },
     { tool: 'webgpu_memory_layout', method: 'webgpu_memory_layout' },
     { tool: 'webgpu_capture_commands', method: 'webgpu_capture_commands' },
     { tool: 'webgpu_shader_source_capture', method: 'webgpu_shader_source_capture' },
@@ -64,6 +65,7 @@ const manifest = {
       'webgpu_shader_compile',
       'webgpu_timing_analysis',
       'webgpu_capture_commands',
+      'webgpu_frame_timing',
     ],
     hint: 'WebGPU analysis workflow: get adapter info → compile/analyze shaders → detect side-channel timing → capture commands',
   },
@@ -76,6 +78,9 @@ const manifest = {
       { condition: 'Browser must be launched', fix: 'Call browser_launch or browser_attach first' },
     ],
     webgpu_timing_analysis: [
+      { condition: 'Browser must be launched', fix: 'Call browser_launch or browser_attach first' },
+    ],
+    webgpu_frame_timing: [
       { condition: 'Browser must be launched', fix: 'Call browser_launch or browser_attach first' },
     ],
     webgpu_memory_layout: [

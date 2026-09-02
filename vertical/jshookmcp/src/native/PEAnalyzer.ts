@@ -32,12 +32,16 @@ import type {
   PEParsedBuffer,
 } from './PEAnalyzer.types';
 import { IMAGE_SCN, IMAGE_DIRECTORY_ENTRY } from './PEAnalyzer.types';
+import {
+  MZ_MAGIC,
+  PE_SIGNATURE,
+  DOS_HEADER_SIZE,
+  E_LFANEW_OFFSET,
+  IMAGE_NT_OPTIONAL_HDR64_MAGIC as PE32PLUS_MAGIC,
+} from './PEConstants';
 
 // ── Constants ──
 
-const MZ_MAGIC = 0x5a4d;
-const PE_SIGNATURE = 0x00004550;
-const PE32PLUS_MAGIC = 0x20b;
 const SECTION_HEADER_SIZE = 40;
 const IMPORT_DESCRIPTOR_SIZE = 20;
 const COMPARE_BYTES = 16; // Bytes to compare for inline hook detection
@@ -49,9 +53,7 @@ const MAX_EXPORTED_FUNCTIONS = 2000;
 const MAX_DLL_NAME_BYTES = 256;
 const MAX_HINT_NAME_BYTES = 258; // 2-byte hint + 256-byte name
 
-// PE header layout offsets (IMAGE_DOS_HEADER / IMAGE_NT_HEADERS, PE/COFF spec).
-const DOS_HEADER_SIZE = 64;
-const E_LFANEW_OFFSET = 60; // e_lfanew within IMAGE_DOS_HEADER
+// PE header layout offsets (IMAGE_NT_HEADERS size, PE/COFF spec).
 const NT_HEADERS_SIZE = 264; // 4 signature + 20 file header + 240 PE32+ optional header
 const FILE_HEADER_OFFSET = 4; // within NT headers
 const OPTIONAL_HEADER_OFFSET = 24; // within NT headers
@@ -253,7 +255,9 @@ export class PEAnalyzer {
 
     // Read IMAGE_EXPORT_DIRECTORY (40 bytes)
     const expData = ReadProcessMemory(hProcess, base + BigInt(exportDir.rva), 40);
-    const numberOfNames = expData.readUInt32LE(24);
+    // Cap before sizing the name/ordinal buffers — a corrupt header could
+    // otherwise drive huge allocations from numberOfNames.
+    const numberOfNames = Math.min(expData.readUInt32LE(24), MAX_EXPORTED_FUNCTIONS);
     const addressOfFunctionsRva = expData.readUInt32LE(28);
     const addressOfNamesRva = expData.readUInt32LE(32);
     const addressOfNameOrdinalsRva = expData.readUInt32LE(36);
@@ -596,8 +600,18 @@ export class PEAnalyzer {
   private async readCoreHeaders(hProcess: bigint, base: bigint) {
     const dosData = ReadProcessMemory(hProcess, base, DOS_HEADER_SIZE);
     const e_lfanew = dosData.readUInt32LE(E_LFANEW_OFFSET);
+    if (e_lfanew < DOS_HEADER_SIZE) {
+      throw new Error(`Invalid e_lfanew: 0x${e_lfanew.toString(16)}`);
+    }
 
     const ntData = ReadProcessMemory(hProcess, base + BigInt(e_lfanew), NT_HEADERS_SIZE);
+    // Validate the full "PE\0\0" signature before trusting numSections /
+    // data-directory offsets parsed from a corrupt header.
+    const ntSignature = ntData.readUInt32LE(0);
+    if (ntSignature !== PE_SIGNATURE) {
+      throw new Error(`Invalid PE signature: expected 0x4550, got 0x${ntSignature.toString(16)}`);
+    }
+
     const numSections = ntData.readUInt16LE(FILE_HEADER_OFFSET + 2);
     const sizeOfOptionalHeader = ntData.readUInt16LE(FILE_HEADER_OFFSET + 16);
     const magic = ntData.readUInt16LE(OPTIONAL_HEADER_OFFSET);
@@ -739,8 +753,11 @@ export class PEAnalyzer {
    * Convert an RVA to a file offset using the section table parsed by
    * {@link parsePEFromBuffer} — no duplicated section-header parsing. Returns
    * -1 when the buffer is not a valid PE or the RVA maps to no section.
+   * Public so sibling native modules (e.g. AntiCheatDetector's disk-vs-memory
+   * integrity scan) reuse the same mapping instead of re-parsing section
+   * headers with raw offsets.
    */
-  private rvaToFileOffset(peData: Buffer, rva: number): number {
+  rvaToFileOffset(peData: Buffer, rva: number): number {
     let parsed: PEParsedBuffer;
     try {
       parsed = this.parsePEFromBuffer(peData);
@@ -750,7 +767,10 @@ export class PEAnalyzer {
 
     for (const section of parsed.sections) {
       if (rva >= section.virtualAddress && rva < section.virtualAddress + section.virtualSize) {
-        return section.pointerToRawData + (rva - section.virtualAddress);
+        // An RVA can hit a section's virtual range while its raw data is
+        // smaller (e.g. zero-filled .bss) — don't map past sizeOfRawData.
+        const offset = section.pointerToRawData + (rva - section.virtualAddress);
+        if (offset < section.pointerToRawData + section.sizeOfRawData) return offset;
       }
     }
 
@@ -804,6 +824,9 @@ export class PEAnalyzer {
       );
     }
     const e_lfanew = buffer.readUInt32LE(E_LFANEW_OFFSET);
+    if (e_lfanew < DOS_HEADER_SIZE || e_lfanew + NT_HEADERS_SIZE > buffer.length) {
+      throw new Error(`Invalid e_lfanew in buffer: 0x${e_lfanew.toString(16)}`);
+    }
 
     // Read NT headers
     const ntSignature = buffer.readUInt32LE(e_lfanew);

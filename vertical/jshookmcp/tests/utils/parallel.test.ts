@@ -99,6 +99,40 @@ describe('parallel utilities', () => {
     expect(done).toBe(true);
   });
 
+  it('marks a synchronously throwing executor as failed without hanging', async () => {
+    // A sync throw must surface as a failed task (not an unhandled rejection),
+    // and the per-task timeout timer must be cleared on that path.
+    // Typed as returning a Promise, but throws synchronously on the call site —
+    // this is exactly the path that used to leak the timeout timer.
+    const syncThrowExecutor: (item: number, index: number) => Promise<number> = () => {
+      throw new Error('sync boom');
+    };
+    const results = await parallelExecute([1], syncThrowExecutor, { timeout: 100 });
+
+    expect(results[0]?.success).toBe(false);
+    expect(results[0]?.error?.message).toBe('sync boom');
+  });
+
+  it('retries a synchronously throwing executor when retryOnError is enabled', async () => {
+    let attempts = 0;
+    const executor: (item: number, index: number) => Promise<number> = () => {
+      attempts++;
+      if (attempts === 1) {
+        throw new Error('first sync failure');
+      }
+      return Promise.resolve(99);
+    };
+    const results = await parallelExecute([1], executor, {
+      retryOnError: true,
+      maxRetries: 2,
+      timeout: 100,
+    });
+
+    expect(attempts).toBe(2);
+    expect(results[0]?.success).toBe(true);
+    expect(results[0]?.data).toBe(99);
+  });
+
   it('TaskQueue rejects structural non-error objects', async () => {
     const queue = new TaskQueue<number, number>(async () => {
       throw 'String error object';

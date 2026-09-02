@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const existsSyncMock = vi.fn();
 const executablePathMock = vi.fn();
 
-vi.mock('fs', () => ({
+vi.mock('node:fs', () => ({
   existsSync: (...args: any[]) => existsSyncMock(...args),
 }));
 
@@ -55,6 +55,13 @@ describe('browserExecutable utils', () => {
     existsSyncMock.mockImplementation((p: string) => p === '/cached-browser');
 
     const { findBrowserExecutable } = await loadModule();
+    // Importing the module chain now also loads @src/config/env-bootstrap,
+    // which walks up the directory tree calling existsSync() on candidate
+    // package.json files to locate the project root. That's unrelated to the
+    // caching behavior under test here, so clear those import-time calls
+    // before asserting on the two find calls below.
+    existsSyncMock.mockClear();
+
     expect(findBrowserExecutable()).toBe('/cached-browser');
     expect(findBrowserExecutable()).toBe('/cached-browser');
     expect(existsSyncMock).toHaveBeenCalledTimes(2);
@@ -96,5 +103,46 @@ describe('browserExecutable utils', () => {
     expect(mod.getCachedBrowserPath()).toBe('/cached-browser');
     mod.clearBrowserPathCache();
     expect(mod.getCachedBrowserPath()).toBeUndefined();
+  });
+
+  it('deduplicates concurrent async resolutions (single-flight)', async () => {
+    executablePathMock.mockReturnValue('/managed-browser-bin');
+    existsSyncMock.mockImplementation((p: string) => p === '/managed-browser-bin');
+
+    const mod = await loadModule();
+    const [first, second] = await Promise.all([
+      mod.findBrowserExecutableAsync(),
+      mod.findBrowserExecutableAsync(),
+    ]);
+
+    expect(first).toBe('/managed-browser-bin');
+    expect(second).toBe('/managed-browser-bin');
+    // The puppeteer probe must run only once despite two concurrent callers.
+    expect(executablePathMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed puppeteer probe is retried on the next async call, not memoized', async () => {
+    executablePathMock.mockReturnValueOnce('/none').mockReturnValue('/fresh-browser');
+    existsSyncMock.mockImplementation((p: string) => p === '/fresh-browser');
+
+    const mod = await loadModule();
+    expect(await mod.findBrowserExecutableAsync()).toBeUndefined();
+    // Second call re-probes instead of being stuck on the failed result.
+    expect(await mod.findBrowserExecutableAsync()).toBe('/fresh-browser');
+    expect(executablePathMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries puppeteer after a transient import failure', async () => {
+    // First probe throws (simulates a transient import failure)…
+    executablePathMock.mockImplementationOnce(() => {
+      throw new Error('Cannot find module rebrowser-puppeteer-core');
+    });
+    // …second probe succeeds.
+    executablePathMock.mockReturnValue('/fresh-browser');
+    existsSyncMock.mockImplementation((p: string) => p === '/fresh-browser');
+
+    const mod = await loadModule();
+    expect(await mod.findBrowserExecutableAsync()).toBeUndefined();
+    expect(await mod.findBrowserExecutableAsync()).toBe('/fresh-browser');
   });
 });

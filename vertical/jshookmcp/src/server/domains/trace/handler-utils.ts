@@ -340,12 +340,14 @@ export const readEventsByExpression = (
   return result.rows.map(readDbTraceEventRow);
 };
 
-export const smartHandleDetailed = <T>(
+export const smartHandleDetailed = async <T>(
   ctx: MCPServerContext,
   payload: T,
-): T | ReturnType<MCPServerContext['detailedData']['smartHandle']> => {
+): Promise<T | Awaited<ReturnType<MCPServerContext['detailedData']['smartHandle']>>> => {
   const detailedData = ctx.detailedData;
-  return detailedData ? detailedData.smartHandle(payload, TRACE_DETAIL_THRESHOLD_BYTES) : payload;
+  return detailedData
+    ? await detailedData.smartHandle(payload, TRACE_DETAIL_THRESHOLD_BYTES)
+    : payload;
 };
 
 export const getDbForReading = (recorder: TraceRecorder, dbPath?: string): TraceDB => {

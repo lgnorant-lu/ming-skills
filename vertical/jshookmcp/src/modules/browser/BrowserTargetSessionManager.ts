@@ -70,6 +70,7 @@ export interface DumpTargetScriptsResult {
 }
 
 export class BrowserTargetSessionManager implements NetworkMonitorLike {
+  private readonly getBrowser: () => Browser | null;
   private browserSession: CDPSession | null = null;
   private attachedTargetSession: CDPSessionLike | null = null;
   private attachedTargetInfo: BrowserTargetInfo | null = null;
@@ -86,7 +87,9 @@ export class BrowserTargetSessionManager implements NetworkMonitorLike {
     targetInfoChanged?: (payload: unknown) => void;
   } = {};
 
-  constructor(private readonly getBrowser: () => Browser | null) {}
+  constructor(getBrowser: () => Browser | null) {
+    this.getBrowser = getBrowser;
+  }
 
   async listTargets(filters: TargetFilters = {}): Promise<BrowserTargetInfo[]> {
     const session = await this.ensureBrowserSession();

@@ -25,7 +25,7 @@ Unified instrumentation-session domain that groups hooks, intercepts, traces, ev
 
 | Tool | Description |
 | --- | --- |
-| `instrumentation_session` | Start, stop, or query status of an instrumentation recording session. |
+| `instrumentation_session` | Start, stop, or query status of an instrumentation recording session. Destroying a session archives it read-only (the last 8 destroyed sessions are retained, oldest evicted) so export/diff/merge/status can still inspect it. |
 | `instrumentation_session_export` | Export an instrumentation session snapshot to an artifacts JSON file. |
 | `instrumentation_session_diff` | Diff two instrumentation session snapshots: operations added/removed/common (by id) plus artifact fingerprints and per-type counts. Pure compare, mutates nothing. |
 | `instrumentation_session_merge` | Merge two sessions into a new session: copies operations (with id remapping) and artifacts from both sources. Original sessions are untouched. |

@@ -272,10 +272,14 @@ export class SourcemapHandlers {
         }
 
         const candidates = parsed.mappings
-          .filter(
-            (entry) =>
-              entry.sourceIndex === sourceIndex && (entry.originalLine ?? Infinity) <= originalLine,
-          )
+          .filter((entry) => {
+            if (entry.sourceIndex !== sourceIndex) return false;
+            const entryLine = entry.originalLine ?? Infinity;
+            // Closest-preceding semantics: earlier lines always qualify; on the
+            // query line only entries at/before the query column are eligible.
+            if (entryLine < originalLine) return true;
+            return entryLine === originalLine && (entry.originalColumn ?? -1) <= originalColumn;
+          })
           .toSorted((a, b) => {
             const lineDelta = (b.originalLine ?? 0) - (a.originalLine ?? 0);
             if (lineDelta !== 0) return lineDelta;

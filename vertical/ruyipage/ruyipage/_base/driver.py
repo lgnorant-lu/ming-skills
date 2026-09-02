@@ -16,11 +16,21 @@ import time
 import threading
 import logging
 
-from queue import Queue, Empty
+from concurrent.futures import ThreadPoolExecutor
+from queue import Queue, Empty, Full
 
 from ..errors import BiDiError, PageDisconnectedError
 
 logger = logging.getLogger("ruyipage")
+
+# 事件缓冲上限。高流量页面（大量 network 订阅 + 多标签页）下，
+# 若消费端跟不上生产端，无上限队列会持续吃内存直到进程崩溃。
+_EVENT_QUEUE_MAX = 10000
+
+# immediate 回调的执行线程数与待执行上限。
+# 历史实现是每个事件新起一个线程，事件风暴时会瞬间创建上千个线程。
+_IMMEDIATE_WORKERS = 8
+_IMMEDIATE_MAX_PENDING = 256
 
 # 异步支持检测（greenlet 未安装时为 False，同步路径零开销）
 _HAS_ASYNC = False
@@ -75,8 +85,13 @@ class BrowserBiDiDriver(object):
         # key=(event_method, context_or_None) -> callback
         self._event_handlers = {}
         self._immediate_event_handlers = {}
-        self._event_queue = Queue()
+        self._event_queue = Queue(maxsize=_EVENT_QUEUE_MAX)
         self._handlers_lock = threading.Lock()
+
+        # immediate 回调执行池（懒创建，未注册 immediate 回调时零开销）
+        self._immediate_pool = None
+        self._immediate_pending = 0
+        self._immediate_lock = threading.Lock()
 
         # 线程
         self._recv_th = None
@@ -191,7 +206,13 @@ class BrowserBiDiDriver(object):
             self._method_results.clear()
 
         # 唤醒事件线程
-        self._event_queue.put(None)
+        self._offer_event(None)
+
+        with self._immediate_lock:
+            pool = self._immediate_pool
+            self._immediate_pool = None
+        if pool is not None:
+            pool.shutdown(wait=False)
 
     def reconnect(self, ws_url=None):
         """重新连接 WebSocket
@@ -564,8 +585,11 @@ class BrowserBiDiDriver(object):
                         ):
                             self._handle_immediate_event(handler, event_params)
 
-                    # 放入事件队列（由事件线程处理）
-                    self._event_queue.put((event_method, event_context, event_params))
+                    # 放入事件队列（由事件线程处理）。
+                    # recv 循环绝不能阻塞，队列满时丢弃最旧的事件。
+                    self._offer_event(
+                        (event_method, event_context, event_params)
+                    )
                 else:
                     # 未知消息类型
                     if msg_type is not None:
@@ -584,11 +608,34 @@ class BrowserBiDiDriver(object):
                             pass
                 break
 
+    def _offer_event(self, item):
+        """把事件放入队列；队列满时丢弃最旧的事件。
+
+        本方法运行在 recv 循环中，一旦阻塞就会造成 WebSocket 消息积压和命令
+        响应延迟，因此宁可丢弃最旧的事件也不等待空位。
+        """
+        try:
+            self._event_queue.put_nowait(item)
+            return
+        except Full:
+            pass
+
+        try:
+            self._event_queue.get_nowait()
+        except Empty:
+            pass
+
+        try:
+            self._event_queue.put_nowait(item)
+        except Full:
+            logger.warning(
+                "事件队列已满，丢弃事件: %s", item[0] if item else item
+            )
+
     def _handle_immediate_event(self, handler, event_params):
-        """在短生命周期线程中执行 immediate 回调
+        """在线程池中执行 immediate 回调
 
         避免在 recv 循环中直接执行可能耗时的回调导致消息积压。
-        每个回调启动一个独立短线程执行。
 
         Args:
             handler: 回调函数
@@ -600,9 +647,28 @@ class BrowserBiDiDriver(object):
                 handler(event_params)
             except Exception as e:
                 logger.error("Immediate 事件处理错误: %s", e)
+            finally:
+                with self._immediate_lock:
+                    self._immediate_pending -= 1
 
-        t = threading.Thread(target=_run, name="ruyipage-immediate-evt", daemon=True)
-        t.start()
+        with self._immediate_lock:
+            if self._immediate_pending >= _IMMEDIATE_MAX_PENDING:
+                logger.warning("immediate 回调积压过多，丢弃本次事件回调")
+                return
+            if self._immediate_pool is None:
+                self._immediate_pool = ThreadPoolExecutor(
+                    max_workers=_IMMEDIATE_WORKERS,
+                    thread_name_prefix="ruyipage-immediate-evt",
+                )
+            self._immediate_pending += 1
+            pool = self._immediate_pool
+
+        try:
+            pool.submit(_run)
+        except RuntimeError:
+            # 池已随连接关闭而 shutdown
+            with self._immediate_lock:
+                self._immediate_pending -= 1
 
     def _handle_event_loop(self):
         """后台线程：处理事件队列"""

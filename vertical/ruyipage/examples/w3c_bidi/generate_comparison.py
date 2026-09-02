@@ -1,265 +1,260 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""生成RuyiPage与W3C BiDi规范的精确对比表格"""
+"""Generate ruyiPage's WebDriver BiDi coverage report from source code."""
 
-import sys
-import io
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+from __future__ import annotations
 
+import argparse
+import ast
 import json
+import sys
+from pathlib import Path
 
-# 读取W3C规范数据
-with open('w3c_bidi_apis.json', 'r', encoding='utf-8') as f:
-    w3c_data = json.load(f)
 
-# RuyiPage已实现的API
-ruyipage_commands = {
-    'session': [
-        'session.status',
-        'session.new',
-        'session.end',
-        'session.subscribe',
-        'session.unsubscribe'
-    ],
-    'browser': [
-        'browser.close',
-        'browser.createUserContext',
-        'browser.getUserContexts',
-        'browser.removeUserContext',
-        'browser.getClientWindows',
-        'browser.setClientWindowState',
-        'browser.setDownloadBehavior'
-    ],
-    'browsingContext': [
-        'browsingContext.activate',
-        'browsingContext.captureScreenshot',
-        'browsingContext.close',
-        'browsingContext.create',
-        'browsingContext.getTree',
-        'browsingContext.handleUserPrompt',
-        'browsingContext.locateNodes',
-        'browsingContext.navigate',
-        'browsingContext.print',
-        'browsingContext.reload',
-        'browsingContext.setViewport',
-        'browsingContext.traverseHistory'
-        # 缺少: browsingContext.setBypassCSP
-    ],
-    'emulation': [
-        'emulation.setUserAgentOverride',
-        'emulation.setGeolocationOverride',
-        'emulation.setTimezoneOverride',
-        'emulation.setLocaleOverride',
-        'emulation.setScreenOrientationOverride',
-        'emulation.setScreenSettingsOverride',
-        'emulation.setNetworkConditions',
-        'emulation.setTouchOverride'
-        # 缺少: setScriptingEnabled, setScrollbarTypeOverride, setForcedColorsModeThemeOverride
-    ],
-    'network': [
-        'network.addIntercept',
-        'network.removeIntercept',
-        'network.continueRequest',
-        'network.continueResponse',
-        'network.continueWithAuth',
-        'network.failRequest',
-        'network.provideResponse',
-        'network.addDataCollector',
-        'network.removeDataCollector',
-        'network.getData',
-        'network.disownData',
-        'network.setCacheBehavior',
-        'network.setExtraHeaders'
-    ],
-    'script': [
-        'script.evaluate',
-        'script.callFunction',
-        'script.addPreloadScript',
-        'script.removePreloadScript',
-        'script.getRealms',
-        'script.disown'
-    ],
-    'storage': [
-        'storage.getCookies',
-        'storage.setCookie',
-        'storage.deleteCookies'
-    ],
-    'input': [
-        'input.performActions',
-        'input.releaseActions',
-        'input.setFiles'
-    ],
-    'webExtension': [
-        'webExtension.install',
-        'webExtension.uninstall'
+HERE = Path(__file__).resolve().parent
+PROJECT_ROOT = HERE.parents[1]
+DEFAULT_SNAPSHOT = HERE / "w3c_bidi_apis.json"
+DEFAULT_OUTPUT = HERE / "W3C_BIDI_COMPARISON.md"
+BIDI_SOURCE_DIR = PROJECT_ROOT / "ruyipage" / "_bidi"
+EVENT_TRACKER_PATH = PROJECT_ROOT / "ruyipage" / "_units" / "events.py"
+
+
+def _constant_string(node):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def discover_wrapped_commands(source_dir: Path = BIDI_SOURCE_DIR) -> set[str]:
+    """Discover literal BiDi method names passed to driver.run/_safe_run."""
+    commands = set()
+    for path in source_dir.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+
+            method = None
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "run"
+                and node.args
+            ):
+                method = _constant_string(node.args[0])
+            elif (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "_safe_run"
+                and len(node.args) >= 2
+            ):
+                method = _constant_string(node.args[1])
+
+            if method and "." in method:
+                commands.add(method)
+    return commands
+
+
+def has_generic_event_support(path: Path = EVENT_TRACKER_PATH) -> bool:
+    """Verify EventTracker forwards arbitrary requested events to subscribe()."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not (isinstance(node.func, ast.Attribute) and node.func.attr == "subscribe"):
+            continue
+        for argument in node.args:
+            if (
+                isinstance(argument, ast.Attribute)
+                and isinstance(argument.value, ast.Name)
+                and argument.value.id == "self"
+                and argument.attr == "_events"
+            ):
+                return True
+    return False
+
+
+def flatten(mapping: dict[str, list[str]]) -> list[str]:
+    return [item for values in mapping.values() for item in values]
+
+
+def load_snapshot(path: Path = DEFAULT_SNAPSHOT) -> dict:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    commands = flatten(data["commands"])
+    events = flatten(data["events"])
+    if data["total_commands"] != len(commands):
+        raise ValueError("snapshot total_commands does not match command list")
+    if data["total_events"] != len(events):
+        raise ValueError("snapshot total_events does not match event list")
+    return data
+
+
+def build_coverage(snapshot: dict) -> dict:
+    spec_commands = set(flatten(snapshot["commands"]))
+    spec_events = set(flatten(snapshot["events"]))
+    wrapped_commands = discover_wrapped_commands()
+    generic_events = has_generic_event_support()
+    covered_events = spec_events if generic_events else set()
+    return {
+        "spec_commands": spec_commands,
+        "spec_events": spec_events,
+        "wrapped_commands": wrapped_commands,
+        "covered_events": covered_events,
+        "missing_commands": spec_commands - wrapped_commands,
+        "missing_events": spec_events - covered_events,
+        "extra_commands": wrapped_commands - spec_commands,
+        "generic_events": generic_events,
+    }
+
+
+def _percent(covered: int, total: int) -> str:
+    return "{:.1f}%".format((covered / total * 100) if total else 100.0)
+
+
+def render_report(snapshot: dict, coverage: dict) -> str:
+    command_total = len(coverage["spec_commands"])
+    command_covered = command_total - len(coverage["missing_commands"])
+    event_total = len(coverage["spec_events"])
+    event_covered = event_total - len(coverage["missing_events"])
+
+    lines = [
+        "# WebDriver BiDi Core Coverage",
+        "",
+        "- Source: {}".format(snapshot.get("source") or "unknown"),
+        "- Revision: `{}`".format(snapshot.get("source_revision") or "unversioned"),
+        "- Source date: {}".format(snapshot.get("source_date") or "unknown"),
+        "",
+        "This report measures ruyiPage's low-level core protocol name surface.",
+        "Parameter schemas are guarded by `tests/test_bidi_schema_conformance.py`",
+        "and browser runtime support is deliberately reported separately.",
+        "",
+        "External WebDriver BiDi specifications such as Bluetooth, Digital",
+        "Credentials, Permissions, Speculation, and User-Agent Client Hints are",
+        "outside this core snapshot and are not counted as part of 67/24.",
+        "",
+        "## Summary",
+        "",
+        "| Name surface | W3C | Covered | Missing | Coverage |",
+        "| --- | ---: | ---: | ---: | ---: |",
+        "| Commands | {} | {} | {} | {} |".format(
+            command_total,
+            command_covered,
+            len(coverage["missing_commands"]),
+            _percent(command_covered, command_total),
+        ),
+        "| Events | {} | {} | {} | {} |".format(
+            event_total,
+            event_covered,
+            len(coverage["missing_events"]),
+            _percent(event_covered, event_total),
+        ),
+        "",
+        "Events are covered by the generic `page.events` subscriber, which preserves",
+        "the complete event payload in `BidiEvent.params`.",
+        "",
+        "## Modules",
+        "",
+        "| Module | Commands | Wrapped | Events | Subscribable |",
+        "| --- | ---: | ---: | ---: | ---: |",
     ]
-}
 
-ruyipage_events = {
-    'browsingContext': [
-        'browsingContext.contextCreated',
-        'browsingContext.contextDestroyed',
-        'browsingContext.domContentLoaded',
-        'browsingContext.load',
-        'browsingContext.navigationStarted',
-        'browsingContext.userPromptOpened',
-        'browsingContext.userPromptClosed'
-        # 缺少: downloadWillBegin, downloadEnd, fragmentNavigated, historyUpdated,
-        #       navigationAborted, navigationCommitted, navigationFailed
-    ],
-    'network': [
-        'network.beforeRequestSent',
-        'network.responseStarted',
-        'network.responseCompleted',
-        'network.fetchError',
-        'network.authRequired'
-    ],
-    'script': [
-        'script.realmCreated',
-        'script.realmDestroyed'
-        # 缺少: script.message
-    ],
-    'log': [
-        'log.entryAdded'
-    ]
-    # 缺少: input.fileDialogOpened
-}
+    for module in snapshot["modules"]:
+        commands = snapshot["commands"].get(module, [])
+        events = snapshot["events"].get(module, [])
+        wrapped = sum(item in coverage["wrapped_commands"] for item in commands)
+        subscribed = sum(item in coverage["covered_events"] for item in events)
+        lines.append(
+            "| {} | {} | {} | {} | {} |".format(
+                module, len(commands), wrapped, len(events), subscribed
+            )
+        )
 
-# 测试覆盖情况
-tested_commands = {
-    'session': ['session.status', 'session.new', 'session.end', 'session.subscribe', 'session.unsubscribe'],
-    'browser': ['browser.close', 'browser.createUserContext', 'browser.getUserContexts',
-                'browser.removeUserContext', 'browser.getClientWindows', 'browser.setClientWindowState'],
-    'browsingContext': ['browsingContext.activate', 'browsingContext.captureScreenshot',
-                       'browsingContext.close', 'browsingContext.create', 'browsingContext.getTree',
-                       'browsingContext.handleUserPrompt', 'browsingContext.locateNodes',
-                       'browsingContext.navigate', 'browsingContext.print', 'browsingContext.reload',
-                       'browsingContext.setViewport', 'browsingContext.traverseHistory'],
-    'emulation': [],  # 未测试
-    'network': ['network.addIntercept', 'network.removeIntercept', 'network.continueRequest',
-                'network.continueResponse', 'network.continueWithAuth', 'network.failRequest',
-                'network.provideResponse', 'network.addDataCollector', 'network.removeDataCollector',
-                'network.getData', 'network.disownData', 'network.setCacheBehavior', 'network.setExtraHeaders'],
-    'script': ['script.evaluate', 'script.callFunction', 'script.addPreloadScript',
-               'script.removePreloadScript', 'script.getRealms', 'script.disown'],
-    'storage': ['storage.getCookies', 'storage.setCookie', 'storage.deleteCookies'],
-    'input': ['input.performActions', 'input.releaseActions', 'input.setFiles'],
-    'webExtension': []  # 未测试
-}
+    lines.extend(["", "## Commands", ""])
+    for module, commands in snapshot["commands"].items():
+        lines.extend(
+            [
+                "### {}".format(module),
+                "",
+                "| Command | Status |",
+                "| --- | --- |",
+            ]
+        )
+        for command in commands:
+            status = "wrapped" if command in coverage["wrapped_commands"] else "missing"
+            lines.append("| `{}` | {} |".format(command, status))
+        lines.append("")
 
-# 生成Markdown表格
-output = []
-output.append("# WebDriver BiDi API 完整对比表（基于W3C官方规范）\n")
-output.append("## 📊 总体统计\n")
-output.append("| 项目 | W3C规范 | RuyiPage实现 | 已测试 | 实现率 | 测试率 |")
-output.append("|------|---------|-------------|--------|--------|--------|")
+    lines.extend(["## Events", ""])
+    for module, events in snapshot["events"].items():
+        lines.extend(
+            [
+                "### {}".format(module),
+                "",
+                "| Event | Status |",
+                "| --- | --- |",
+            ]
+        )
+        for event in events:
+            status = "generic subscriber" if event in coverage["covered_events"] else "missing"
+            lines.append("| `{}` | {} |".format(event, status))
+        lines.append("")
 
-total_w3c_cmds = w3c_data['total_commands']
-total_w3c_evts = w3c_data['total_events']
-total_rp_cmds = sum(len(v) for v in ruyipage_commands.values())
-total_rp_evts = sum(len(v) for v in ruyipage_events.values())
-total_tested_cmds = sum(len(v) for v in tested_commands.values())
+    lines.extend(["## Non-W3C Extensions", ""])
+    if coverage["extra_commands"]:
+        for command in sorted(coverage["extra_commands"]):
+            lines.append("- `{}`".format(command))
+    else:
+        lines.append("None.")
+    lines.extend(
+        [
+            "",
+            "## Runtime Note",
+            "",
+            "A wrapper means ruyiPage can serialize and send the command. It does not mean",
+            "every Firefox release implements that command or emits every event.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
-output.append(f"| 命令 | {total_w3c_cmds} | {total_rp_cmds} | {total_tested_cmds} | {total_rp_cmds/total_w3c_cmds*100:.1f}% | {total_tested_cmds/total_w3c_cmds*100:.1f}% |")
-output.append(f"| 事件 | {total_w3c_evts} | {total_rp_evts} | {total_rp_evts} | {total_rp_evts/total_w3c_evts*100:.1f}% | {total_rp_evts/total_w3c_evts*100:.1f}% |")
-output.append(f"| **总计** | **{total_w3c_cmds + total_w3c_evts}** | **{total_rp_cmds + total_rp_evts}** | **{total_tested_cmds + total_rp_evts}** | **{(total_rp_cmds + total_rp_evts)/(total_w3c_cmds + total_w3c_evts)*100:.1f}%** | **{(total_tested_cmds + total_rp_evts)/(total_w3c_cmds + total_w3c_evts)*100:.1f}%** |")
 
-output.append("\n---\n")
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--snapshot", type=Path, default=DEFAULT_SNAPSHOT)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--check", action="store_true")
+    parser.add_argument("--stdout", action="store_true")
+    return parser.parse_args(argv)
 
-# 按模块生成详细对比
-for module in sorted(w3c_data['modules']):
-    output.append(f"\n## {module} 模块\n")
 
-    # 命令对比
-    if module in w3c_data['commands']:
-        w3c_cmds = w3c_data['commands'][module]
-        rp_cmds = ruyipage_commands.get(module, [])
-        tested_cmds = tested_commands.get(module, [])
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    snapshot = load_snapshot(args.snapshot)
+    coverage = build_coverage(snapshot)
+    report = render_report(snapshot, coverage)
 
-        output.append(f"### 命令 ({len(rp_cmds)}/{len(w3c_cmds)} = {len(rp_cmds)/len(w3c_cmds)*100:.1f}%)\n")
-        output.append("| W3C命令 | RuyiPage | 测试 | 状态 |")
-        output.append("|---------|----------|------|------|")
+    if args.stdout:
+        sys.stdout.write(report)
 
-        for cmd in sorted(w3c_cmds):
-            implemented = "✅" if cmd in rp_cmds else "❌"
-            tested = "✅" if cmd in tested_cmds else ("⚠️" if cmd in rp_cmds else "❌")
-            status = "完成" if cmd in tested_cmds else ("已实现未测试" if cmd in rp_cmds else "未实现")
-            output.append(f"| {cmd} | {implemented} | {tested} | {status} |")
+    if coverage["missing_commands"] or coverage["missing_events"]:
+        print(
+            "Missing W3C coverage: commands={} events={}".format(
+                sorted(coverage["missing_commands"]),
+                sorted(coverage["missing_events"]),
+            )
+        )
+        return 1
 
-    # 事件对比
-    if module in w3c_data['events']:
-        w3c_evts = w3c_data['events'][module]
-        rp_evts = ruyipage_events.get(module, [])
+    if args.check:
+        current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""
+        if current != report:
+            print("WebDriver BiDi coverage report is stale: {}".format(args.output))
+            return 1
+        print("WebDriver BiDi coverage report is current: {}".format(args.output))
+        return 0
 
-        output.append(f"\n### 事件 ({len(rp_evts)}/{len(w3c_evts)} = {len(rp_evts)/len(w3c_evts)*100:.1f}%)\n")
-        output.append("| W3C事件 | RuyiPage | 测试 | 状态 |")
-        output.append("|---------|----------|------|------|")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(report, encoding="utf-8")
+    print("Wrote WebDriver BiDi coverage report to {}".format(args.output))
+    return 0
 
-        for evt in sorted(w3c_evts):
-            implemented = "✅" if evt in rp_evts else "❌"
-            tested = "✅" if evt in rp_evts else "❌"
-            status = "完成" if evt in rp_evts else "未实现"
-            output.append(f"| {evt} | {implemented} | {tested} | {status} |")
 
-    output.append("")
-
-# 未实现的API清单
-output.append("\n## 🚫 未实现的W3C API清单\n")
-output.append("### 命令\n")
-missing_cmds = []
-for module in w3c_data['commands']:
-    w3c_cmds = w3c_data['commands'][module]
-    rp_cmds = ruyipage_commands.get(module, [])
-    for cmd in w3c_cmds:
-        if cmd not in rp_cmds:
-            missing_cmds.append(cmd)
-
-for i, cmd in enumerate(missing_cmds, 1):
-    output.append(f"{i}. ❌ **{cmd}**")
-
-output.append("\n### 事件\n")
-missing_evts = []
-for module in w3c_data['events']:
-    w3c_evts = w3c_data['events'][module]
-    rp_evts = ruyipage_events.get(module, [])
-    for evt in w3c_evts:
-        if evt not in rp_evts:
-            missing_evts.append(evt)
-
-for i, evt in enumerate(missing_evts, 1):
-    output.append(f"{i}. ❌ **{evt}**")
-
-# 未测试的API清单
-output.append("\n## ⚠️ 已实现但未测试的API\n")
-untested = []
-for module in ruyipage_commands:
-    rp_cmds = ruyipage_commands[module]
-    tested_cmds = tested_commands.get(module, [])
-    for cmd in rp_cmds:
-        if cmd not in tested_cmds:
-            untested.append(cmd)
-
-for i, cmd in enumerate(untested, 1):
-    output.append(f"{i}. ⚠️ **{cmd}**")
-
-# 总结
-output.append("\n## 🏆 总结\n")
-output.append(f"- ✅ **命令实现率**: {total_rp_cmds}/{total_w3c_cmds} = **{total_rp_cmds/total_w3c_cmds*100:.1f}%**")
-output.append(f"- ✅ **事件实现率**: {total_rp_evts}/{total_w3c_evts} = **{total_rp_evts/total_w3c_evts*100:.1f}%**")
-output.append(f"- ✅ **总体实现率**: {total_rp_cmds + total_rp_evts}/{total_w3c_cmds + total_w3c_evts} = **{(total_rp_cmds + total_rp_evts)/(total_w3c_cmds + total_w3c_evts)*100:.1f}%**")
-output.append(f"- ✅ **测试覆盖率**: {total_tested_cmds + total_rp_evts}/{total_w3c_cmds + total_w3c_evts} = **{(total_tested_cmds + total_rp_evts)/(total_w3c_cmds + total_w3c_evts)*100:.1f}%**")
-output.append(f"- ❌ **缺失API数**: {len(missing_cmds) + len(missing_evts)} 个（{len(missing_cmds)}命令 + {len(missing_evts)}事件）")
-output.append(f"- ⚠️ **未测试API数**: {len(untested)} 个")
-
-output.append("\n---\n")
-output.append("**数据来源**: W3C WebDriver BiDi 规范 (https://w3c.github.io/webdriver-bidi/)")
-output.append("\n**生成时间**: 2026-04-06")
-
-# 保存到文件
-result_text = '\n'.join(output)
-with open('E:/ruyipage/examples/W3C_BIDI_COMPARISON.md', 'w', encoding='utf-8') as f:
-    f.write(result_text)
-
-print(result_text)
-print("\n\n对比表格已保存到: E:/ruyipage/examples/W3C_BIDI_COMPARISON.md")
+if __name__ == "__main__":
+    raise SystemExit(main())

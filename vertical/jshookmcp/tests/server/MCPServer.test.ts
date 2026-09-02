@@ -18,18 +18,51 @@ const mocks = vi.hoisted(() => {
     },
     cacheInit: vi.fn(async () => undefined),
     detailedShutdown: vi.fn(),
+    startArtifactRetentionScheduler: vi.fn(),
+    createLoopLagSampler: vi.fn(),
+    createToolLatencyTracker: vi.fn(),
+    sendLoggingMessage: vi.fn(async () => undefined),
+    logListener: null as null | ((level: string, message: string, args: unknown[]) => void),
   };
 });
 
-vi.mock('@modelcontextprotocol/sdk/server/mcp.js', () => {
+vi.mock('@utils/artifactRetention', () => ({
+  startArtifactRetentionScheduler: mocks.startArtifactRetentionScheduler,
+  getArtifactRetentionConfig: vi.fn(() => ({
+    enabled: true,
+    retentionDays: 7,
+    maxTotalBytes: 0,
+    cleanupOnStart: false,
+    cleanupIntervalMinutes: 360,
+  })),
+  cleanupArtifacts: vi.fn(),
+}));
+
+vi.mock('@utils/loopLag', () => ({
+  createLoopLagSampler: mocks.createLoopLagSampler,
+}));
+
+vi.mock('@utils/toolLatency', () => ({
+  createToolLatencyTracker: mocks.createToolLatencyTracker,
+}));
+
+vi.mock('@modelcontextprotocol/server', () => {
   class ResourceTemplate {
+    public readonly uriTemplate: string;
+    private readonly options: {
+      list?: (...args: any[]) => Promise<any> | any;
+      complete?: Record<string, (...args: any[]) => Promise<any> | any>;
+    };
     constructor(
-      public readonly uriTemplate: string,
-      private readonly options: {
+      uriTemplate: string,
+      options: {
         list?: (...args: any[]) => Promise<any> | any;
         complete?: Record<string, (...args: any[]) => Promise<any> | any>;
       },
-    ) {}
+    ) {
+      this.uriTemplate = uriTemplate;
+      this.options = options;
+    }
 
     get listCallback() {
       return this.options.list;
@@ -50,7 +83,11 @@ vi.mock('@modelcontextprotocol/sdk/server/mcp.js', () => {
     public connect = vi.fn(async () => undefined);
     public close = vi.fn(async () => undefined);
     public sendToolListChanged = vi.fn(async () => undefined);
-    public server = { setRequestHandler: vi.fn(), onclose: null };
+    public server = {
+      setRequestHandler: vi.fn(),
+      onclose: null,
+      sendLoggingMessage: mocks.sendLoggingMessage,
+    };
     public prompt = vi.fn();
 
     tool(...args: any[]) {
@@ -62,6 +99,10 @@ vi.mock('@modelcontextprotocol/sdk/server/mcp.js', () => {
 
     registerTool(name: string, _config: any, handler: (...args: any[]) => Promise<any>) {
       this.tools.push({ name, handler });
+      return { remove: vi.fn() };
+    }
+
+    registerPrompt(_name: string, _config: any, _handler: (...args: any[]) => unknown) {
       return { remove: vi.fn() };
     }
 
@@ -88,12 +129,12 @@ vi.mock('@modelcontextprotocol/sdk/server/mcp.js', () => {
   };
 });
 
-vi.mock('@modelcontextprotocol/sdk/server/stdio.js', () => ({
+vi.mock('@modelcontextprotocol/server/stdio', () => ({
   StdioServerTransport: MockStdioServerTransport,
 }));
 
-vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
-  StreamableHTTPServerTransport: class StreamableHTTPServerTransport {
+vi.mock('@modelcontextprotocol/node', () => ({
+  NodeStreamableHTTPServerTransport: class StreamableHTTPServerTransport {
     handleRequest = vi.fn();
   },
 }));
@@ -142,7 +183,10 @@ vi.mock('@src/utils/logger', () => ({
     error: vi.fn(),
     success: vi.fn(),
     setLevel: vi.fn(),
-    onLog: vi.fn(),
+    onLog: vi.fn((listener: (level: string, message: string, args: unknown[]) => void) => {
+      mocks.logListener = listener;
+      return () => {};
+    }),
   },
 }));
 
@@ -205,7 +249,21 @@ describe('MCPServer', () => {
   beforeEach(() => {
     mocks.mcpInstances.length = 0;
     mocks.allManifests.length = 0;
+    mocks.logListener = null;
     vi.clearAllMocks();
+    // Default loop-lag sampler: start() always creates + enables one, so every
+    // start() test needs a benign implementation (stop is a no-op fn).
+    mocks.createLoopLagSampler.mockReturnValue({
+      enable: () => vi.fn(),
+      getSummary: () => ({ p50Ms: 0, p90Ms: 0, p99Ms: 0, samples: 0 }),
+    });
+    // Default tool-latency tracker: start() always creates + subscribes one, so
+    // every start() test needs a benign implementation (dispose is a no-op fn).
+    mocks.createToolLatencyTracker.mockReturnValue({
+      record: vi.fn(),
+      getSummary: vi.fn(() => ({ top: [], trackedTools: 0 })),
+      dispose: vi.fn(),
+    });
 
     process.env.MCP_TRANSPORT = 'stdio';
     delete process.env.MCP_TOOL_PROFILE;
@@ -247,6 +305,75 @@ describe('MCPServer', () => {
     // boost_profile and unboost_profile were removed in the domain-level activation refactor
     expect(names).not.toContain('boost_profile');
     expect(names).not.toContain('unboost_profile');
+    expect(server).toBeDefined();
+  });
+
+  it('forwards warn/error/info logs to the MCP client but drops debug', async () => {
+    const server = new MCPServer(baseConfig);
+    const mcp = mocks.mcpInstances[0];
+
+    // Simulate the initialize handshake that flips clientInitialized to true.
+    mcp.server.oninitialized?.();
+
+    const listener = mocks.logListener;
+    expect(listener).toBeTypeOf('function');
+
+    // debug must not be forwarded (broadcast-amplification guard).
+    listener!('debug', 'noisy debug', []);
+    expect(mocks.sendLoggingMessage).not.toHaveBeenCalled();
+
+    listener!('info', 'info message', []);
+    expect(mocks.sendLoggingMessage).toHaveBeenCalledWith({
+      level: 'Info',
+      data: 'info message',
+      logger: 'jshookmcp',
+    });
+
+    mocks.sendLoggingMessage.mockClear();
+    listener!('warn', 'warn message', []);
+    expect(mocks.sendLoggingMessage).toHaveBeenCalledWith({
+      level: 'Warning',
+      data: 'warn message',
+      logger: 'jshookmcp',
+    });
+
+    mocks.sendLoggingMessage.mockClear();
+    listener!('error', 'error message', []);
+    expect(mocks.sendLoggingMessage).toHaveBeenCalledWith({
+      level: 'Error',
+      data: 'error message',
+      logger: 'jshookmcp',
+    });
+
+    expect(server).toBeDefined();
+  });
+
+  it('samples info logs while always forwarding warn and error', () => {
+    const server = new MCPServer(baseConfig);
+    const mcp = mocks.mcpInstances[0];
+    mcp.server.oninitialized?.();
+
+    const listener = mocks.logListener;
+    expect(listener).toBeTypeOf('function');
+
+    // 25 info lines → only the 1st, 11th, and 21st are forwarded (every 10th).
+    for (let i = 0; i < 25; i++) {
+      listener!('info', `info ${i}`, []);
+    }
+    expect(mocks.sendLoggingMessage).toHaveBeenCalledTimes(3);
+
+    mocks.sendLoggingMessage.mockClear();
+    for (let i = 0; i < 5; i++) {
+      listener!('warn', `warn ${i}`, []);
+    }
+    expect(mocks.sendLoggingMessage).toHaveBeenCalledTimes(5);
+
+    mocks.sendLoggingMessage.mockClear();
+    for (let i = 0; i < 5; i++) {
+      listener!('error', `error ${i}`, []);
+    }
+    expect(mocks.sendLoggingMessage).toHaveBeenCalledTimes(5);
+
     expect(server).toBeDefined();
   });
 
@@ -535,6 +662,83 @@ describe('MCPServer', () => {
     expect(mcp.connect).toHaveBeenCalledOnce();
   });
 
+  it('wires the artifact retention scheduler in start() and stops it on close()', async () => {
+    // Architecture hygiene (2026-08-18): the retention sweep must be started
+    // explicitly by the server lifecycle, not by a module-level side effect.
+    const stopRetention = vi.fn();
+    mocks.startArtifactRetentionScheduler.mockReturnValue(stopRetention);
+
+    const server = new MCPServer(baseConfig);
+    await server.start();
+
+    expect(mocks.startArtifactRetentionScheduler).toHaveBeenCalledOnce();
+
+    await server.close();
+    expect(stopRetention).toHaveBeenCalledOnce();
+  });
+
+  it('wires the loop lag sampler in start() and stops it on close()', async () => {
+    // r1-1: production event-loop lag metric must be started by the server
+    // lifecycle (like the retention sweep) and released on close.
+    const stopLoopLag = vi.fn();
+    const sampler = {
+      enable: vi.fn(() => stopLoopLag),
+      getSummary: vi.fn(() => ({ p50Ms: 0, p90Ms: 0, p99Ms: 0, samples: 0 })),
+    };
+    mocks.createLoopLagSampler.mockReturnValue(sampler);
+
+    const server = new MCPServer(baseConfig);
+    await server.start();
+
+    expect(mocks.createLoopLagSampler).toHaveBeenCalledOnce();
+    expect(sampler.enable).toHaveBeenCalledOnce();
+    expect(server.loopLagSampler).toBe(sampler);
+
+    await server.close();
+    expect(stopLoopLag).toHaveBeenCalledOnce();
+    expect(server.loopLagSampler).toBeNull();
+  });
+
+  it('wires the tool latency tracker in start() and disposes it on close()', async () => {
+    // r1-2: the per-tool latency tracker must be created by the server lifecycle,
+    // subscribed to 'tool:called' (side-channel collection), and released on close.
+    const tracker = {
+      record: vi.fn(),
+      getSummary: vi.fn(() => ({ top: [], trackedTools: 0 })),
+      dispose: vi.fn(),
+    };
+    mocks.createToolLatencyTracker.mockReturnValue(tracker);
+
+    const server = new MCPServer(baseConfig);
+    await server.start();
+
+    expect(mocks.createToolLatencyTracker).toHaveBeenCalledOnce();
+    expect(server.toolLatencyTracker).toBe(tracker);
+
+    // A 'tool:called' event with a durationMs must be recorded on the tracker.
+    await server.eventBus.emit('tool:called', {
+      toolName: 'tool_alpha',
+      domain: 'browser',
+      timestamp: new Date().toISOString(),
+      success: true,
+      durationMs: 42.5,
+    });
+    expect(tracker.record).toHaveBeenCalledWith('tool_alpha', 42.5);
+
+    // A 'tool:called' event without durationMs is skipped (no record call).
+    await server.eventBus.emit('tool:called', {
+      toolName: 'tool_beta',
+      domain: 'browser',
+      timestamp: new Date().toISOString(),
+      success: true,
+    });
+    expect(tracker.record).toHaveBeenCalledTimes(1);
+
+    await server.close();
+    expect(tracker.dispose).toHaveBeenCalledOnce();
+    expect(server.toolLatencyTracker).toBeNull();
+  });
+
   it('enterDegradedMode disables tracking only once', () => {
     const server = new MCPServer(baseConfig);
 
@@ -741,6 +945,7 @@ describe('MCPServer', () => {
       sessionId: null,
       timestamp: expect.any(String),
       success: true,
+      durationMs: expect.any(Number),
       args: { x: 7 },
       result: {
         success: true,
@@ -766,6 +971,7 @@ describe('MCPServer', () => {
       sessionId: null,
       timestamp: expect.any(String),
       success: true,
+      durationMs: expect.any(Number),
       args: {},
       result: {
         success: true,

@@ -161,7 +161,13 @@ export function buildHarLog(db: TraceDB, options: HarExportOptions = {}): HarLog
         ...(r.requestPostData !== null
           ? {
               postData: {
-                mimeType: r.mimeType ?? 'application/octet-stream',
+                // HAR 1.4: postData.mimeType is the *request* content type —
+                // r.mimeType is the response's, which differs for e.g.
+                // form-encoded requests returning JSON.
+                mimeType:
+                  requestHeaders.find((h) => h.name.toLowerCase() === 'content-type')?.value ??
+                  r.mimeType ??
+                  'application/octet-stream',
                 text: r.requestPostData,
               },
             }

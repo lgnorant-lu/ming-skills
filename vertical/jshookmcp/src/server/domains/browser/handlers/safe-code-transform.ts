@@ -68,6 +68,13 @@ export interface CodeTransformResult {
 export function transformCodeForCamoufox(options: CodeTransformOptions): CodeTransformResult {
   const { code } = options;
 
+  // Enforce the safety gate BEFORE constructing the wrapper: a dangerous
+  // payload must never even reach the eval-carrying transport string.
+  const validation = validateCodeSafety(code);
+  if (!validation.safe) {
+    throw new Error(validation.reason ?? 'Code contains potentially dangerous pattern');
+  }
+
   // Create a function that page.evaluate() will serialize and send to browser
   // The function body uses indirect eval to execute user code in browser's
   // global scope
@@ -104,12 +111,10 @@ function createBrowserEvalFunction(code: string): string {
   // Use JSON.stringify for robust escaping
   const escapedCode = JSON.stringify(code);
 
-  // Return a function expression as a string
-  // page.evaluate() will parse this in the browser
-  return `(function() {
-    "use strict";
-    return (0, eval)(${escapedCode});
-  })`;
+  // Concatenation, NOT a template literal: `${...}` inside user code would be
+  // interpolated by Node.js while the string is constructed (a Node-side RCE).
+  // With concatenation the escaped payload stays inert text.
+  return '(function() {\n    "use strict";\n    return (0, eval)(' + escapedCode + ');\n  })';
 }
 
 /**
@@ -121,8 +126,48 @@ function createBrowserEvalFunction(code: string): string {
  * @param code - User-provided code
  * @returns Validation result
  */
+/**
+ * Strip string literals and comments from code, replacing their content with
+ * nothing, so safety patterns match REAL tokens only — a `require("x")` inside
+ * a comment or string literal is inert, not an injection attempt.
+ */
+function stripLiteralsAndComments(code: string): string {
+  let out = '';
+  let i = 0;
+  const len = code.length;
+  while (i < len) {
+    const c = code[i];
+    if (c === '/' && code[i + 1] === '/') {
+      // Line comment
+      while (i < len && code[i] !== '\n') i++;
+    } else if (c === '/' && code[i + 1] === '*') {
+      // Block comment
+      i += 2;
+      while (i < len - 1 && !(code[i] === '*' && code[i + 1] === '/')) i++;
+      i += 2;
+    } else if (c === '"' || c === "'" || c === '`') {
+      // String / template literal (escapes skipped)
+      const quote = c;
+      i++;
+      while (i < len) {
+        if (code[i] === '\\') i++;
+        else if (code[i] === quote) {
+          i++;
+          break;
+        }
+        i++;
+      }
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
 export function validateCodeSafety(code: string): { safe: boolean; reason?: string } {
-  // Check for obvious Node.js API access attempts
+  // Check for obvious Node.js API access attempts — against the token stream
+  // only (comments and string literals stripped first).
   const dangerousPatterns = [
     /require\s*\(/,
     /process\s*\./,
@@ -136,8 +181,9 @@ export function validateCodeSafety(code: string): { safe: boolean; reason?: stri
     /__filename/,
   ];
 
+  const stripped = stripLiteralsAndComments(code);
   for (const pattern of dangerousPatterns) {
-    if (pattern.test(code)) {
+    if (pattern.test(stripped)) {
       return {
         safe: false,
         reason: `Code contains potentially dangerous pattern: ${pattern.source}`,

@@ -28,14 +28,20 @@ function isValidPointerChain(value: unknown): value is PointerChain {
 }
 
 export class PointerChainHandlers {
+  private readonly ptrEngine: PointerChainEngine;
+  private readonly processManager?: UnifiedProcessManager;
+  private readonly ctx?: MCPServerContext;
   private readonly auditTrail: MemoryAuditTrail | null;
 
   constructor(
-    private readonly ptrEngine: PointerChainEngine,
-    private readonly processManager?: UnifiedProcessManager,
-    private readonly ctx?: MCPServerContext,
+    ptrEngine: PointerChainEngine,
+    processManager?: UnifiedProcessManager,
+    ctx?: MCPServerContext,
     auditTrail?: MemoryAuditTrail | null,
   ) {
+    this.ptrEngine = ptrEngine;
+    this.processManager = processManager;
+    this.ctx = ctx;
     this.auditTrail = auditTrail ?? null;
   }
 
@@ -100,6 +106,51 @@ export class PointerChainHandlers {
         hint:
           result.totalFound > 0
             ? `Found ${result.totalFound} pointer chains. Static chains survive process restarts.`
+            : 'No pointer chains found. Try increasing maxDepth or maxOffset.',
+      };
+    });
+  }
+
+  async handlePointerChainAutoscan(args: Record<string, unknown>) {
+    return handleSafe(async () => {
+      const pid = await this.resolvePid(args.pid);
+      const targetAddress = validateHexAddress(args.targetAddress, 'targetAddress');
+      const maxDepth = argNumber(args, 'maxDepth');
+      if (maxDepth !== undefined && (maxDepth < 1 || maxDepth > PTR_CHAIN_MAX_DEPTH)) {
+        throw new Error(
+          `${TOOL_POINTER_CHAIN}: maxDepth must be 1–${PTR_CHAIN_MAX_DEPTH}, got ${maxDepth}`,
+        );
+      }
+      const maxOffset = argNumber(args, 'maxOffset');
+      if (
+        maxOffset !== undefined &&
+        (!Number.isFinite(maxOffset) || maxOffset <= 0 || maxOffset > PTR_CHAIN_MAX_OFFSET)
+      ) {
+        throw new Error(
+          `${TOOL_POINTER_CHAIN}: maxOffset must be a positive number ≤ ${PTR_CHAIN_MAX_OFFSET}, got ${maxOffset}`,
+        );
+      }
+      const start = Date.now();
+      const result = await this.ptrEngine.autoScan(pid, targetAddress, {
+        maxDepth,
+        maxOffset,
+        staticOnly: argBool(args, 'staticOnly', false),
+        modules: argStringArray(args, 'modules'),
+        maxResults: argNumber(args, 'maxResults'),
+      });
+      this.recordAudit({
+        operation: 'pointer_chain_autoscan',
+        pid,
+        address: targetAddress,
+        size: result.totalFound ?? 0,
+        result: 'success',
+        durationMs: Date.now() - start,
+      });
+      return {
+        ...result,
+        hint:
+          result.totalFound > 0
+            ? `Auto-discovered ${result.totalFound} pointer chains (shortest first). Static chains survive process restarts.`
             : 'No pointer chains found. Try increasing maxDepth or maxOffset.',
       };
     });

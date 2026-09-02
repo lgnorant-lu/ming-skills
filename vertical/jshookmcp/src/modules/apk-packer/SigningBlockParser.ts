@@ -576,11 +576,13 @@ export const PROOF_OF_ROTATION_ATTR_ID = BLOCK_ID_PROOF_OF_ROTATION_ATTR;
  * on overrun, which the caller turns into a `warnings[]` entry.
  */
 class LengthReader {
+  private readonly buf: Buffer;
+  private readonly label: string;
   private cursor = 0;
-  constructor(
-    private readonly buf: Buffer,
-    private readonly label: string,
-  ) {}
+  constructor(buf: Buffer, label: string) {
+    this.buf = buf;
+    this.label = label;
+  }
 
   position(): number {
     return this.cursor;

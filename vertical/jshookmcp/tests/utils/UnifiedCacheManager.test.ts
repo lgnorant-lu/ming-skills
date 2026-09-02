@@ -175,7 +175,10 @@ describe('UnifiedCacheManager', () => {
     expect(result.after).toBeLessThanOrEqual(mb(10));
   });
 
-  it('smartCleanup with empty namespaces array behaves like the unfiltered path', async () => {
+  it('smartCleanup with an empty namespaces array cleans nothing', async () => {
+    // An empty selection must not mean "everything" — cleanup is destructive,
+    // so the safe default for an empty list is to touch no cache. Only
+    // omitting namespaces entirely (undefined) means "all caches".
     const manager = UnifiedCacheManager.getInstance();
     const clearA = vi.fn(async () => undefined);
     const clearB = vi.fn(async () => undefined);
@@ -194,9 +197,8 @@ describe('UnifiedCacheManager', () => {
     });
 
     await manager.smartCleanup(mb(10), { namespaces: [] });
-    // No namespace restriction → both caches are eligible for cleanup.
-    expect(clearA).toHaveBeenCalled();
-    expect(clearB).toHaveBeenCalled();
+    expect(clearA).not.toHaveBeenCalled();
+    expect(clearB).not.toHaveBeenCalled();
   });
 
   it('smartCleanup with a namespace matching nothing is a no-op', async () => {

@@ -132,6 +132,7 @@ class FirefoxBase(BasePage):
         self._local_storage = None
         self._session_storage = None
         self._console = None
+        self._debugger = None
         self._interceptor = None
         self._capture = None
         self._network_manager = None
@@ -3566,6 +3567,19 @@ class FirefoxBase(BasePage):
         return self._console
 
     @property
+    def debugger(self) -> "Debugger":
+        """JS 断点调试器
+
+        需要先在 options 上调用 ``enable_debugger()``，再调用
+        ``page.debugger.start()`` 建立调试通道。
+        """
+        if self._debugger is None:
+            from .._units.debugger import Debugger
+
+            self._debugger = Debugger(self)
+        return self._debugger
+
+    @property
     def intercept(self) -> "Interceptor":
         """网络请求拦截器"""
         if self._interceptor is None:
@@ -5443,13 +5457,17 @@ class FirefoxBase(BasePage):
             - 快速调整页面可视区域
             - 与移动端模拟配合设置 viewport + DPR
         """
+        kwargs = {
+            "width": width,
+            "height": height,
+            "timeout": timeout,
+        }
+        if device_pixel_ratio is not None:
+            kwargs["device_pixel_ratio"] = device_pixel_ratio
         bidi_context.set_viewport(
             self._driver._browser_driver,
             self._context_id,
-            width=width,
-            height=height,
-            device_pixel_ratio=device_pixel_ratio,
-            timeout=timeout,
+            **kwargs,
         )
         return self
 
@@ -6021,12 +6039,12 @@ class FirefoxBase(BasePage):
         self.emulation.set_locale(locales)
         return self
 
-    def set_screen_orientation(self, orientation_type, angle=0):
+    def set_screen_orientation(self, orientation_type, angle=None):
         """设置屏幕方向 (FF144+)
 
         Args:
             orientation_type: 'portrait-primary'/'landscape-primary' 等
-            angle: 0/90/180/270
+            angle: 可选的 0/90/180/270，用于推断并校验 natural orientation。
 
         Returns:
             self
@@ -6112,6 +6130,7 @@ class FirefoxBase(BasePage):
             context=self._context_id,
             expression=expression,
             await_promise=await_promise,
+            result_ownership="root",
         )
         return ScriptResult(result)
 

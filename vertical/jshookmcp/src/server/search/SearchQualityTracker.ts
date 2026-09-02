@@ -64,9 +64,14 @@ export class SearchQualityTracker {
     for (let i = arr.length - 1; i >= 0; i--) {
       const record = arr[i]!;
       if (record.id === recordId) {
-        record.usedTool = toolName;
+        // Only record usage when the tool was actually returned by the search,
+        // matching associateLastSearch. Recording usedTool without a rank would
+        // count toward toolUsedRate while contributing nothing to
+        // avgUsedRank/MRR, silently diluting those metrics.
         const rank = record.returnedTools.indexOf(toolName);
-        record.usedToolRank = rank >= 0 ? rank + 1 : undefined;
+        if (rank < 0) return;
+        record.usedTool = toolName;
+        record.usedToolRank = rank + 1;
         return;
       }
     }
@@ -108,7 +113,11 @@ export class SearchQualityTracker {
     const latencies = arr.map((r) => r.latencyMs).toSorted((a, b) => a - b);
     const totalLatency = latencies.reduce((sum, v) => sum + v, 0);
 
-    const usedRecords = arr.filter((r) => r.usedTool !== undefined);
+    // Defensive: a record must carry both fields to count as used. A record
+    // with usedTool set but no usedToolRank (e.g. from older callers) would
+    // otherwise inflate toolUsedRate while contributing nothing to the rank
+    // metrics, diluting avgUsedRank and MRR.
+    const usedRecords = arr.filter((r) => r.usedTool !== undefined && r.usedToolRank !== undefined);
     const toolUsedRate = usedRecords.length / totalQueries;
 
     let avgUsedRank = 0;

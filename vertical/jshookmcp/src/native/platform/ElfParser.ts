@@ -117,9 +117,11 @@ export function parseElfSections(filePath: string): ElfSection[] {
   const shStrNdx = data.readUInt16LE(0x3e);
   if (shNum === 0 || shEntSize < 64) return [];
 
-  // String table header
+  // String table header — only the sh_offset field (8 bytes at +0x18) is read,
+  // so the check must cover through byte 0x20; a truncated header would
+  // otherwise throw ERR_BUFFER_OUT_OF_BOUNDS from readBigUInt64LE.
   const strHdrOff = shOff + shStrNdx * shEntSize;
-  if (strHdrOff + 24 > data.length) return [];
+  if (strHdrOff + 32 > data.length) return [];
   const strOff = Number(data.readBigUInt64LE(strHdrOff + 0x18));
 
   const sections: ElfSection[] = [];

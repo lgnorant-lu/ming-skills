@@ -4,6 +4,8 @@ type Listener = (payload: unknown) => void;
 
 const workerState = vi.hoisted(() => {
   class WorkerMock {
+    public readonly script: string;
+    public readonly options: Record<string, unknown>;
     public listeners = new Map<string, Listener[]>();
     public postMessage = vi.fn();
     public terminate = vi.fn(async () => 0);
@@ -16,10 +18,10 @@ const workerState = vi.hoisted(() => {
       return this;
     });
 
-    constructor(
-      public readonly script: string,
-      public readonly options: Record<string, unknown>,
-    ) {}
+    constructor(script: string, options: Record<string, unknown>) {
+      this.script = script;
+      this.options = options;
+    }
 
     on(event: string, callback: Listener) {
       const callbacks = this.listeners.get(event) ?? [];

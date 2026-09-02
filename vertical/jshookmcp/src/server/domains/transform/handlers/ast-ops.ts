@@ -488,16 +488,48 @@ function extractCaseStatements(
     const key = literalKey(caseNode.test);
     if (!key) continue;
     const statements = caseNode.consequent
-      .filter(
-        (statement) =>
-          !t.isContinueStatement(statement) &&
-          !t.isBreakStatement(statement) &&
-          !isCursorMutation(statement, cursorName),
-      )
+      .filter((statement) => caseStatementSurvives(statement, cursorName))
       .map((statement) => t.cloneNode(statement, true));
     if (statements.length > 0) cases.set(key, statements);
   }
   return cases;
+}
+
+/** True if a case-consequent statement is kept by extractCaseStatements
+ *  (continue/break and cursor mutations are removed from the rebuilt output). */
+function caseStatementSurvives(statement: t.Statement, cursorName: string | null): boolean {
+  return (
+    !t.isContinueStatement(statement) &&
+    !t.isBreakStatement(statement) &&
+    !isCursorMutation(statement, cursorName)
+  );
+}
+
+/** True if the dispatcher/cursor is referenced inside a case statement that
+ *  survives extraction (outside the switch discriminant). After flattening
+ *  their declarations are removed, so such a dangling reference (e.g. the
+ *  `order[i] = next` goto-style reassignment in case bodies) would throw
+ *  ReferenceError at runtime. */
+function loopBodyReferencesControlVars(
+  path: NodePath,
+  switchNode: t.SwitchStatement,
+  cursorName: string | null,
+  names: Array<string | null>,
+): boolean {
+  for (const name of names) {
+    if (!name) continue;
+    const binding = path.scope.getBinding(name);
+    if (!binding) continue;
+    for (const ref of binding.referencePaths) {
+      if (ref.find((p) => p.node === switchNode.discriminant)) continue;
+      if (!ref.find((p) => p.node === path.node)) continue;
+      const statement = ref.find((p) => t.isSwitchCase(p.parentPath?.node));
+      if (statement && caseStatementSurvives(statement.node as t.Statement, cursorName)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function removeBindingDeclaration(path: NodePath, name: string): void {
@@ -527,6 +559,16 @@ function flattenLoop(
   if (!dispatch) return;
   const order = dispatcherOrder(path, dispatch.dispatcher, switchNode);
   const cases = extractCaseStatements(switchNode, dispatch.cursor);
+  // Dispatcher/cursor declarations are removed below; if case bodies still
+  // reference them (e.g. `order[i] = next` goto-style reassignments), the
+  // linearized output would throw ReferenceError. Decline to flatten instead.
+  if (
+    loopBodyReferencesControlVars(path, switchNode, dispatch.cursor, [
+      dispatch.dispatcher,
+      dispatch.cursor,
+    ])
+  )
+    return;
   const rebuilt = order.flatMap((key) => cases.get(key) ?? []);
   if (rebuilt.length === 0) return;
   markChanged();

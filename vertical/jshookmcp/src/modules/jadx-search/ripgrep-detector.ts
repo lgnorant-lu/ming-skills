@@ -72,7 +72,16 @@ export async function detectRipgrep(timeoutMs = 3000): Promise<RipgrepProbeResul
         const firstLine = stdout.trim().split(/\r?\n/)[0];
         version = firstLine ? firstLine.substring(0, 100) : undefined;
       } catch {
-        // Version check failure is non-fatal — fall through to available:true
+        // `which`/`where` succeeded but the resolved path is unusable
+        // (broken symlink, non-executable, or a `where` info line) — fail
+        // closed so callers fall back to the Node engine instead of
+        // spawning a dead `rg` path later.
+        const result: RipgrepProbeResult = {
+          available: false,
+          reason: `'rg --version' failed for resolved path ${resolvedPath}`,
+        };
+        cached = result;
+        return result;
       }
 
       const result: RipgrepProbeResult = version

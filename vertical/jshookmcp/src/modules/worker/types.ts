@@ -1,8 +1,10 @@
-export enum TaskType {
-  FfiCall = 'ffi-call',
-  ParseSnapshot = 'parse-snapshot',
-  Generic = 'generic',
-}
+export const TaskType = {
+  FfiCall: 'ffi-call',
+  ParseSnapshot: 'parse-snapshot',
+  Generic: 'generic',
+} as const;
+
+export type TaskType = (typeof TaskType)[keyof typeof TaskType];
 
 export interface WorkerTask {
   id: string;

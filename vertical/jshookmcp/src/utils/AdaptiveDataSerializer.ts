@@ -39,7 +39,7 @@ export class AdaptiveDataSerializer {
     threshold: DETAILED_DATA_SMART_THRESHOLD_BYTES,
   };
 
-  serialize(data: unknown, context: SerializationContext = {}): string {
+  async serialize(data: unknown, context: SerializationContext = {}): Promise<string> {
     const ctx = { ...this.DEFAULT_CONTEXT, ...context };
 
     const type = this.detectType(data);
@@ -47,24 +47,24 @@ export class AdaptiveDataSerializer {
     switch (type) {
       case 'large-array':
         if (Array.isArray(data)) {
-          return this.serializeLargeArray(data, ctx);
+          return await this.serializeLargeArray(data, ctx);
         }
         /* v8 ignore next */
-        return this.serializeDefault(data, ctx);
+        return await this.serializeDefault(data, ctx);
       case 'deep-object':
         return this.serializeDeepObject(data, ctx);
       case 'code-string':
         if (typeof data === 'string') {
-          return this.serializeCodeString(data, ctx);
+          return await this.serializeCodeString(data, ctx);
         }
         /* v8 ignore next */
-        return this.serializeDefault(data, ctx);
+        return await this.serializeDefault(data, ctx);
       case 'network-requests':
         if (this.isNetworkRequestArray(data)) {
-          return this.serializeNetworkRequests(data, ctx);
+          return await this.serializeNetworkRequests(data, ctx);
         }
         /* v8 ignore next */
-        return this.serializeDefault(data, ctx);
+        return await this.serializeDefault(data, ctx);
       case 'dom-structure':
         return this.serializeDOMStructure(data, ctx);
       case 'function-tree':
@@ -72,7 +72,7 @@ export class AdaptiveDataSerializer {
       case 'primitive':
         return JSON.stringify(data);
       default:
-        return this.serializeDefault(data, ctx);
+        return await this.serializeDefault(data, ctx);
     }
   }
 
@@ -114,21 +114,24 @@ export class AdaptiveDataSerializer {
     return 'unknown';
   }
 
-  private serializeLargeArray(arr: unknown[], ctx: Required<SerializationContext>): string {
+  private async serializeLargeArray(
+    arr: unknown[],
+    ctx: Required<SerializationContext>,
+  ): Promise<string> {
     if (arr.length <= ctx.maxArrayLength) {
       // Inline-only path: no store() backup, so preserve oversized fields to disk.
-      return JSON.stringify(sanitizeForCache(arr));
+      return JSON.stringify(await sanitizeForCache(arr));
     }
 
     const sample = [...arr.slice(0, 5), ...arr.slice(-5)];
 
-    const detailId = DetailedDataManager.getInstance().store(arr);
+    const detailId = await DetailedDataManager.getInstance().store(arr);
 
     return JSON.stringify({
       type: 'large-array',
       length: arr.length,
       // Preview only — the full array is in the cache (sanitized), so no disk write here.
-      sample: sanitizeForCache(sample, { writeFile: false }),
+      sample: await sanitizeForCache(sample, { writeFile: false }),
       detailId,
       hint: `Use get_detailed_data("${detailId}") to get full array`,
     });
@@ -139,7 +142,10 @@ export class AdaptiveDataSerializer {
     return JSON.stringify(limited);
   }
 
-  private serializeCodeString(code: unknown, _ctx: Required<SerializationContext>): string {
+  private async serializeCodeString(
+    code: unknown,
+    _ctx: Required<SerializationContext>,
+  ): Promise<string> {
     if (typeof code !== 'string') {
       return JSON.stringify(code);
     }
@@ -151,7 +157,7 @@ export class AdaptiveDataSerializer {
     }
 
     const preview = lines.slice(0, 50).join('\n');
-    const detailId = DetailedDataManager.getInstance().store(code);
+    const detailId = await DetailedDataManager.getInstance().store(code);
 
     return JSON.stringify({
       type: 'code-string',
@@ -162,14 +168,17 @@ export class AdaptiveDataSerializer {
     });
   }
 
-  private serializeNetworkRequests(requests: unknown, ctx: Required<SerializationContext>): string {
+  private async serializeNetworkRequests(
+    requests: unknown,
+    ctx: Required<SerializationContext>,
+  ): Promise<string> {
     if (!Array.isArray(requests)) {
       return JSON.stringify(requests);
     }
 
     if (requests.length <= ctx.maxArrayLength) {
       // Inline-only path: no store() backup, so preserve oversized fields to disk.
-      return JSON.stringify(sanitizeForCache(requests));
+      return JSON.stringify(await sanitizeForCache(requests));
     }
 
     const summary = requests.map((req) => {
@@ -183,7 +192,7 @@ export class AdaptiveDataSerializer {
       };
     });
 
-    const detailId = DetailedDataManager.getInstance().store(requests);
+    const detailId = await DetailedDataManager.getInstance().store(requests);
 
     return JSON.stringify({
       type: 'network-requests',
@@ -191,7 +200,7 @@ export class AdaptiveDataSerializer {
       // Preview only — full requests are in the cache (sanitized). A data: URI in a
       // url field would otherwise leak here verbatim (issue #62), so sanitize the
       // summary too; no disk write since the canonical copy is already stored.
-      summary: sanitizeForCache(summary.slice(0, ctx.maxArrayLength), { writeFile: false }),
+      summary: await sanitizeForCache(summary.slice(0, ctx.maxArrayLength), { writeFile: false }),
       detailId,
       hint: `Use get_detailed_data("${detailId}") to get full requests`,
     });
@@ -207,14 +216,17 @@ export class AdaptiveDataSerializer {
     return JSON.stringify(simplified);
   }
 
-  private serializeDefault(data: unknown, ctx: Required<SerializationContext>): string {
+  private async serializeDefault(
+    data: unknown,
+    ctx: Required<SerializationContext>,
+  ): Promise<string> {
     const jsonStr = JSON.stringify(data);
 
     if (jsonStr.length <= ctx.threshold) {
       return jsonStr;
     }
 
-    const detailId = DetailedDataManager.getInstance().store(data);
+    const detailId = await DetailedDataManager.getInstance().store(data);
 
     return JSON.stringify({
       type: 'large-data',

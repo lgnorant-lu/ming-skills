@@ -7,6 +7,7 @@
 
 import { logger } from '@utils/logger';
 import { argNumber, argStringArray } from '@server/domains/shared/parse-args';
+import { DEFAULT_DEBUG_PORT } from '@src/constants/server';
 import type { MemoryManager } from '@server/domains/shared/modules/native';
 import type { AuditEntry, MemoryOperationHost, ProcessHandlerDeps } from './shared-types';
 import {
@@ -431,7 +432,7 @@ export class ProcessManagementHandlers implements MemoryOperationHost {
   async handleProcessLaunchDebug(args: Record<string, unknown>) {
     try {
       const executablePath = requireString(args.executablePath, 'executablePath');
-      const debugPort = argNumber(args, 'debugPort', 9222);
+      const debugPort = argNumber(args, 'debugPort', DEFAULT_DEBUG_PORT);
       const argsList = argStringArray(args, 'args');
 
       const process = await this.processManager.launchWithDebug(

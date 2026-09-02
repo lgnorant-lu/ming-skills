@@ -1,10 +1,15 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import { tool } from '@server/registry/tool-builder';
 
 export const sharedStateBoardTools: Tool[] = [
   tool('state_board', (t) =>
     t
-      .desc('CRUD operations on the cross-tool shared state board.')
+      .desc(
+        'CRUD operations on the cross-tool shared state board. TTL contract for set: ' +
+          'omitting ttlSeconds defaults to 24h expiry; ttlSeconds: 0 means explicit permanent ' +
+          '(no expiry, bounded only by the LRU cap); any other value is honored verbatim. ' +
+          'NOTE: before this change, omitting ttlSeconds meant permanent — this is a behavior change.',
+      )
       .enum('action', ['set', 'get', 'delete', 'list', 'history', 'clear'], 'Operation to perform')
       .string('key', 'Key name (required for set/get/delete/history)')
       .prop('value', {
@@ -12,7 +17,7 @@ export const sharedStateBoardTools: Tool[] = [
         description: 'Value to store',
       })
       .string('namespace', 'Namespace for key isolation')
-      .number('ttlSeconds', 'TTL in seconds')
+      .number('ttlSeconds', 'TTL in seconds (0 = permanent, omit = 24h default)')
       .boolean('includeValues', 'Include current values in list results', {
         default: false,
       })

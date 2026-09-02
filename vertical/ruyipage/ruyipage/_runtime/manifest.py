@@ -1,21 +1,24 @@
 # -*- coding: utf-8 -*-
 """Static Firefox runtime manifest for ruyiPage managed Firefox."""
 
-RELEASE_TAG = "v1.2.58"
-FIREFOX_VERSION = "155.0a1"
-RELEASE_BASE_URL = "https://github.com/LoseNine/ruyipage/releases/download/{}".format(RELEASE_TAG)
+RELEASE_TAG = "v1.2.66"
+FIREFOX_VERSION = "155.0"
+RELEASE_URL_TEMPLATE = "https://github.com/LoseNine/ruyipage/releases/download/{}"
+RELEASE_BASE_URL = RELEASE_URL_TEMPLATE.format(RELEASE_TAG)
 
 RUNTIME_NAME = "firefox"
 
+# 每个平台各自记录 version / release：两个内核构建不一定同时完成，落后的平台
+# 可以继续指向仍然可用的旧 release，而不是指向一个尚未上传资源的 tag 直接 404。
 RUNTIMES = {
     "win64": {
         "name": RUNTIME_NAME,
         "version": FIREFOX_VERSION,
         "release": RELEASE_TAG,
-        "asset": "firefox-155.0a1.en-US.win64-20260803.zip",
+        "asset": "firefox-155.0.en-US.win64-20260829.zip",
         "archive_type": "zip",
         "executable": "firefox/firefox.exe",
-        "install_subdir": "firefox-155.0a1-v1.2.58-win64",
+        "install_subdir": "firefox-155.0-v1.2.66-win64",
         "max_files": 20000,
         "max_total_size": 900 * 1024 * 1024,
     },
@@ -23,10 +26,10 @@ RUNTIMES = {
         "name": RUNTIME_NAME,
         "version": FIREFOX_VERSION,
         "release": RELEASE_TAG,
-        "asset": "firefox-155.0a1.en-US.linux-x86_64.tar.xz",
+        "asset": "firefox-155.0.en-US.linux-x86_64.tar.xz",
         "archive_type": "tar.xz",
         "executable": "firefox/firefox",
-        "install_subdir": "firefox-155.0a1-v1.2.58-linux-x86_64",
+        "install_subdir": "firefox-155.0-v1.2.66-linux-x86_64",
         "max_files": 20000,
         "max_total_size": 900 * 1024 * 1024,
     },
@@ -35,5 +38,8 @@ RUNTIMES = {
 
 def runtime_url(info, base_url=None):
     """Return the download URL for a runtime info entry."""
-    root = (base_url or RELEASE_BASE_URL).rstrip("/")
-    return "{}/{}".format(root, info["asset"])
+    if base_url:
+        root = base_url.rstrip("/")
+    else:
+        root = RELEASE_URL_TEMPLATE.format(info.get("release") or RELEASE_TAG)
+    return "{}/{}".format(root.rstrip("/"), info["asset"])

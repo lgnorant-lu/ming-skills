@@ -170,8 +170,10 @@ export class WorkflowHandlers {
   }
 
   /**
-   * Evaluate a predicate against step results (from args, or from the last successful
-   * workflow run) and execute the appropriate tool branch.
+   * Evaluate a predicate against step results from args only and execute the
+   * appropriate tool branch. Prior-run resolution was removed because the bounded
+   * WorkflowRunStore retains only step-result KEYS, not raw step outputs, so a
+   * previous run's values cannot back value-based predicates here.
    */
   async handleWorkflowConditionalStep(args: Record<string, unknown>): Promise<ToolResponse> {
     const predicateId = getOptionalString(args.predicateId);
@@ -202,7 +204,10 @@ export class WorkflowHandlers {
         ? (whenFalse.args as Record<string, unknown>)
         : {};
 
-    // Resolve stepResults: from args, or from last workflow success
+    // Resolve stepResults: from args only. Prior-run resolution was removed
+    // because the bounded WorkflowRunStore retains only step-result KEYS
+    // (see WorkflowRunStore.getLastSuccess), not the raw step outputs, so a
+    // previous run's values cannot back value-based predicates here.
     let stepResults: Record<string, unknown> | undefined =
       typeof args.stepResults === 'object' &&
       args.stepResults !== null &&
@@ -211,17 +216,7 @@ export class WorkflowHandlers {
         : undefined;
 
     if (!stepResults) {
-      const workflowId = getOptionalString(args.workflowId);
-      if (workflowId) {
-        const store = getWorkflowRunStore();
-        const lastSuccess = store.getLastSuccess(workflowId);
-        if (lastSuccess?.stepResults) {
-          stepResults = lastSuccess.stepResults;
-        }
-      }
-      if (!stepResults) {
-        stepResults = {};
-      }
+      stepResults = {};
     }
 
     // Build a minimal execution context for evaluatePredicate

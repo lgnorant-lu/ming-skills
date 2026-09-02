@@ -1,3 +1,13 @@
+/** Response body preview size (UTF-16 code units) kept in-page by the fetch interceptor (b2-1).
+ *  The full body is fetched on demand via the host-side Network.getResponseBody channel. */
+const RESPONSE_PREVIEW_LIMIT = 2_048;
+
+/** Throttle interval (ms) for the batched `__capturedAPIs` localStorage write (b2-2). */
+const CAPTURED_API_PERSIST_INTERVAL_MS = 1_000;
+
+/** Maximum number of summaries persisted to the `__capturedAPIs` localStorage entry. */
+const CAPTURED_API_MAX_ENTRIES = 500;
+
 export function buildXHRInterceptorCode(maxRecords: number): string {
   return `
       (function() {
@@ -93,6 +103,28 @@ export function buildFetchInterceptorCode(maxRecords: number): string {
         }
         const fetchRequests = window.__fetchRequests;
 
+        // BEHAVIOR CHANGE (b2-2): throttle __capturedAPIs persistence. Summaries are
+        // buffered in-page and flushed in a single batch per interval instead of
+        // synchronously rewriting localStorage (JSON.parse + stringify + setItem)
+        // on every completed request.
+        const capturedApiBuffer = [];
+        let capturedApiFlushTimer = null;
+        const flushCapturedApis = function() {
+          capturedApiFlushTimer = null;
+          if (capturedApiBuffer.length === 0) return;
+          try {
+            const pending = capturedApiBuffer.splice(0, capturedApiBuffer.length);
+            const prev = JSON.parse(localStorage.getItem('__capturedAPIs') || '[]');
+            const merged = prev.concat(pending);
+            const trimmed = merged.length > ${CAPTURED_API_MAX_ENTRIES}
+              ? merged.slice(merged.length - ${CAPTURED_API_MAX_ENTRIES})
+              : merged;
+            localStorage.setItem('__capturedAPIs', JSON.stringify(trimmed));
+          } catch (e) {
+            // best-effort persistence only; ignore quota or serialization failures
+          }
+        };
+
         window.fetch = function(url, options = {}) {
           const requestInfo = {
             url: typeof url === 'string' ? url : url.url,
@@ -100,7 +132,10 @@ export function buildFetchInterceptorCode(maxRecords: number): string {
             headers: options.headers || {},
             body: options.body,
             timestamp: Date.now(),
-            response: null,
+            // BEHAVIOR CHANGE (b2-1): only a truncated preview of the response body
+            // is kept in-page. The full body remains available on demand through the
+            // host-side Network.getResponseBody channel.
+            responsePreview: null,
             status: 0,
           };
 
@@ -111,9 +146,15 @@ export function buildFetchInterceptorCode(maxRecords: number): string {
 
             const clonedResponse = response.clone();
             try {
-              requestInfo.response = await clonedResponse.text();
+              const fullText = await clonedResponse.text();
+              const fullLength = fullText.length;
+              requestInfo.responseLength = fullLength;
+              requestInfo.responseTruncated = fullLength > ${RESPONSE_PREVIEW_LIMIT};
+              requestInfo.responsePreview = requestInfo.responseTruncated
+                ? fullText.slice(0, ${RESPONSE_PREVIEW_LIMIT})
+                : fullText;
             } catch (e) {
-              requestInfo.response = '[Unable to read response]';
+              requestInfo.responsePreview = '[Unable to read response]';
             }
 
             fetchRequests.push(requestInfo);
@@ -122,12 +163,11 @@ export function buildFetchInterceptorCode(maxRecords: number): string {
             }
             // Auto-persist compact summary to localStorage so data survives context compression
             try {
-              const summary = { url: requestInfo.url, method: requestInfo.method, status: requestInfo.status, ts: requestInfo.timestamp };
-              const prev = JSON.parse(localStorage.getItem('__capturedAPIs') || '[]');
-              prev.push(summary);
-              if (prev.length > 500) prev.splice(0, prev.length - 500);
-              localStorage.setItem('__capturedAPIs', JSON.stringify(prev));
-            } catch(e) {
+              capturedApiBuffer.push({ url: requestInfo.url, method: requestInfo.method, status: requestInfo.status, ts: requestInfo.timestamp });
+              if (capturedApiFlushTimer === null) {
+                capturedApiFlushTimer = setTimeout(flushCapturedApis, ${CAPTURED_API_PERSIST_INTERVAL_MS});
+              }
+            } catch (e) {
               // best-effort persistence only; ignore quota or serialization failures
             }
             console.log('[FetchInterceptor] Fetch completed:', requestInfo.url, 'Status:', response.status);

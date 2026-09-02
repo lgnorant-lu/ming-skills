@@ -67,6 +67,81 @@ describe('PointerChainHandlers', () => {
     });
   });
 
+  describe('handlePointerChainAutoscan', () => {
+    it('returns success response on happy path', async () => {
+      mockptrEngine.autoScan = vi.fn().mockReturnValue({
+        totalFound: 3,
+        chains: [
+          { id: 'c1', depth: 1, isStatic: true, links: [] },
+          { id: 'c2', depth: 2, isStatic: false, links: [] },
+        ],
+      });
+
+      const response = await handlers.handlePointerChainAutoscan(dummyArgs);
+      const parsed = JSON.parse((response.content[0] as any).text);
+      expect(parsed.success).toBe(true);
+      expect(parsed.totalFound).toBe(3);
+      expect(mockptrEngine.autoScan).toHaveBeenCalledWith(
+        1234,
+        '0x7FF612340000',
+        expect.objectContaining({
+          maxDepth: 4,
+          maxOffset: 4096,
+          staticOnly: false,
+          modules: ['kernel32.dll'],
+        }),
+      );
+    });
+
+    it('returns error response on failure', async () => {
+      mockptrEngine.autoScan = vi.fn().mockImplementation(() => {
+        throw new Error('Native error');
+      });
+
+      const response = await handlers.handlePointerChainAutoscan(dummyArgs);
+      const parsed = JSON.parse((response.content[0] as any).text);
+      expect(parsed.success).toBe(false);
+      expect(parsed.error).toContain('Native error');
+    });
+
+    it('rejects invalid targetAddress', async () => {
+      mockptrEngine.autoScan = vi.fn();
+      const response = await handlers.handlePointerChainAutoscan({
+        pid: 1234,
+        targetAddress: 'not-hex',
+      });
+      const parsed = JSON.parse((response.content[0] as any).text);
+      expect(parsed.success).toBe(false);
+      expect(parsed.error).toContain('targetAddress must be a hex address');
+      expect(mockptrEngine.autoScan).not.toHaveBeenCalled();
+    });
+
+    it('returns hint about static chains when found', async () => {
+      mockptrEngine.autoScan = vi.fn().mockReturnValue({
+        totalFound: 1,
+        chains: [{ id: 'c1', depth: 1, isStatic: true, links: [] }],
+      });
+
+      const response = await handlers.handlePointerChainAutoscan(dummyArgs);
+      const parsed = JSON.parse((response.content[0] as any).text);
+      expect(parsed.success).toBe(true);
+      expect(parsed.hint).toContain('Auto-discovered');
+      expect(parsed.hint).toContain('shortest first');
+    });
+
+    it('enforces maxDepth bounds', async () => {
+      mockptrEngine.autoScan = vi.fn();
+      const response = await handlers.handlePointerChainAutoscan({
+        pid: 1234,
+        targetAddress: '0x7FF612340000',
+        maxDepth: 10,
+      });
+      const parsed = JSON.parse((response.content[0] as any).text);
+      expect(parsed.success).toBe(false);
+      expect(parsed.error).toContain('maxDepth must be 1–6');
+    });
+  });
+
   describe('handlePointerChainValidate', () => {
     it('returns success response on happy path', async () => {
       mockptrEngine.validateChains = vi.fn().mockReturnValue([{ isValid: true }]);

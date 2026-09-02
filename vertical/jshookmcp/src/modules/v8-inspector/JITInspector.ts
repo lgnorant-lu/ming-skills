@@ -66,11 +66,13 @@ function mapOptimizationTier(status: number | null): { optimized: boolean; tier:
 }
 
 export class JITInspector {
+  private readonly getPage?: () => Promise<unknown>;
   private readonly bytecodeExtractor: BytecodeExtractor;
   private readonly versionDetector: VersionDetector;
   private optimizedFunctionsCache: JITInfo[] = [];
 
-  constructor(private readonly getPage?: () => Promise<unknown>) {
+  constructor(getPage?: () => Promise<unknown>) {
+    this.getPage = getPage;
     this.bytecodeExtractor = new BytecodeExtractor(getPage);
     this.versionDetector = new VersionDetector(getPage);
   }

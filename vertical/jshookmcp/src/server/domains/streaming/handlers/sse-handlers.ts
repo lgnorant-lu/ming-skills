@@ -10,13 +10,7 @@ import type {
   SseEnableResult,
   SseEventRecord,
 } from './shared';
-import {
-  asJson,
-  parseBooleanArg,
-  parseNumberArg,
-  parseOptionalStringArg,
-  compileRegex,
-} from './shared';
+import { parseBooleanArg, parseNumberArg, parseOptionalStringArg, compileRegex } from './shared';
 import {
   evaluateWithTimeout,
   evaluateOnNewDocumentWithTimeout,
@@ -28,6 +22,17 @@ import {
   STREAMING_QUERY_LIMIT_MAX,
   WS_PAYLOAD_PREVIEW_LIMIT,
 } from '@src/constants/streaming';
+import { asJson } from './shared';
+
+/**
+ * Per-event `data` cap kept in-page (b2-8). Oversized payloads are truncated and
+ * flagged with `dataTruncated`, so a single multi-MB event cannot dominate the
+ * buffer. Measured in UTF-16 code units (proxy for bytes).
+ */
+const SSE_DATA_MAX_BYTES = 64 * 1024;
+
+/** Batch eviction chunk size (b2-7): splice overflow in chunks instead of O(n) shift per event. */
+const SSE_EVICT_BATCH_SIZE = 512;
 
 type InternalSseEvent = {
   sourceUrl: string;
@@ -35,6 +40,7 @@ type InternalSseEvent = {
   dataPreview: string;
   data?: string;
   dataLength: number;
+  dataTruncated?: boolean;
   lastEventId: string | null;
   timestamp: number;
 };
@@ -66,6 +72,10 @@ function sseInjectionFn(config: {
   urlFilterRaw?: string;
   /** Data preview truncation limit; canonical value WS_PAYLOAD_PREVIEW_LIMIT. */
   previewLimit?: number;
+  /** Per-event data cap; oversized payloads are truncated and flagged (b2-8). */
+  dataMaxBytes?: number;
+  /** Batch eviction chunk size (b2-7). */
+  evictBatchSize?: number;
 }) {
   const globalWindow = window as Window &
     typeof globalThis & {
@@ -77,6 +87,10 @@ function sseInjectionFn(config: {
   // constants module (WS_PAYLOAD_PREVIEW_LIMIT); the fallback keeps the
   // serialized script self-contained.
   const previewLimit = config.previewLimit ?? 200;
+  // Per-event data cap (b2-8); oversized payloads are truncated and flagged.
+  const dataMaxBytes = config.dataMaxBytes ?? 64 * 1024;
+  // Batch eviction chunk size (b2-7); splices overflow in chunks instead of per-event shift.
+  const evictBatchSize = config.evictBatchSize ?? 512;
 
   if (!globalWindow.__jshookSSEMonitor) {
     globalWindow.__jshookSSEMonitor = {
@@ -131,17 +145,26 @@ function sseInjectionFn(config: {
     const dataString = toDataString(rawData);
     const preview =
       dataString.length > previewLimit ? `${dataString.slice(0, previewLimit)}…` : dataString;
+    // BEHAVIOR CHANGE (b2-8): cap the retained `data` payload. Oversized events are
+    // truncated and flagged instead of keeping the full data in-page.
+    const dataTruncated = dataString.length > dataMaxBytes;
     const record: InternalSseEvent = {
       sourceUrl,
       eventType,
       dataPreview: preview,
-      data: dataString,
+      data: dataTruncated ? dataString.slice(0, dataMaxBytes) : dataString,
       dataLength: dataString.length,
+      dataTruncated,
       lastEventId,
       timestamp: Date.now(),
     };
     state.events.push(record);
-    while (state.events.length > state.maxEvents) state.events.shift();
+    // BEHAVIOR CHANGE (b2-7): evict in batches via splice instead of O(n) shift per event.
+    // The buffer may temporarily exceed maxEvents by up to (evictBatchSize - 1) entries.
+    const overflow = state.events.length - state.maxEvents;
+    if (overflow >= evictBatchSize) {
+      state.events.splice(0, overflow);
+    }
     const source =
       state.sources[sourceUrl] ??
       ({ url: sourceUrl, status: 'connecting' as const, eventCount: 0 } as InternalSseSource);
@@ -265,7 +288,10 @@ function sseInjectionFn(config: {
 }
 
 export class SseHandlers {
-  constructor(private s: StreamingSharedState) {}
+  private s: StreamingSharedState;
+  constructor(s: StreamingSharedState) {
+    this.s = s;
+  }
 
   private async enableSseInterceptor(
     maxEvents: number,
@@ -278,6 +304,8 @@ export class SseHandlers {
       maxEvents,
       urlFilterRaw,
       previewLimit: WS_PAYLOAD_PREVIEW_LIMIT,
+      dataMaxBytes: SSE_DATA_MAX_BYTES,
+      evictBatchSize: SSE_EVICT_BATCH_SIZE,
     };
     if (options?.persistent) {
       await evaluateOnNewDocumentWithTimeout(page, sseInjectionFn, injectionConfig);
@@ -307,7 +335,10 @@ export class SseHandlers {
     if (urlFilterRaw) {
       const compiled = compileRegex(urlFilterRaw);
       if (compiled.error)
-        return asJson({ success: false, error: `Invalid urlFilter regex: ${compiled.error}` });
+        return asJson({
+          success: false,
+          error: `Invalid urlFilter regex: ${compiled.error}`,
+        });
     }
 
     const persistent = args.persistent === true;

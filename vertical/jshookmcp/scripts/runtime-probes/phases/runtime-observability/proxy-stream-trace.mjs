@@ -153,10 +153,5 @@ export async function runProxyAndTraceSetupPhase(ctx) {
     },
     15000,
   );
-  report.trace.heapSnapshotBefore = await callTool(
-    client,
-    'performance_take_heap_snapshot',
-    {},
-    90000,
-  );
+  report.trace.heapSnapshotBefore = await callTool(client, 'v8_heap_snapshot_capture', {}, 90000);
 }

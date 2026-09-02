@@ -1,4 +1,4 @@
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/server';
 import {
   buildToolGroups,
   buildToolDomainMap,
@@ -7,6 +7,7 @@ import {
   getAllDomains,
   getAllRegistrations,
   getRegistrationByName,
+  onRegistryInvalidate,
 } from '@server/registry/index';
 import type { ToolProfileId } from '@server/registry/contracts';
 
@@ -41,6 +42,11 @@ export function clearToolGroupsCache(): void {
   profileDomains = null;
   allToolsCache = null;
 }
+
+// Subscribe to registry-level invalidation (new domain loaded on demand) so
+// derived caches here are cleared without ToolCatalog importing the registry
+// module that itself imports from ToolCatalog (that would be a cycle).
+onRegistryInvalidate(clearToolGroupsCache);
 
 function getToolDomainByName(): ReadonlyMap<string, string> {
   if (!toolDomainByName) toolDomainByName = buildToolDomainMap();

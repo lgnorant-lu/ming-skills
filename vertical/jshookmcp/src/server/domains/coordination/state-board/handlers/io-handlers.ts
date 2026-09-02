@@ -110,7 +110,7 @@ export class IOHandlers {
         version: (existing?.version ?? 0) + 1,
       };
 
-      this.store.state.set(fullKey, entry);
+      this.store.setEntry(fullKey, entry);
       this.store.recordChange(fullKey, {
         id: randomUUID().slice(0, 8),
         key,

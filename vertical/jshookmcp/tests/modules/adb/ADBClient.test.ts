@@ -1,6 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ADBClient } from '@modules/adb/ADBClient';
 import { ToolError } from '@errors/ToolError';
+import {
+  ADB_DEFAULT_TIMEOUT_MS,
+  ADB_FILE_TRANSFER_TIMEOUT_MS,
+  ADB_MAX_BUFFER_BYTES,
+  ADB_SHELL_TIMEOUT_MS,
+} from '@src/constants';
 
 vi.mock('node:child_process', () => ({
   execFile: vi.fn((_cmd, _args, _options, callback) => {
@@ -14,10 +20,27 @@ vi.mock('node:fs/promises', () => ({
 
 describe('ADBClient', () => {
   let client: ADBClient;
+  let originalAdbPath: string | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // ADBClient resolves its binary via readEnvString('ADB_PATH', 'adb', ...),
+    // so an ADB_PATH set in the host environment (e.g. a local Android SDK
+    // install) would silently override the 'adb' command asserted throughout
+    // this file. Clear it so these tests observe the documented default
+    // regardless of the machine they run on.
+    originalAdbPath = process.env.ADB_PATH;
+    delete process.env.ADB_PATH;
     client = new ADBClient();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (originalAdbPath === undefined) {
+      delete process.env.ADB_PATH;
+    } else {
+      process.env.ADB_PATH = originalAdbPath;
+    }
   });
 
   it('connects to host and port', async () => {
@@ -122,6 +145,69 @@ my_device              offline
     await client.reverse('device_id', 'tcp:8080', 'tcp:8080');
     await client.forward('device_id', 'tcp:8080', 'tcp:8080');
     expect(execFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('passes ADB_FILE_TRANSFER_TIMEOUT_MS to install/pull/push', async () => {
+    const execFile = await import('node:child_process').then((m) => m.execFile as any);
+    execFile.mockImplementation((_cmd: any, _args: any, _options: any, cb: any) => {
+      cb(null, { stdout: 'Success', stderr: '' });
+    });
+    await client.install('device_id', '/fake/path.apk');
+    await client.pull('device_id', '/remote', '/local');
+    await client.push('device_id', '/local', '/remote');
+
+    const calls = execFile.mock.calls as unknown[][];
+    expect(calls).toHaveLength(3);
+    for (const [, , options] of calls) {
+      expect((options as { timeout: number }).timeout).toBe(ADB_FILE_TRANSFER_TIMEOUT_MS);
+    }
+  });
+
+  it('uses ADB_SHELL_TIMEOUT_MS for shell and ADB_DEFAULT_TIMEOUT_MS for generic calls', async () => {
+    const execFile = await import('node:child_process').then((m) => m.execFile as any);
+    execFile.mockImplementation((_cmd: any, _args: any, _options: any, cb: any) => {
+      cb(null, { stdout: '', stderr: '' });
+    });
+    await client.shell('device_id', 'ls');
+    await client.listDevices();
+
+    const calls = execFile.mock.calls as unknown[][];
+    expect((calls[0]![2] as { timeout: number }).timeout).toBe(ADB_SHELL_TIMEOUT_MS);
+    expect((calls[1]![2] as { timeout: number }).timeout).toBe(ADB_DEFAULT_TIMEOUT_MS);
+  });
+
+  it('caps exec maxBuffer with ADB_MAX_BUFFER_BYTES', async () => {
+    const execFile = await import('node:child_process').then((m) => m.execFile as any);
+    execFile.mockImplementation((_cmd: any, _args: any, _options: any, cb: any) => {
+      cb(null, { stdout: '', stderr: '' });
+    });
+    await client.listDevices();
+    const [, , options] = execFile.mock.calls[0] as unknown[];
+    expect((options as { maxBuffer: number }).maxBuffer).toBe(ADB_MAX_BUFFER_BYTES);
+  });
+
+  it('respects ADB_FILE_TRANSFER_TIMEOUT_MS env override', async () => {
+    const original = process.env.ADB_FILE_TRANSFER_TIMEOUT_MS;
+    process.env.ADB_FILE_TRANSFER_TIMEOUT_MS = '12345';
+    // Re-import so the env-backed constant re-evaluates.
+    vi.resetModules();
+    const { ADBClient: ReloadedADBClient } = await import('@modules/adb/ADBClient');
+    const reloadedClient = new ReloadedADBClient();
+    try {
+      const execFile = await import('node:child_process').then((m) => m.execFile as any);
+      execFile.mockImplementation((_cmd: any, _args: any, _options: any, cb: any) => {
+        cb(null, { stdout: 'Success', stderr: '' });
+      });
+      await reloadedClient.install('device_id', '/fake/path.apk');
+      const [, , options] = execFile.mock.calls[0] as unknown[];
+      expect((options as { timeout: number }).timeout).toBe(12345);
+    } finally {
+      if (original === undefined) {
+        delete process.env.ADB_FILE_TRANSFER_TIMEOUT_MS;
+      } else {
+        process.env.ADB_FILE_TRANSFER_TIMEOUT_MS = original;
+      }
+    }
   });
 
   it('gets webview version', async () => {

@@ -2,11 +2,25 @@ import { readFile, writeFile, rename, mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { logger } from '@utils/logger';
+import { readEnvNullableString } from '@src/config/environment';
+
+/**
+ * Counts reported by a snapshot restore — the number of records dropped or
+ * evicted while trimming a restored snapshot back to its configured caps.
+ * The shape is intentionally loose: each source reports its own subset of keys
+ * (e.g. `{ droppedNodes, droppedEdges }` for the evidence graph, or
+ * `{ evictedHistoryKeys }` for the state board).
+ */
+export interface SnapshotRestoreSummary {
+  droppedNodes?: number;
+  droppedEdges?: number;
+  evictedHistoryKeys?: number;
+}
 
 export interface SnapshotSource {
   isPersistDirty(): boolean;
   exportSnapshot(): unknown;
-  restoreSnapshot(data: unknown): void;
+  restoreSnapshot(data: unknown): void | SnapshotRestoreSummary;
   markPersisted(): void;
 }
 
@@ -14,6 +28,11 @@ interface SnapshotSourceEntry {
   source: SnapshotSource;
   filePath: string;
 }
+
+/** Default debounce window (ms) before persisting dirty snapshots after notifyDirty(). */
+const DEFAULT_DEBOUNCE_MS = 2000;
+/** Default periodic flush interval (ms) for dirty snapshots while the scheduler is started. */
+const DEFAULT_PERIODIC_MS = 30_000;
 
 export class RuntimeSnapshotScheduler {
   private readonly sources: SnapshotSourceEntry[] = [];
@@ -25,8 +44,8 @@ export class RuntimeSnapshotScheduler {
   private started = false;
 
   constructor(options?: { debounceMs?: number; periodicMs?: number }) {
-    this.debounceMs = options?.debounceMs ?? 2000;
-    this.periodicMs = options?.periodicMs ?? 30_000;
+    this.debounceMs = options?.debounceMs ?? DEFAULT_DEBOUNCE_MS;
+    this.periodicMs = options?.periodicMs ?? DEFAULT_PERIODIC_MS;
   }
 
   register(filePath: string, source: SnapshotSource): void {
@@ -57,6 +76,10 @@ export class RuntimeSnapshotScheduler {
     this.periodicTimer = setInterval(() => {
       this.scheduleFlush().catch((err) => logger.warn('periodic snapshot failed:', err));
     }, this.periodicMs);
+    // unref so a running periodic flush never blocks graceful process exit.
+    if (this.periodicTimer.unref) {
+      this.periodicTimer.unref();
+    }
   }
 
   notifyDirty(): void {
@@ -97,8 +120,8 @@ export class RuntimeSnapshotScheduler {
     try {
       const data = await readFile(entry.filePath, 'utf-8');
       const parsed = JSON.parse(data);
-      entry.source.restoreSnapshot(parsed);
-      logger.info(`restored snapshot from ${entry.filePath}`);
+      const summary = entry.source.restoreSnapshot(parsed);
+      logger.info(`restored snapshot from ${entry.filePath}${describeRestoreSummary(summary)}`);
     } catch {
       // No snapshot file or corrupt — start fresh (normal on first run)
     }
@@ -131,9 +154,18 @@ export class RuntimeSnapshotScheduler {
 }
 
 export function getStateDir(): string {
-  const overridden = process.env.JSHOOK_STATE_DIR;
-  if (typeof overridden === 'string' && overridden.trim().length > 0) {
+  const overridden = readEnvNullableString('JSHOOK_STATE_DIR', { trim: true });
+  if (overridden) {
     return resolve(homedir(), overridden);
   }
   return resolve(homedir(), '.jshookmcp', 'state');
+}
+
+/** Renders restore summary counts as a compact ` (key=value, ...)` log suffix. */
+function describeRestoreSummary(summary: void | SnapshotRestoreSummary): string {
+  if (!summary || typeof summary !== 'object') return '';
+  const parts = Object.entries(summary)
+    .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
+    .map(([key, value]) => `${key}=${value}`);
+  return parts.length > 0 ? ` (${parts.join(', ')})` : '';
 }

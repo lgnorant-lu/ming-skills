@@ -187,11 +187,11 @@ describe('ProtocolAnalysisHandlers — handlePcapngRead', () => {
 });
 
 describe('parsePcapng (unit-level edge cases)', () => {
-  it('rejects a buffer too short to be a PCAPNG file', () => {
-    expect(() => parsePcapng(Buffer.alloc(4))).toThrow(/Not a PCAPNG file/);
+  it('rejects a buffer too short to be a PCAPNG file', async () => {
+    await expect(parsePcapng(Buffer.alloc(4))).rejects.toThrow(/Not a PCAPNG file/);
   });
 
-  it('throws on a Section Header Block with a mismatched byte-order magic', () => {
+  it('throws on a Section Header Block with a mismatched byte-order magic', async () => {
     const buffer = Buffer.alloc(28);
     buffer.writeUInt32LE(PCAPNG_BLOCK_TYPE.SECTION_HEADER, 0);
     buffer.writeUInt32LE(28, 4);
@@ -201,10 +201,10 @@ describe('parsePcapng (unit-level edge cases)', () => {
     buffer.writeUInt32LE(0xffffffff, 16);
     buffer.writeUInt32LE(0xffffffff, 20);
     buffer.writeUInt32LE(28, 24);
-    expect(() => parsePcapng(buffer)).toThrow(/Not a PCAPNG file/);
+    await expect(parsePcapng(buffer)).rejects.toThrow(/Not a PCAPNG file/);
   });
 
-  it('offloads large packet payloads via the offloadPacket sink', () => {
+  it('offloads large packet payloads via the offloadPacket sink', async () => {
     const input: PcapngWriteInput = {
       endianness: 'little',
       interfaces: [{ linkType: 1, snapLen: 65535 }],
@@ -215,7 +215,7 @@ describe('parsePcapng (unit-level edge cases)', () => {
     // Sink returns a synthetic detailId; the summary should carry dataRef,
     // NOT inline dataHex, when the payload hex exceeds the threshold.
     const offloaded: string[] = [];
-    const result = parsePcapng(buffer, {
+    const result = await parsePcapng(buffer, {
       offloadThreshold: 32, // force the 64-byte hex payload over the line
       offloadPacket: (hex, packetIndex) => {
         offloaded.push(hex);
@@ -229,14 +229,14 @@ describe('parsePcapng (unit-level edge cases)', () => {
     expect(offloaded).toEqual(['aa'.repeat(64)]);
   });
 
-  it('keeps small packet payloads inline when no offload sink is wired', () => {
+  it('keeps small packet payloads inline when no offload sink is wired', async () => {
     const input: PcapngWriteInput = {
       endianness: 'little',
       interfaces: [{ linkType: 1, snapLen: 65535 }],
       packets: [{ dataHex: 'aabbccdd', timestampHigh: 0, timestampLow: 1 }],
     };
     const buffer = buildPcapng(input);
-    const result = parsePcapng(buffer); // no offloadPacket → always inline
+    const result = await parsePcapng(buffer); // no offloadPacket → always inline
     expect(result.packets[0]?.dataHex).toBe('aabbccdd');
     expect(result.packets[0]?.dataRef).toBeUndefined();
   });

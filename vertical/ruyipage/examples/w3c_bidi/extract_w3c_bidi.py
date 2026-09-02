@@ -1,112 +1,165 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""从W3C WebDriver BiDi规范网页提取所有API（使用正确的选择器）"""
+"""Synchronize the local WebDriver BiDi API snapshot with the W3C draft."""
 
-import sys
-import io
-if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+from __future__ import annotations
 
-from ruyipage import *
+import argparse
+import json
 import re
+import sys
+import urllib.request
+from pathlib import Path
+from typing import Optional
 
-# 创建浏览器
-page = FirefoxPage()
 
-try:
-    print("正在访问 W3C WebDriver BiDi 规范...")
-    page.get('https://w3c.github.io/webdriver-bidi/')
+EDITOR_DRAFT_URL = "https://w3c.github.io/webdriver-bidi/"
+GITHUB_API_URL = "https://api.github.com/repos/w3c/webdriver-bidi"
+RAW_SOURCE_URL = (
+    "https://raw.githubusercontent.com/w3c/webdriver-bidi/{revision}/index.bs"
+)
+DEFAULT_OUTPUT = Path(__file__).with_name("w3c_bidi_apis.json")
+USER_AGENT = "ruyiPage-w3c-bidi-sync"
 
-    print("等待页面加载...")
-    page.wait(3)
+COMMAND_HEADING_RE = re.compile(
+    r"####\s+The\s+([A-Za-z][\w]*\.[A-Za-z][\w]*)\s+Command"
+)
+EVENT_HEADING_RE = re.compile(
+    r"####\s+The\s+([A-Za-z][\w]*\.[A-Za-z][\w]*)\s+Event"
+)
 
-    print("\n从目录 (ol.toc li a) 提取所有API...")
 
-    # 提取目录中的所有链接
-    toc_script = """
-    (() => {
-        const items = [];
-        document.querySelectorAll('ol.toc li a').forEach(link => {
-            const href = link.getAttribute('href');
-            const text = link.textContent.trim();
-            if (href && text) {
-                items.push({
-                    href: href,
-                    text: text,
-                    id: href.replace('#', '')
-                });
-            }
-        });
-        return items;
-    })()
-    """
+def _request(url: str) -> urllib.request.Request:
+    return urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": USER_AGENT,
+        },
+    )
 
-    toc_items = page.run_js(toc_script)
 
-    print(f"\n找到 {len(toc_items)} 个目录项")
+def _read_url(url: str) -> bytes:
+    with urllib.request.urlopen(_request(url), timeout=30) as response:
+        return response.read()
 
-    # 分析提取命令和事件
-    commands = {}
-    events = {}
-    modules = set()
 
-    for item in toc_items:
-        text = item['text']
-        id_str = item['id']
+def fetch_editor_draft() -> tuple[str, dict[str, str]]:
+    """Fetch one pinned revision of the W3C Editor's Draft source."""
+    repository = json.loads(_read_url(GITHUB_API_URL).decode("utf-8"))
+    branch = repository["default_branch"]
+    commit = json.loads(
+        _read_url("{}/commits/{}".format(GITHUB_API_URL, branch)).decode("utf-8")
+    )
+    revision = commit["sha"]
+    source_date = commit["commit"]["committer"]["date"]
+    source = _read_url(RAW_SOURCE_URL.format(revision=revision)).decode("utf-8")
+    metadata = {
+        "source": EDITOR_DRAFT_URL,
+        "source_revision": revision,
+        "source_date": source_date,
+    }
+    return source, metadata
 
-        # 提取命令（格式：The module.command Command）
-        cmd_match = re.search(r'The\s+(\w+)\.(\w+)\s+Command', text)
-        if cmd_match:
-            module = cmd_match.group(1)
-            cmd_name = f"{module}.{cmd_match.group(2)}"
-            modules.add(module)
-            if module not in commands:
-                commands[module] = []
-            commands[module].append(cmd_name)
-            print(f"  命令: {cmd_name}")
 
-        # 提取事件（格式：The module.event Event）
-        evt_match = re.search(r'The\s+(\w+)\.(\w+)\s+Event', text)
-        if evt_match:
-            module = evt_match.group(1)
-            evt_name = f"{module}.{evt_match.group(2)}"
-            modules.add(module)
-            if module not in events:
-                events[module] = []
-            events[module].append(evt_name)
-            print(f"  事件: {evt_name}")
-
-    print(f"\n\n=== 统计结果 ===")
-    print(f"模块数: {len(modules)}")
-    print(f"命令数: {sum(len(v) for v in commands.values())}")
-    print(f"事件数: {sum(len(v) for v in events.values())}")
-
-    print("\n\n=== 按模块分类的命令 ===")
-    for module in sorted(commands.keys()):
-        print(f"\n{module} 模块 ({len(commands[module])} 个命令):")
-        for cmd in sorted(commands[module]):
-            print(f"  - {cmd}")
-
-    print("\n\n=== 按模块分类的事件 ===")
-    for module in sorted(events.keys()):
-        print(f"\n{module} 模块 ({len(events[module])} 个事件):")
-        for evt in sorted(events[module]):
-            print(f"  - {evt}")
-
-    # 保存结构化数据
-    import json
-    result = {
-        'modules': sorted(list(modules)),
-        'commands': commands,
-        'events': events,
-        'total_commands': sum(len(v) for v in commands.values()),
-        'total_events': sum(len(v) for v in events.values())
+def read_source(source: str) -> tuple[str, dict[str, Optional[str]]]:
+    """Read an explicit local file or URL for offline/reproducible extraction."""
+    if source.startswith(("https://", "http://")):
+        content = _read_url(source).decode("utf-8")
+    else:
+        content = Path(source).read_text(encoding="utf-8")
+    return content, {
+        "source": source,
+        "source_revision": None,
+        "source_date": None,
     }
 
-    with open('E:/ruyipage/w3c_bidi_apis.json', 'w', encoding='utf-8') as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
 
-    print("\n\n结构化数据已保存到: E:/ruyipage/w3c_bidi_apis.json")
+def _unique_in_order(pattern: re.Pattern[str], source: str) -> list[str]:
+    return list(dict.fromkeys(match.group(1) for match in pattern.finditer(source)))
 
-finally:
-    page.quit()
+
+def extract_snapshot(source: str, metadata: dict[str, Optional[str]]) -> dict:
+    commands = _unique_in_order(COMMAND_HEADING_RE, source)
+    events = _unique_in_order(EVENT_HEADING_RE, source)
+    if not commands or not events:
+        raise ValueError("W3C source did not contain BiDi command/event headings")
+
+    modules = list(
+        dict.fromkeys(item.split(".", 1)[0] for item in commands + events)
+    )
+    commands_by_module = {
+        module: [item for item in commands if item.startswith(module + ".")]
+        for module in modules
+        if any(item.startswith(module + ".") for item in commands)
+    }
+    events_by_module = {
+        module: [item for item in events if item.startswith(module + ".")]
+        for module in modules
+        if any(item.startswith(module + ".") for item in events)
+    }
+
+    return {
+        "schema_version": 1,
+        "scope": "core",
+        **metadata,
+        "modules": modules,
+        "commands": commands_by_module,
+        "events": events_by_module,
+        "total_commands": len(commands),
+        "total_events": len(events),
+    }
+
+
+def render_snapshot(snapshot: dict) -> str:
+    return json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n"
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--source",
+        help="Read index.bs from a local path or URL instead of the latest draft",
+    )
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Exit non-zero when the checked-in snapshot differs from W3C",
+    )
+    parser.add_argument("--stdout", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    source, metadata = (
+        read_source(args.source) if args.source else fetch_editor_draft()
+    )
+    rendered = render_snapshot(extract_snapshot(source, metadata))
+
+    if args.stdout:
+        sys.stdout.write(rendered)
+
+    if args.check:
+        current = (
+            args.output.read_text(encoding="utf-8") if args.output.exists() else ""
+        )
+        if current != rendered:
+            print("WebDriver BiDi snapshot is stale: {}".format(args.output))
+            return 1
+        print("WebDriver BiDi snapshot is current: {}".format(args.output))
+        return 0
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(rendered, encoding="utf-8")
+    snapshot = json.loads(rendered)
+    print(
+        "Wrote {} commands and {} events to {}".format(
+            snapshot["total_commands"], snapshot["total_events"], args.output
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

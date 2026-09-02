@@ -10,7 +10,7 @@ from ruyipage._units.emulation import EmulationManager
 from ruyipage.errors import BiDiError, PageDisconnectedError
 
 
-UINT32_MAX = (2**32) - 1
+JS_MAX_SAFE_INTEGER = (2**53) - 1
 
 
 class _BaseBrowserDriver:
@@ -206,7 +206,10 @@ def test_set_touch_enabled_result_rejects_unknown_scope():
         EmulationManager(owner).set_touch_enabled_result(scope="tab-group")
 
 
-@pytest.mark.parametrize("value", [True, False, 1.0, "1", -1, UINT32_MAX + 1])
+@pytest.mark.parametrize(
+    "value",
+    [True, False, 1.0, "1", -1, 0, JS_MAX_SAFE_INTEGER + 1],
+)
 def test_set_touch_enabled_result_rejects_invalid_max_touch_points(value):
     owner = _FakeOwner(_NativeTouchBrowserDriver())
 
@@ -217,8 +220,8 @@ def test_set_touch_enabled_result_rejects_invalid_max_touch_points(value):
         )
 
 
-@pytest.mark.parametrize("value", [0, UINT32_MAX])
-def test_set_touch_enabled_result_accepts_uint32_range(value):
+@pytest.mark.parametrize("value", [1, JS_MAX_SAFE_INTEGER])
+def test_set_touch_enabled_result_accepts_js_uint_range(value):
     owner = _FakeOwner(_NativeTouchBrowserDriver())
 
     result = EmulationManager(owner).set_touch_enabled_result(
@@ -423,7 +426,7 @@ def test_set_touch_enabled_result_keeps_invalid_argument_errors():
     owner = _FakeOwner(_InvalidTouchBrowserDriver())
 
     with pytest.raises(BiDiError, match="invalid argument"):
-        EmulationManager(owner).set_touch_enabled_result(max_touch_points=0)
+        EmulationManager(owner).set_touch_enabled_result(max_touch_points=1)
 
 
 def test_set_touch_enabled_result_keeps_connection_errors():

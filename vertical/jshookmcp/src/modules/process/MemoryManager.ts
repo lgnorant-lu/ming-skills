@@ -205,11 +205,13 @@ export class MemoryManager {
 
   // ── Monitor ──
 
+  // Canonical defaults (size=4, intervalMs=1000) live in MemoryMonitorManager;
+  // this facade passes values through so they cannot drift.
   startMemoryMonitor(
     pid: number,
     address: string,
-    size: number = 4,
-    intervalMs: number = 1000,
+    size?: number,
+    intervalMs?: number,
     onChange?: (oldValue: string, newValue: string) => void,
   ): string {
     return this.monitorManager.start(

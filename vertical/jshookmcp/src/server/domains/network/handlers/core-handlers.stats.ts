@@ -41,14 +41,15 @@ export async function handleNetworkGetStats(
     const timestamps = requests
       .map((r) => r.timestamp)
       .filter((t): t is number => isFiniteNumber(t));
+    // Loop instead of Math.min(...spread): huge arrays overflow the call stack.
+    let earliest = Infinity;
+    let latest = -Infinity;
+    for (const t of timestamps) {
+      if (t < earliest) earliest = t;
+      if (t > latest) latest = t;
+    }
     const timeStats =
-      timestamps.length > 0
-        ? {
-            earliest: Math.min(...timestamps),
-            latest: Math.max(...timestamps),
-            duration: Math.max(...timestamps) - Math.min(...timestamps),
-          }
-        : null;
+      timestamps.length > 0 ? { earliest, latest, duration: latest - earliest } : null;
 
     return {
       stats: {

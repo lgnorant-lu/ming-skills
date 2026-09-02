@@ -11,9 +11,12 @@ export interface IndexedHeapAdapter<T> {
  * scheduler hot paths and lets one value participate in multiple independent heaps.
  */
 export class IndexedMinHeap<T> {
+  private readonly adapter: IndexedHeapAdapter<T>;
   private readonly values: T[] = [];
 
-  constructor(private readonly adapter: IndexedHeapAdapter<T>) {}
+  constructor(adapter: IndexedHeapAdapter<T>) {
+    this.adapter = adapter;
+  }
 
   get size(): number {
     return this.values.length;

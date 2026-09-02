@@ -4,6 +4,7 @@ import { access } from 'node:fs/promises';
 import { UNIDBG_TIMEOUT_MS } from '@src/constants';
 import { ToolError } from '@errors/ToolError';
 import { PrerequisiteError } from '@errors/PrerequisiteError';
+import { readEnvNullableString } from '@src/config/environment';
 
 const UNIDBG_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 
@@ -47,7 +48,7 @@ export class UnidbgRunner {
     arch: string = 'arm',
     jarPath?: string,
   ): Promise<{ sessionId: string; soPath: string; arch: string }> {
-    const resolvedJar = jarPath ?? process.env['UNIDBG_JAR'];
+    const resolvedJar = jarPath ?? readEnvNullableString('UNIDBG_JAR', { trim: true });
     if (!resolvedJar) {
       throw new PrerequisiteError(
         'UNIDBG_JAR is not configured. Set the UNIDBG_JAR env var or pass jarPath.',
@@ -103,7 +104,7 @@ export class UnidbgRunner {
       throw new ToolError('NOT_FOUND', `No unidbg session found for ${sessionId}`);
     }
 
-    const jarPath = process.env['UNIDBG_JAR'];
+    const jarPath = readEnvNullableString('UNIDBG_JAR', { trim: true });
     if (!jarPath) {
       throw new PrerequisiteError(
         'UNIDBG_JAR is not configured. Set the UNIDBG_JAR env var before calling Unidbg.',
@@ -145,7 +146,7 @@ export class UnidbgRunner {
       throw new ToolError('NOT_FOUND', `No unidbg session found for ${sessionId}`);
     }
 
-    const jarPath = process.env['UNIDBG_JAR'];
+    const jarPath = readEnvNullableString('UNIDBG_JAR', { trim: true });
     if (!jarPath) {
       throw new PrerequisiteError(
         'UNIDBG_JAR is not configured. Set the UNIDBG_JAR env var before tracing Unidbg.',

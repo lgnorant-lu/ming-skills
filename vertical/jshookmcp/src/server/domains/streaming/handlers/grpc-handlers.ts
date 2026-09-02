@@ -21,7 +21,6 @@ import type {
   TextToolResponse,
 } from './shared';
 import {
-  asJson,
   compileRegex,
   isGrpcContentType,
   parseNumberArg,
@@ -29,6 +28,7 @@ import {
   parseBooleanArg,
 } from './shared';
 import { parseGrpcFrames } from '@server/domains/network/grpc-raw';
+import { asJson } from './shared';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -76,10 +76,13 @@ interface PendingRequest {
 }
 
 export class GrpcHandlers {
+  private s: StreamingSharedState;
   /** Provisional request metadata (method/url/content-type) before responseReceived. */
   private readonly pending = new Map<string, PendingRequest>();
 
-  constructor(private s: StreamingSharedState) {}
+  constructor(s: StreamingSharedState) {
+    this.s = s;
+  }
 
   private async teardownGrpcSession(): Promise<void> {
     if (this.s.grpcSession && this.s.grpcListeners) {
@@ -112,11 +115,16 @@ export class GrpcHandlers {
     this.pending.clear();
   }
 
-  private enforceGrpcCallLimit(): void {
-    while (this.s.grpcCallOrder.length > this.s.grpcConfig.maxCalls) {
+  /**
+   * Evict the oldest captured call when the ring buffer is full. The ring
+   * buffer OVERWRITES its oldest slot on push (length never exceeds the
+   * capacity), so `length > maxCalls` can never trigger after the fact — the
+   * eviction must run BEFORE the push.
+   */
+  private evictGrpcCallIfFull(): void {
+    if (this.s.grpcCallOrder.length >= this.s.grpcConfig.maxCalls) {
       const oldest = this.s.grpcCallOrder.shift();
-      if (!oldest) break;
-      this.s.grpcCalls.delete(oldest);
+      if (oldest !== undefined) this.s.grpcCalls.delete(oldest);
     }
   }
 
@@ -127,7 +135,12 @@ export class GrpcHandlers {
       const body = typeof resp?.body === 'string' ? resp.body : '';
       const base64Encoded = resp?.base64Encoded === true;
       if (body) {
-        const parsed = parseGrpcFrames(body, base64Encoded ? 'base64' : 'hex');
+        // includeHex:false — the retained frames keep only payloadBase64 (the
+        // protobuf_decode_raw input); payloadHex is display-only and would double
+        // the resident bytes of every captured message.
+        const parsed = parseGrpcFrames(body, base64Encoded ? 'base64' : 'hex', {
+          includeHex: false,
+        });
         record.responseMessages = parsed.frames;
         record.responseBodyBytes = parsed.totalBytes;
         if (parsed.warnings.length > 0) record.warnings.push(...parsed.warnings);
@@ -141,7 +154,7 @@ export class GrpcHandlers {
       const pd = (await session.send('Network.getRequestPostData', { requestId })) as UnknownRecord;
       const postData = typeof pd?.postData === 'string' ? pd.postData : '';
       if (postData) {
-        const parsed = parseGrpcFrames(postData, 'base64');
+        const parsed = parseGrpcFrames(postData, 'base64', { includeHex: false });
         record.requestMessages = parsed.frames;
         record.requestBodyBytes = parsed.totalBytes;
         if (parsed.warnings.length > 0) record.warnings.push(...parsed.warnings);
@@ -164,7 +177,10 @@ export class GrpcHandlers {
     if (urlFilterRaw) {
       const compiled = compileRegex(urlFilterRaw);
       if (compiled.error) {
-        return asJson({ success: false, error: `Invalid urlFilter regex: ${compiled.error}` });
+        return asJson({
+          success: false,
+          error: `Invalid urlFilter regex: ${compiled.error}`,
+        });
       }
       urlFilter = compiled.regex;
     }
@@ -228,8 +244,8 @@ export class GrpcHandlers {
           bodyError: null,
         };
         this.s.grpcCalls.set(requestId, record);
+        this.evictGrpcCallIfFull();
         this.s.grpcCallOrder.push(requestId);
-        this.enforceGrpcCallLimit();
       },
       loadingFinished: (params: unknown) => {
         const requestId = getStringField(params, 'requestId');
@@ -305,7 +321,10 @@ export class GrpcHandlers {
     if (urlFilterRaw) {
       const compiled = compileRegex(urlFilterRaw);
       if (compiled.error) {
-        return asJson({ success: false, error: `Invalid urlFilter regex: ${compiled.error}` });
+        return asJson({
+          success: false,
+          error: `Invalid urlFilter regex: ${compiled.error}`,
+        });
       }
       urlFilter = compiled.regex;
     }
@@ -367,7 +386,10 @@ export class GrpcHandlers {
     if (urlFilterRaw) {
       const compiled = compileRegex(urlFilterRaw);
       if (compiled.error) {
-        return asJson({ success: false, error: `Invalid urlFilter regex: ${compiled.error}` });
+        return asJson({
+          success: false,
+          error: `Invalid urlFilter regex: ${compiled.error}`,
+        });
       }
       urlFilter = compiled.regex;
     }

@@ -6,13 +6,21 @@
  *   import { ioLimit, cpuLimit, cdpLimit } from '@utils/concurrency';
  *   const result = await ioLimit(() => runExternalTool(...));
  */
+import { readEnvInteger } from '@src/config/environment';
 
 // Lightweight p-limit compatible concurrency limiter
 
 type LimitFunction = <T>(fn: () => Promise<T> | T) => Promise<T>;
 
+/** Default concurrency per resource category. */
+const IO_CONCURRENCY_DEFAULT = 4;
+const CPU_CONCURRENCY_DEFAULT = 2;
+const CDP_CONCURRENCY_DEFAULT = 2;
+
 function pLimit(concurrency: number): LimitFunction {
-  if (concurrency < 1) throw new RangeError('concurrency must be >= 1');
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new RangeError('concurrency must be an integer >= 1');
+  }
 
   let activeCount = 0;
   const queue: Array<() => void> = [];
@@ -54,10 +62,28 @@ function pLimit(concurrency: number): LimitFunction {
 }
 
 /** External CLI calls, HAR export, large file I/O */
-export const ioLimit = pLimit(parseInt(process.env.jshook_IO_CONCURRENCY || '4', 10));
+export const ioLimit = pLimit(
+  readEnvInteger(
+    'JSHOOK_IO_CONCURRENCY',
+    readEnvInteger('jshook_IO_CONCURRENCY', IO_CONCURRENCY_DEFAULT, { min: 1 }),
+    { min: 1 },
+  ),
+);
 
 /** CPU-heavy: AST parsing, deobfuscation, binary decoding */
-export const cpuLimit = pLimit(parseInt(process.env.jshook_CPU_CONCURRENCY || '2', 10));
+export const cpuLimit = pLimit(
+  readEnvInteger(
+    'JSHOOK_CPU_CONCURRENCY',
+    readEnvInteger('jshook_CPU_CONCURRENCY', CPU_CONCURRENCY_DEFAULT, { min: 1 }),
+    { min: 1 },
+  ),
+);
 
 /** CDP-heavy: heap snapshots, traces, profiling */
-export const cdpLimit = pLimit(parseInt(process.env.jshook_CDP_CONCURRENCY || '2', 10));
+export const cdpLimit = pLimit(
+  readEnvInteger(
+    'JSHOOK_CDP_CONCURRENCY',
+    readEnvInteger('jshook_CDP_CONCURRENCY', CDP_CONCURRENCY_DEFAULT, { min: 1 }),
+    { min: 1 },
+  ),
+);

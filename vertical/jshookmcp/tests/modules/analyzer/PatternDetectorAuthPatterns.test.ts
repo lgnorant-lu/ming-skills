@@ -18,6 +18,13 @@ import {
   detectSignaturePatternsInternal,
   detectTokenPatternsInternal,
 } from '@modules/analyzer/PatternDetectorAuthPatterns';
+import {
+  PATTERN_SIGNATURE_CONFIDENCE_HEADER_HMAC,
+  PATTERN_SIGNATURE_CONFIDENCE_HEADER_JWT,
+  PATTERN_TOKEN_CONFIDENCE_HEADER_BEARER,
+  PATTERN_TOKEN_CONFIDENCE_HEADER_JWT,
+  PATTERN_TOKEN_MIN_LENGTH,
+} from '@src/constants';
 
 const rootUrl = (path = '') => withPath(TEST_URLS.root, path);
 
@@ -78,6 +85,23 @@ describe('PatternDetectorAuthPatterns', () => {
           type: 'Custom',
           location: expect.stringContaining('(POST body)'),
           parameters: ['form-urlencoded data'],
+        }),
+      ]),
+    );
+  });
+
+  it('marks URL params named jwt as JWT signature type', () => {
+    const patterns = detectSignaturePatternsInternal([
+      request({
+        url: `${TEST_URLS.api}?jwt_token=eyJhbGciOiJIUzI1NiJ9.abc.def`,
+      }),
+    ]);
+
+    expect(patterns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'JWT',
+          location: expect.stringContaining('(URL params)'),
         }),
       ]),
     );
@@ -158,5 +182,76 @@ describe('PatternDetectorAuthPatterns', () => {
     expect(loggerState.debug).toHaveBeenCalledWith(
       expect.stringContaining('URL parse failed for token detection'),
     );
+  });
+});
+
+describe('PatternDetectorAuthPatterns confidence constants (FP batch B28)', () => {
+  it('reports signature confidence from env-overridable constants', () => {
+    const patterns = detectSignaturePatternsInternal([
+      request({
+        headers: {
+          'x-signature': 'a'.repeat(64),
+        },
+      }),
+      request({
+        headers: {
+          'x-signature': 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.sig',
+        },
+      }),
+    ]);
+
+    expect(patterns).toHaveLength(2);
+    expect(patterns[0]).toMatchObject({
+      type: 'HMAC',
+      confidence: PATTERN_SIGNATURE_CONFIDENCE_HEADER_HMAC,
+    });
+    expect(patterns[1]).toMatchObject({
+      type: 'JWT',
+      confidence: PATTERN_SIGNATURE_CONFIDENCE_HEADER_JWT,
+    });
+  });
+
+  it('reports token confidence from env-overridable constants', () => {
+    const patterns = detectTokenPatternsInternal([
+      request({
+        headers: {
+          authorization: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.sig',
+        },
+      }),
+      request({
+        headers: {
+          authorization: 'Bearer abcdef',
+        },
+      }),
+    ]);
+
+    expect(patterns).toHaveLength(2);
+    expect(patterns[0]).toMatchObject({
+      type: 'JWT',
+      confidence: PATTERN_TOKEN_CONFIDENCE_HEADER_JWT,
+    });
+    expect(patterns[1]).toMatchObject({
+      type: 'Custom',
+      confidence: PATTERN_TOKEN_CONFIDENCE_HEADER_BEARER,
+    });
+  });
+
+  it('applies the shared token minimum length threshold', () => {
+    const shortValue = 'a'.repeat(PATTERN_TOKEN_MIN_LENGTH - 1);
+    const longValue = 'a'.repeat(PATTERN_TOKEN_MIN_LENGTH + 1);
+
+    const short = detectTokenPatternsInternal([
+      request({
+        headers: { authorization: shortValue },
+      }),
+    ]);
+    const long = detectTokenPatternsInternal([
+      request({
+        headers: { authorization: longValue },
+      }),
+    ]);
+
+    expect(short).toEqual([]);
+    expect(long).toHaveLength(1);
   });
 });

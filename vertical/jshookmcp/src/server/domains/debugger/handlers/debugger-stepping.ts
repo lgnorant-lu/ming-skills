@@ -6,7 +6,10 @@ interface DebuggerSteppingHandlersDeps {
 }
 
 export class DebuggerSteppingHandlers {
-  constructor(private deps: DebuggerSteppingHandlersDeps) {}
+  private deps: DebuggerSteppingHandlersDeps;
+  constructor(deps: DebuggerSteppingHandlersDeps) {
+    this.deps = deps;
+  }
 
   async handleDebuggerStepInto(_args: Record<string, unknown>) {
     const mgr = this.deps.debuggerManager;

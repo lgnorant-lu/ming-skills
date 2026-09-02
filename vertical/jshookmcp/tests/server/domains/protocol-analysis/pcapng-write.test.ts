@@ -68,6 +68,38 @@ describe('ProtocolAnalysisHandlers — handlePcapngWrite', () => {
     expect(readResult.packets[1]?.dataHex).toBe('aabb');
   });
 
+  it('round-trips interface options when endianness=big (option fields follow section byte order)', async () => {
+    const path = join(tmpdir(), `pcapng-big-${Date.now()}.pcapng`);
+    paths.push(path);
+
+    const writeResult = await handlers.handlePcapngWrite({
+      path,
+      interfaces: [{ linkType: 1, name: 'eth0' }],
+      packets: [{ dataHex: 'deadbeef' }],
+      endianness: 'big',
+    });
+
+    expect(writeResult.success).toBe(true);
+    const readResult = await handlers.handlePcapngRead({ path });
+    expect(readResult.success).toBe(true);
+    expect(readResult.endianness).toBe('big');
+    expect(readResult.interfaces[0]?.name).toBe('eth0');
+  });
+
+  it('rejects non-hex dataHex instead of writing a corrupt file', async () => {
+    const path = join(tmpdir(), `pcapng-hex-${Date.now()}.pcapng`);
+    paths.push(path);
+
+    const result = await handlers.handlePcapngWrite({
+      path,
+      interfaces: [{ linkType: 1 }],
+      packets: [{ dataHex: 'zz' }],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('valid even-length hex');
+  });
+
   it('produces a byte-exact deterministic buffer for the same input', async () => {
     const path1 = join(tmpdir(), `pcapng-det-1-${Date.now()}.pcapng`);
     const path2 = join(tmpdir(), `pcapng-det-2-${Date.now()}.pcapng`);
@@ -97,7 +129,7 @@ describe('ProtocolAnalysisHandlers — handlePcapngWrite', () => {
     });
 
     const buffer = await fsReadFile(path);
-    const result = parsePcapng(buffer);
+    const result = await parsePcapng(buffer);
 
     expect(result.blockCount).toBe(3);
     expect(result.sections).toHaveLength(1);

@@ -44,17 +44,17 @@ describe('DetailedDataManager', () => {
 
   // ─── Store & Retrieve ────────────────────────────────────────────
 
-  it('stores and retrieves data', () => {
+  it('stores and retrieves data', async () => {
     const data = { hello: 'world', count: 42 };
-    const id = manager.store(data);
+    const id = await manager.store(data);
 
-    expect(id).toMatch(/^detail_\d+_[a-z0-9]+$/);
+    expect(id).toMatch(/^detail_\d+_[0-9a-f-]{36}$/);
     const retrieved = manager.retrieve(id);
     expect(retrieved).toEqual(data);
   });
 
   it('throws on expired detailId', async () => {
-    const id = manager.store({ temp: true }, 100); // 100ms TTL
+    const id = await manager.store({ temp: true }, 100); // 100ms TTL
     await new Promise((r) => setTimeout(r, 150));
     expect(() => manager.retrieve(id)).toThrow(/expired/i);
   });
@@ -63,39 +63,39 @@ describe('DetailedDataManager', () => {
     expect(() => manager.retrieve('nonexistent')).toThrow(/not found/i);
   });
 
-  it('stores arrays', () => {
+  it('stores arrays', async () => {
     const data = Array.from({ length: 50 }, (_, i) => ({ id: i, name: `item-${i}` }));
-    const id = manager.store(data);
+    const id = await manager.store(data);
     const retrieved = manager.retrieve<typeof data>(id);
     expect(retrieved).toHaveLength(50);
   });
 
   // ─── Path-based retrieval ────────────────────────────────────────
 
-  it('retrieves nested data by path', () => {
+  it('retrieves nested data by path', async () => {
     const data = { level1: { level2: { value: 'deep' } } };
-    const id = manager.store(data);
+    const id = await manager.store(data);
     const value = manager.retrieve<string>(id, 'level1.level2.value');
     expect(value).toBe('deep');
   });
 
-  it('throws on invalid path', () => {
+  it('throws on invalid path', async () => {
     const data = { foo: 'bar' };
-    const id = manager.store(data);
+    const id = await manager.store(data);
     expect(() => manager.retrieve(id, 'nonexistent.path')).toThrow(/path not found/i);
   });
 
   // ─── Smart handle ────────────────────────────────────────────────
 
-  it('returns small data directly', () => {
+  it('returns small data directly', async () => {
     const small = { x: 1 };
-    const result = manager.smartHandle(small);
+    const result = await manager.smartHandle(small);
     expect(result).toBe(small); // Same reference
   });
 
-  it('returns summary for large data', () => {
+  it('returns summary for large data', async () => {
     const large = { data: 'x'.repeat(200) };
-    const result = manager.smartHandle(large);
+    const result = await manager.smartHandle(large);
     expect(result).not.toBe(large);
     expect(result).toHaveProperty('detailId');
     expect(result).toHaveProperty('summary');
@@ -103,10 +103,10 @@ describe('DetailedDataManager', () => {
 
   // ─── LRU Eviction ────────────────────────────────────────────────
 
-  it('evicts LRU entry when cache is full', () => {
+  it('evicts LRU entry when cache is full', async () => {
     // Fill cache to MAX_CACHE_SIZE (100 entries)
     for (let i = 0; i < 110; i++) {
-      manager.store({ index: i });
+      await manager.store({ index: i });
     }
 
     const stats = manager.getStats();
@@ -116,8 +116,8 @@ describe('DetailedDataManager', () => {
 
   // ─── Extend TTL ──────────────────────────────────────────────────
 
-  it('extends TTL of an entry', () => {
-    const id = manager.store({ temp: true }, 200); // 200ms TTL
+  it('extends TTL of an entry', async () => {
+    const id = await manager.store({ temp: true }, 200); // 200ms TTL
     manager.extend(id, 5000); // Extend by 5 seconds
 
     // After original TTL, entry should still be accessible
@@ -126,16 +126,16 @@ describe('DetailedDataManager', () => {
   });
 
   it('throws when extending expired entry', async () => {
-    const id = manager.store({ temp: true }, 50); // 50ms TTL
+    const id = await manager.store({ temp: true }, 50); // 50ms TTL
     await new Promise((r) => setTimeout(r, 100));
     expect(() => manager.extend(id)).toThrow(/expired/i);
   });
 
   // ─── Stats ───────────────────────────────────────────────────────
 
-  it('reports stats', () => {
-    manager.store({ a: 1 });
-    manager.store({ b: 2 });
+  it('reports stats', async () => {
+    await manager.store({ a: 1 });
+    await manager.store({ b: 2 });
 
     const stats = manager.getStats();
     expect(stats.cacheSize).toBeGreaterThanOrEqual(2);
@@ -147,9 +147,9 @@ describe('DetailedDataManager', () => {
 
   // ─── Clear ───────────────────────────────────────────────────────
 
-  it('clears all entries', () => {
-    manager.store({ a: 1 });
-    manager.store({ b: 2 });
+  it('clears all entries', async () => {
+    await manager.store({ a: 1 });
+    await manager.store({ b: 2 });
     manager.clear();
 
     const stats = manager.getStats();
@@ -160,7 +160,7 @@ describe('DetailedDataManager', () => {
 
   it('persists large data with gzip compression', async () => {
     const largeData = { payload: 'x'.repeat(5000) };
-    manager.store(largeData);
+    await manager.store(largeData);
 
     // Wait for async persist
     await new Promise((r) => setTimeout(r, 300));

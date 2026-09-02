@@ -247,13 +247,18 @@ export function generatePythonCode(
       const objName = parts[0];
       const propPath = parts.slice(1).join('.');
 
+      // env_code is a Python triple-quoted string: escape backslashes so JSON
+      // escapes inside the JS literals (\n, \u, ...) survive Python parsing
+      // intact, and triple quotes so values cannot terminate the string early.
+      const jsValue = formatValueForJS(value).replace(/\\/g, '\\\\').replace(/"""/g, '\\"\\"\\"');
+
       if (parts.length === 2) {
-        lines.push(`${objName}.${propPath} = ${formatValueForJS(value)};`);
+        lines.push(`${objName}.${propPath} = ${jsValue};`);
       } else {
         const parentPath = parts.slice(0, -1).join('.');
         const lastProp = parts[parts.length - 1];
         lines.push(`if (!${parentPath}) ${parentPath} = {};`);
-        lines.push(`${parentPath}.${lastProp} = ${formatValueForJS(value)};`);
+        lines.push(`${parentPath}.${lastProp} = ${jsValue};`);
       }
     }
 

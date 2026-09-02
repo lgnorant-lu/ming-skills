@@ -207,6 +207,60 @@ describe('MCPServer.search.handlers.call', () => {
     expect(ctx.executeToolWithTracking).toHaveBeenCalledWith('test_tool', {});
   });
 
+  it('parses JSON arguments wrapper', async () => {
+    const ctx = createCtx();
+
+    const response = await handleCallTool(ctx, {
+      name: 'test_tool',
+      arguments: '{"key": "value"}',
+    });
+    const result = parseResponse(response);
+
+    expect(result.result).toBe('ok');
+    expect(ctx.executeToolWithTracking).toHaveBeenCalledWith('test_tool', { key: 'value' });
+  });
+
+  it('accepts an object-valued arguments wrapper', async () => {
+    const ctx = createCtx();
+
+    await handleCallTool(ctx, { name: 'test_tool', arguments: { key: 'value' } });
+
+    expect(ctx.executeToolWithTracking).toHaveBeenCalledWith('test_tool', { key: 'value' });
+  });
+
+  it('reports an empty arguments string instead of silently dropping it', async () => {
+    const ctx = createCtx();
+
+    const response = await handleCallTool(ctx, { name: 'test_tool', arguments: '' });
+    const result = parseResponse(response);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('non-empty JSON string');
+    expect(ctx.executeToolWithTracking).not.toHaveBeenCalled();
+  });
+
+  it('reports malformed arguments JSON instead of silently dropping it', async () => {
+    const ctx = createCtx();
+
+    const response = await handleCallTool(ctx, { name: 'test_tool', arguments: '{broken' });
+    const result = parseResponse(response);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('valid JSON');
+    expect(ctx.executeToolWithTracking).not.toHaveBeenCalled();
+  });
+
+  it('reports arguments JSON that is not an object', async () => {
+    const ctx = createCtx();
+
+    const response = await handleCallTool(ctx, { name: 'test_tool', arguments: '123' });
+    const result = parseResponse(response);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('JSON object');
+    expect(ctx.executeToolWithTracking).not.toHaveBeenCalled();
+  });
+
   it('returns error when tool is not in router (auto-activation disabled)', async () => {
     const ctx = createCtx({
       router: { has: vi.fn(() => false) },

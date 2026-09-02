@@ -1,19 +1,10 @@
-import { existsSync } from 'node:fs';
+import { bootstrapRuntimeEnv, runtimeProjectRoot } from '@src/config/env-bootstrap';
+import { FLOAT_PATTERN, INTEGER_PATTERN } from '@src/config/environment';
 import { homedir } from 'node:os';
-import { isAbsolute, join, normalize, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { config as dotenvConfig } from 'dotenv';
+import { isAbsolute, normalize, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { DEFAULT_SEARCH_CONFIG } from '@src/config/search-defaults';
 import { DEFAULT_SEARCH_VECTOR_MODEL_ID } from '@src/constants/search-model';
-import {
-  MCP_BROWSER_FLEET_LEASE_TTL_MS,
-  MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
-  MCP_BROWSER_FLEET_VIRTUAL_NODES,
-  MCP_TRANSPORT,
-  OFFLOADER_DETAIL_THRESHOLD_BYTES,
-  OFFLOADER_FILE_THRESHOLD_BYTES,
-} from '@src/constants/server';
 import { logger } from './logger';
 import { getPackageVersion } from './packageVersion';
 import { isRecord } from './type-guards';
@@ -27,7 +18,11 @@ import type {
   SearchQueryCategoryProfileConfig,
 } from '@internal-types/index';
 
-export const projectRoot = fileURLToPath(new URL('../..', import.meta.url));
+export const projectRoot = runtimeProjectRoot;
+
+function isContainedRelativePath(path: string): boolean {
+  return path === '' || (!path.startsWith('..') && !isAbsolute(path));
+}
 
 /**
  * True when the package is loaded from a global npm prefix (npx / npm install -g)
@@ -38,38 +33,17 @@ export function isNpxContext(): boolean {
   // Common npm-prefix markers:
   if (process.env.NPX_CACHE || process.env.npm_config_prefix) return true;
   const cwd = process.cwd();
-  // If projectRoot is not under cwd, we're almost certainly running via npx/global install
-  // (local node_modules/ would put the package inside cwd or a parent of cwd).
-  const rel = normalize(relative(cwd, projectRoot));
-  return rel === '' || rel.startsWith('..') || isAbsolute(rel);
+  // A source checkout may run from either the package root or one of its
+  // subdirectories; a local dependency lives below cwd. Only unrelated trees
+  // indicate an npx/global installation.
+  const cwdToRoot = normalize(relative(cwd, projectRoot));
+  const rootToCwd = normalize(relative(projectRoot, cwd));
+  return !isContainedRelativePath(cwdToRoot) && !isContainedRelativePath(rootToCwd);
 }
 
 function getWritableBaseDir(): string {
   return isNpxContext() ? process.cwd() : projectRoot;
 }
-
-// Resolve .env relative to the package root — works in both dev (tsx src/utils/config.ts)
-// and production (bundled dist/*.mjs). Env vars always take precedence.
-function resolvePackageEnv(): string {
-  const candidates = [
-    fileURLToPath(new URL('../../.env', import.meta.url)), // dev: src/utils/ → root
-    fileURLToPath(new URL('../.env', import.meta.url)), // prod: dist/ → root
-    fileURLToPath(new URL('.env', import.meta.url)), // same dir fallback
-    join(process.cwd(), '.env'), // cwd
-  ];
-  const seen = new Set<string>();
-  for (const candidate of candidates) {
-    const normalized = normalize(candidate);
-    if (seen.has(normalized)) continue;
-    seen.add(normalized);
-    if (existsSync(normalized)) return normalized;
-  }
-  // Default to the dev-mode path even if it doesn't exist (dotenv will handle ENOENT)
-  return candidates[0] ?? fileURLToPath(new URL('../../.env', import.meta.url));
-}
-
-const envPath = resolvePackageEnv();
-let envLoaded = false;
 
 const CONFIG_DEFAULTS = {
   puppeteer: {
@@ -88,9 +62,9 @@ const CONFIG_DEFAULTS = {
     browserSessionReservedPendingPerSession: 1,
     browserSessionCostEwmaAlpha: 0.2,
     browserFleetWorkerId: 'local',
-    browserFleetVirtualNodes: MCP_BROWSER_FLEET_VIRTUAL_NODES,
-    browserFleetLeaseTtlMs: MCP_BROWSER_FLEET_LEASE_TTL_MS,
-    browserFleetMaxLocalLeases: MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
+    browserFleetVirtualNodes: 128,
+    browserFleetLeaseTtlMs: 600_000,
+    browserFleetMaxLocalLeases: 4096,
   },
   cache: {
     enabled: false,
@@ -110,8 +84,8 @@ const CONFIG_DEFAULTS = {
     maxCodeSizeMB: 10,
   },
   offloader: {
-    detailThreshold: OFFLOADER_DETAIL_THRESHOLD_BYTES,
-    fileThreshold: OFFLOADER_FILE_THRESHOLD_BYTES,
+    detailThreshold: 512 * 1024,
+    fileThreshold: 4 * 1024 * 1024,
     outputDir: 'artifacts/offloaded',
     excludeTools: [],
   },
@@ -191,47 +165,90 @@ const CONFIG_DEFAULTS = {
   } satisfies ReverseEngineeringConfig,
 } as const;
 
-function loadEnvIfNeeded(): void {
-  if (envLoaded) {
-    return;
-  }
-  envLoaded = true;
-
-  const result = dotenvConfig({ path: envPath, quiet: true });
-  const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
-
-  if (result.error) {
-    if (errorCode !== 'ENOENT') {
-      console.error(`[Config] Warning: Failed to load .env from "${envPath}"`);
-      console.error(`[Config] Error: ${result.error.message}`);
-      console.error('[Config] Will use environment variables or defaults');
-    }
-  } else if (process.env.DEBUG === 'true') {
-    console.info(`[Config] .env file loaded from "${envPath}" (debug mode)`);
-  }
-}
-
 // ── Zod schemas for environment-based config ──
+// INTEGER_PATTERN / FLOAT_PATTERN are imported from @src/config/environment
+// (single source of truth) rather than re-declared here.
 
 const envInt = (fallback: number) =>
-  z
-    .string()
-    .optional()
-    .transform((v) => (v ? parseInt(v, 10) : fallback))
-    .pipe(z.number().int().finite());
+  z.preprocess((value) => {
+    if (value === undefined || (typeof value === 'string' && value.trim() === '')) {
+      return fallback;
+    }
+    if (typeof value === 'number') {
+      return value;
+    }
+    if (typeof value !== 'string' || !INTEGER_PATTERN.test(value.trim())) {
+      return Number.NaN;
+    }
+    return Number(value.trim());
+  }, z.number().int().finite());
 
 const envBool = (fallback: boolean) =>
-  z
-    .string()
-    .optional()
-    .transform((v) => (v === undefined ? fallback : v === 'true'));
+  z.preprocess((value) => {
+    if (value === undefined || (typeof value === 'string' && value.trim() === '')) {
+      return fallback;
+    }
+    if (typeof value === 'boolean') {
+      return value;
+    }
+    if (typeof value !== 'string') {
+      return value;
+    }
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1') return true;
+    if (normalized === 'false' || normalized === '0') return false;
+    return value;
+  }, z.boolean());
+
+const optionalEnvBool = z.preprocess((value) => {
+  if (value === undefined || (typeof value === 'string' && value.trim() === '')) {
+    return undefined;
+  }
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') return value;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1') return true;
+  if (normalized === 'false' || normalized === '0') return false;
+  return value;
+}, z.boolean().optional());
 
 const envFloat = (fallback: number) =>
-  z
-    .string()
-    .optional()
-    .transform((v) => (v ? Number.parseFloat(v) : fallback))
-    .pipe(z.number().finite());
+  z.preprocess((value) => {
+    if (value === undefined || (typeof value === 'string' && value.trim() === '')) {
+      return fallback;
+    }
+    if (typeof value === 'number') {
+      return value;
+    }
+    if (typeof value !== 'string' || !FLOAT_PATTERN.test(value.trim())) {
+      return Number.NaN;
+    }
+    return Number(value.trim());
+  }, z.number().finite());
+
+const optionalTrimmedString = z.preprocess(
+  (value) =>
+    typeof value === 'string' && value.trim().length === 0
+      ? undefined
+      : typeof value === 'string'
+        ? value.trim()
+        : value,
+  z.string().min(1).optional(),
+);
+
+const envString = (fallback: string) =>
+  z.preprocess(
+    (value) =>
+      value === undefined || (typeof value === 'string' && value.trim().length === 0)
+        ? fallback
+        : typeof value === 'string'
+          ? value.trim()
+          : value,
+    z.string().min(1),
+  );
+
+const positiveEnvInt = (fallback: number) => envInt(fallback).pipe(z.number().min(1));
+const ratioEnvFloat = (fallback: number) => envFloat(fallback).pipe(z.number().min(0).max(1));
 
 function resolveConfigPath(inputPath: string, baseDir: string): string {
   return normalize(isAbsolute(inputPath) ? inputPath : resolve(baseDir, inputPath));
@@ -243,13 +260,50 @@ const ConfigSchema = z.object({
   PUPPETEER_TIMEOUT: envInt(CONFIG_DEFAULTS.puppeteer.timeout).pipe(
     z.number().min(1000).max(300000),
   ),
-  PUPPETEER_EXECUTABLE_PATH: z.string().optional(),
-  CHROME_PATH: z.string().optional(),
-  BROWSER_EXECUTABLE_PATH: z.string().optional(),
+  PUPPETEER_EXECUTABLE_PATH: optionalTrimmedString,
+  CHROME_PATH: optionalTrimmedString,
+  BROWSER_EXECUTABLE_PATH: optionalTrimmedString,
+  NODE_ENV: optionalTrimmedString,
+
+  // Server transport, HTTP middleware, and structured logging
+  MCP_TRANSPORT: z.preprocess(
+    (value) =>
+      typeof value === 'string' && value.trim().length > 0 ? value.trim().toLowerCase() : 'stdio',
+    z.enum(['stdio', 'http']),
+  ),
+  MCP_HOST: envString('127.0.0.1'),
+  MCP_PORT: envInt(3000).pipe(z.number().min(1).max(65_535)),
+  MCP_AUTH_TOKEN: optionalTrimmedString,
+  MCP_ALLOW_INSECURE: envBool(false),
+  MCP_HEALTH_VERBOSE: envBool(false),
+  MCP_HTTP_REQUEST_TIMEOUT_MS: positiveEnvInt(30_000),
+  MCP_HTTP_HEADERS_TIMEOUT_MS: positiveEnvInt(10_000),
+  MCP_HTTP_KEEPALIVE_TIMEOUT_MS: positiveEnvInt(86_400_000),
+  MCP_HTTP_FORCE_CLOSE_TIMEOUT_MS: positiveEnvInt(5_000),
+  MCP_MAX_BODY_BYTES: positiveEnvInt(10 * 1024 * 1024),
+  MCP_RATE_LIMIT_ENABLED: envBool(true),
+  MCP_RATE_LIMIT_WINDOW_MS: positiveEnvInt(60_000),
+  MCP_RATE_LIMIT_MAX: positiveEnvInt(60),
+  MCP_TRUST_PROXY: envBool(false),
+  MCP_HTTP_MAX_INFLIGHT: positiveEnvInt(64),
+  MCP_HTTP_MAX_SSE_INFLIGHT: positiveEnvInt(8),
+  MCP_LOG_ENABLED: envBool(false),
+  MCP_LOG_LEVEL: z.preprocess(
+    (value) =>
+      typeof value === 'string' && value.trim().length > 0 ? value.trim().toLowerCase() : 'info',
+    z.enum(['debug', 'info', 'warning', 'error']),
+  ),
+  MCP_LOG_FILE_DIR: optionalTrimmedString,
 
   // MCP
-  MCP_SERVER_NAME: z.string().optional().default(CONFIG_DEFAULTS.mcp.name),
-  MCP_SERVER_VERSION: z.string().optional().default(CONFIG_DEFAULTS.mcp.version),
+  MCP_SERVER_NAME: envString(CONFIG_DEFAULTS.mcp.name),
+  MCP_SERVER_VERSION: envString(CONFIG_DEFAULTS.mcp.version),
+  MCP_TOOL_PROFILE: z.preprocess(
+    (value) =>
+      typeof value === 'string' && value.trim().length > 0 ? value.trim().toLowerCase() : 'search',
+    z.enum(['search', 'workflow', 'full']),
+  ),
+  MCP_TOOL_DOMAINS: z.string().optional().default(''),
   MCP_BROWSER_SESSION_QUEUE_MAX_PENDING: envInt(
     CONFIG_DEFAULTS.mcp.browserSessionQueueMaxPending,
   ).pipe(z.number().min(1).max(100_000)),
@@ -274,10 +328,7 @@ const ConfigSchema = z.object({
   MCP_BROWSER_SESSION_COST_EWMA_ALPHA: envFloat(
     CONFIG_DEFAULTS.mcp.browserSessionCostEwmaAlpha,
   ).pipe(z.number().gt(0).max(1)),
-  MCP_BROWSER_FLEET_WORKER_ID: z
-    .string()
-    .optional()
-    .default(CONFIG_DEFAULTS.mcp.browserFleetWorkerId),
+  MCP_BROWSER_FLEET_WORKER_ID: envString(CONFIG_DEFAULTS.mcp.browserFleetWorkerId),
   MCP_BROWSER_FLEET_WORKERS_JSON: z.string().optional().default(''),
   MCP_BROWSER_FLEET_VIRTUAL_NODES: envInt(CONFIG_DEFAULTS.mcp.browserFleetVirtualNodes).pipe(
     z.number().min(1).max(4096),
@@ -291,22 +342,16 @@ const ConfigSchema = z.object({
 
   // Cache
   ENABLE_CACHE: envBool(CONFIG_DEFAULTS.cache.enabled),
-  CACHE_DIR: z.string().optional().default(CONFIG_DEFAULTS.cache.dir),
+  CACHE_DIR: envString(CONFIG_DEFAULTS.cache.dir),
   CACHE_TTL: envInt(CONFIG_DEFAULTS.cache.ttl).pipe(z.number().min(0)),
 
   // Paths
-  MCP_SCREENSHOT_DIR: z.string().optional().default(CONFIG_DEFAULTS.paths.screenshotDir),
-  CAPTCHA_SCREENSHOT_DIR: z.string().optional().default(CONFIG_DEFAULTS.paths.captchaScreenshotDir),
-  MCP_DEBUGGER_SESSIONS_DIR: z
-    .string()
-    .optional()
-    .default(CONFIG_DEFAULTS.paths.debuggerSessionsDir),
-  MCP_EXTENSION_REGISTRY_DIR: z
-    .string()
-    .optional()
-    .default(CONFIG_DEFAULTS.paths.extensionRegistryDir),
-  MCP_TLS_KEYLOG_DIR: z.string().optional().default(CONFIG_DEFAULTS.paths.tlsKeyLogDir),
-  MCP_REGISTRY_CACHE_DIR: z.string().optional().default(CONFIG_DEFAULTS.paths.registryCacheDir),
+  MCP_SCREENSHOT_DIR: envString(CONFIG_DEFAULTS.paths.screenshotDir),
+  CAPTCHA_SCREENSHOT_DIR: envString(CONFIG_DEFAULTS.paths.captchaScreenshotDir),
+  MCP_DEBUGGER_SESSIONS_DIR: envString(CONFIG_DEFAULTS.paths.debuggerSessionsDir),
+  MCP_EXTENSION_REGISTRY_DIR: envString(CONFIG_DEFAULTS.paths.extensionRegistryDir),
+  MCP_TLS_KEYLOG_DIR: envString(CONFIG_DEFAULTS.paths.tlsKeyLogDir),
+  MCP_REGISTRY_CACHE_DIR: envString(CONFIG_DEFAULTS.paths.registryCacheDir),
 
   // Performance
   MAX_CONCURRENT_ANALYSIS: envInt(CONFIG_DEFAULTS.performance.maxConcurrentAnalysis).pipe(
@@ -321,172 +366,238 @@ const ConfigSchema = z.object({
     z.number().min(1),
   ),
   OFFLOADER_FILE_THRESHOLD: envInt(CONFIG_DEFAULTS.offloader.fileThreshold).pipe(z.number().min(1)),
-  OFFLOADER_OUTPUT_DIR: z.string().optional().default(CONFIG_DEFAULTS.offloader.outputDir),
+  OFFLOADER_OUTPUT_DIR: envString(CONFIG_DEFAULTS.offloader.outputDir),
   OFFLOADER_EXCLUDE_TOOLS: z.string().optional().default(''),
 
-  // Reverse engineering runtime limits
-  COLLECTOR_DEFAULT_TIMEOUT_MS: envInt(
-    CONFIG_DEFAULTS.reverseEngineering.collector.defaultTimeoutMs,
-  ).pipe(z.number().min(1)),
-  COLLECTOR_DYNAMIC_SCRIPT_WAIT_MS: envInt(
-    CONFIG_DEFAULTS.reverseEngineering.collector.dynamicScriptWaitMs,
-  ).pipe(z.number().min(1)),
-  TRANSFORM_WORKBENCH_DEFAULT_PREVIEW_BYTES: envInt(
+  // Search runtime overrides
+  SEARCH_QUERY_CATEGORY_PROFILES_JSON: optionalTrimmedString,
+  SEARCH_CJK_QUERY_ALIASES_JSON: optionalTrimmedString,
+  SEARCH_INTENT_TOOL_BOOST_RULES_JSON: optionalTrimmedString,
+  SEARCH_VECTOR_ENABLED: optionalEnvBool,
+  SEARCH_VECTOR_MODEL_ID: optionalTrimmedString,
+  SEARCH_VECTOR_COSINE_WEIGHT: envFloat(0.53).pipe(z.number().min(0).max(10)),
+  SEARCH_VECTOR_DYNAMIC_WEIGHT: envBool(true),
+
+  // Extension/plugin trust boundary
+  EXTENSION_REGISTRY_BASE_URL: optionalTrimmedString,
+  MCP_PLUGIN_ROOTS: z.string().optional().default(''),
+  MCP_WORKFLOW_ROOTS: z.string().optional().default(''),
+  MCP_PLUGIN_ALLOWED_DIGESTS: z.string().optional().default(''),
+  MCP_PLUGIN_SIGNATURE_REQUIRED: optionalEnvBool,
+  MCP_PLUGIN_STRICT_LOAD: optionalEnvBool,
+
+  // CAPTCHA service credentials/endpoints
+  CAPTCHA_PROVIDER: envString('manual'),
+  CAPTCHA_API_KEY: optionalTrimmedString,
+  CAPTCHA_SOLVER_BASE_URL: optionalTrimmedString,
+  CAPTCHA_2CAPTCHA_BASE_URL: optionalTrimmedString,
+  CAPTCHA_ANTICAPTCHA_BASE_URL: optionalTrimmedString,
+  CAPTCHA_CAPSOLVER_BASE_URL: optionalTrimmedString,
+
+  // Reverse-engineering runtime limits. Every deploy-time setting is parsed
+  // once here so malformed values can fall back independently.
+  TRANSFORM_WORKBENCH_DEFAULT_PREVIEW_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.transformWorkbench.defaultPreviewBytes,
-  ).pipe(z.number().min(1)),
-  TRANSFORM_WORKBENCH_MAX_PREVIEW_BYTES: envInt(
+  ),
+  TRANSFORM_WORKBENCH_MAX_PREVIEW_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.transformWorkbench.maxPreviewBytes,
-  ).pipe(z.number().min(1)),
-  TRANSFORM_WORKBENCH_TEXT_SAMPLE_BYTES: envInt(
+  ),
+  TRANSFORM_WORKBENCH_TEXT_SAMPLE_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.transformWorkbench.textSampleBytes,
-  ).pipe(z.number().min(1)),
-  TRANSFORM_WORKBENCH_MAX_INPUT_BYTES: envInt(
+  ),
+  TRANSFORM_WORKBENCH_MAX_INPUT_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.transformWorkbench.maxInputBytes,
-  ).pipe(z.number().min(1)),
-  TRANSFORM_WORKBENCH_MAX_OUTPUT_BYTES: envInt(
+  ),
+  TRANSFORM_WORKBENCH_MAX_OUTPUT_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.transformWorkbench.maxOutputBytes,
-  ).pipe(z.number().min(1)),
-  TRANSFORM_WORKBENCH_MAX_STEPS: envInt(
+  ),
+  TRANSFORM_WORKBENCH_MAX_STEPS: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.transformWorkbench.maxSteps,
-  ).pipe(z.number().min(1)),
-  REVERSE_SESSION_MAX_INLINE_TRANSFORM_INPUT_BYTES: envInt(
+  ),
+  REVERSE_SESSION_MAX_INLINE_TRANSFORM_INPUT_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.reverseSession.maxInlineTransformInputBytes,
-  ).pipe(z.number().min(1)),
-  REVERSE_SESSION_PROMOTED_TRANSFORM_PREVIEW_BYTES: envInt(
+  ),
+  REVERSE_SESSION_PROMOTED_TRANSFORM_PREVIEW_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.reverseSession.promotedTransformPreviewBytes,
-  ).pipe(z.number().min(1)),
-  REVERSE_SESSION_RUN_MAX_STEPS: envInt(
+  ),
+  REVERSE_SESSION_RUN_MAX_STEPS: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.reverseSession.runMaxSteps,
-  ).pipe(z.number().min(1)),
-  REVERSE_SESSION_EVIDENCE_REF_SEGMENT_MAX_CHARS: envInt(
+  ),
+  REVERSE_SESSION_EVIDENCE_REF_SEGMENT_MAX_CHARS: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.reverseSession.evidenceRefSegmentMaxChars,
-  ).pipe(z.number().min(1)),
-  BINARY_MAGIC_HINT_PREFIX_MAX_BYTES: envInt(
+  ),
+  BINARY_MAGIC_HINT_PREFIX_MAX_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.binaryMagic.hintPrefixMaxBytes,
-  ).pipe(z.number().min(1)),
+  ),
   DEX_MAGIC_ASCII: z
     .string()
+    .min(1)
     .optional()
     .default(CONFIG_DEFAULTS.reverseEngineering.binaryMagic.dexMagicAscii),
   CDEX_MAGIC_ASCII: z
     .string()
+    .min(1)
     .optional()
     .default(CONFIG_DEFAULTS.reverseEngineering.binaryMagic.compactDexMagicAscii),
-  NEMU_CSTRING_DEFAULT_LIMIT_BYTES: envInt(
+  NEMU_CSTRING_DEFAULT_LIMIT_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.nativeEmulator.cstringDefaultLimitBytes,
-  ).pipe(z.number().min(1)),
-  NEMU_CSTRING_READ_CHUNK_BYTES: envInt(
+  ),
+  NEMU_CSTRING_READ_CHUNK_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.nativeEmulator.cstringReadChunkBytes,
-  ).pipe(z.number().min(1)),
-  NEMU_GUEST_PAGE_SIZE_BYTES: envInt(
+  ),
+  NEMU_GUEST_PAGE_SIZE_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.nativeEmulator.guestPageSizeBytes,
-  ).pipe(z.number().min(1)),
-  NEMU_SYSCALL_CSTRING_LIMIT_BYTES: envInt(
+  ),
+  NEMU_SYSCALL_CSTRING_LIMIT_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.nativeEmulator.syscallCStringLimitBytes,
-  ).pipe(z.number().min(1)),
-  NEMU_RAW_MEMORY_MAX_BYTES: envInt(
+  ),
+  NEMU_RAW_MEMORY_MAX_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.nativeEmulator.rawMemoryMaxBytes,
-  ).pipe(z.number().min(1)),
-  NEMU_RAW_MEMORY_PREVIEW_BYTES: envInt(
+  ),
+  NEMU_RAW_MEMORY_PREVIEW_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.nativeEmulator.rawMemoryPreviewBytes,
-  ).pipe(z.number().min(1)),
-  APK_STATIC_TRIAGE_MIN_ENTRIES: envInt(
+  ),
+  APK_STATIC_TRIAGE_MIN_ENTRIES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.apk.staticTriageMinEntries,
-  ).pipe(z.number().min(1)),
-  APK_STATIC_TRIAGE_DEFAULT_ENTRIES: envInt(
+  ),
+  APK_STATIC_TRIAGE_DEFAULT_ENTRIES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.apk.staticTriageDefaultEntries,
-  ).pipe(z.number().min(1)),
-  APK_STATIC_TRIAGE_MAX_ENTRIES: envInt(
+  ),
+  APK_STATIC_TRIAGE_MAX_ENTRIES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.apk.staticTriageMaxEntries,
-  ).pipe(z.number().min(1)),
-  APK_STATIC_TRIAGE_ASSET_HINT_LIMIT: envInt(
+  ),
+  APK_STATIC_TRIAGE_ASSET_HINT_LIMIT: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.apk.staticTriageAssetHintLimit,
-  ).pipe(z.number().min(1)),
-  APK_STATIC_TRIAGE_NATIVE_LIB_LIMIT: envInt(
+  ),
+  APK_STATIC_TRIAGE_NATIVE_LIB_LIMIT: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.apk.staticTriageNativeLibLimit,
-  ).pipe(z.number().min(1)),
-  APK_DEX_INTAKE_DEFAULT_DEX_FILES: envInt(
+  ),
+  APK_DEX_INTAKE_DEFAULT_DEX_FILES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.apk.dexIntakeDefaultDexFiles,
-  ).pipe(z.number().min(1)),
-  APK_DEX_INTAKE_MAX_DEX_FILES: envInt(
+  ),
+  APK_DEX_INTAKE_MAX_DEX_FILES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.apk.dexIntakeMaxDexFiles,
-  ).pipe(z.number().min(1)),
-  APK_DEX_INTAKE_MANIFEST_TEXT_SAMPLE_BYTES: envInt(
+  ),
+  APK_DEX_INTAKE_MANIFEST_TEXT_SAMPLE_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.apk.dexIntakeManifestTextSampleBytes,
-  ).pipe(z.number().min(1)),
-  APK_DEX_INTAKE_MANIFEST_CONTROL_BYTE_RATIO: envFloat(
+  ),
+  APK_DEX_INTAKE_MANIFEST_CONTROL_BYTE_RATIO: ratioEnvFloat(
     CONFIG_DEFAULTS.reverseEngineering.apk.dexIntakeManifestControlByteRatio,
-  ).pipe(z.number().min(0).max(1)),
-  APK_DEX_INTAKE_COMPONENT_LIMIT: envInt(
+  ),
+  APK_DEX_INTAKE_COMPONENT_LIMIT: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.apk.dexIntakeComponentLimit,
-  ).pipe(z.number().min(1)),
-  APK_DEX_INTAKE_FEATURE_LIMIT: envInt(
+  ),
+  APK_DEX_INTAKE_FEATURE_LIMIT: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.apk.dexIntakeFeatureLimit,
-  ).pipe(z.number().min(1)),
-  APK_DEX_INTAKE_UNIQUE_LIMIT_DEFAULT: envInt(
+  ),
+  APK_DEX_INTAKE_UNIQUE_LIMIT_DEFAULT: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.apk.dexIntakeUniqueLimitDefault,
-  ).pipe(z.number().min(1)),
-  DEX_SCAN_DEFAULT_MAX_HITS: envInt(CONFIG_DEFAULTS.reverseEngineering.dex.scanDefaultMaxHits).pipe(
-    z.number().min(1),
   ),
-  DEX_SCAN_MAX_HITS: envInt(CONFIG_DEFAULTS.reverseEngineering.dex.scanMaxHits).pipe(
-    z.number().min(1),
+  DEX_SCAN_DEFAULT_MAX_HITS: positiveEnvInt(
+    CONFIG_DEFAULTS.reverseEngineering.dex.scanDefaultMaxHits,
   ),
-  DEX_SCAN_MAX_EXTRACT_BYTES: envInt(
+  DEX_SCAN_MAX_HITS: positiveEnvInt(CONFIG_DEFAULTS.reverseEngineering.dex.scanMaxHits),
+  DEX_SCAN_MAX_EXTRACT_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.dex.scanMaxExtractBytes,
-  ).pipe(z.number().min(1)),
-  DEX_ARTIFACT_DEFAULT_LIMIT: envInt(
+  ),
+  DEX_ARTIFACT_DEFAULT_LIMIT: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.dex.artifactDefaultLimit,
-  ).pipe(z.number().min(1)),
-  DEX_ARTIFACT_MAX_LIMIT: envInt(CONFIG_DEFAULTS.reverseEngineering.dex.artifactMaxLimit).pipe(
-    z.number().min(1),
   ),
-  DEX_ARTIFACT_MIN_READ_BYTES: envInt(
+  DEX_ARTIFACT_MAX_LIMIT: positiveEnvInt(CONFIG_DEFAULTS.reverseEngineering.dex.artifactMaxLimit),
+  DEX_ARTIFACT_MIN_READ_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.dex.artifactMinReadBytes,
-  ).pipe(z.number().min(1)),
-  DEX_ARTIFACT_DEFAULT_MAX_FILE_BYTES: envInt(
+  ),
+  DEX_ARTIFACT_DEFAULT_MAX_FILE_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.dex.artifactDefaultMaxFileBytes,
-  ).pipe(z.number().min(1)),
-  DEX_ARTIFACT_DEFAULT_MAX_TOTAL_BYTES: envInt(
+  ),
+  DEX_ARTIFACT_DEFAULT_MAX_TOTAL_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.dex.artifactDefaultMaxTotalBytes,
-  ).pipe(z.number().min(1)),
-  DEX_ARTIFACT_MAX_READ_BYTES: envInt(
+  ),
+  DEX_ARTIFACT_MAX_READ_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.dex.artifactMaxReadBytes,
-  ).pipe(z.number().min(1)),
-  DEX_STRING_SCAN_MAX_BYTES: envInt(CONFIG_DEFAULTS.reverseEngineering.dex.stringScanMaxBytes).pipe(
-    z.number().min(1),
   ),
-  FRIDA_DEX_DUMP_TIMEOUT_MS: envInt(CONFIG_DEFAULTS.reverseEngineering.frida.dexDumpTimeoutMs).pipe(
-    z.number().min(1),
+  DEX_STRING_SCAN_MAX_BYTES: positiveEnvInt(
+    CONFIG_DEFAULTS.reverseEngineering.dex.stringScanMaxBytes,
   ),
-  FRIDA_DEX_DUMP_MAX_BUFFER_BYTES: envInt(
+  FRIDA_DEX_DUMP_TIMEOUT_MS: positiveEnvInt(
+    CONFIG_DEFAULTS.reverseEngineering.frida.dexDumpTimeoutMs,
+  ),
+  FRIDA_DEX_DUMP_MAX_BUFFER_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.frida.dexDumpMaxBufferBytes,
-  ).pipe(z.number().min(1)),
-  FRIDA_DEX_DUMP_FILE_LIMIT: envInt(CONFIG_DEFAULTS.reverseEngineering.frida.dexDumpFileLimit).pipe(
-    z.number().min(1),
   ),
-  JADX_DECOMPILE_TIMEOUT_MS: envInt(
+  FRIDA_DEX_DUMP_FILE_LIMIT: positiveEnvInt(
+    CONFIG_DEFAULTS.reverseEngineering.frida.dexDumpFileLimit,
+  ),
+  JADX_DECOMPILE_TIMEOUT_MS: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.jadx.decompileTimeoutMs,
-  ).pipe(z.number().min(1000)),
-  JADX_SEARCH_TIMEOUT_MS: envInt(CONFIG_DEFAULTS.reverseEngineering.jadx.searchTimeoutMs).pipe(
-    z.number().min(1000),
   ),
-  JADX_SINGLE_CLASS_TIMEOUT_MS: envInt(
+  JADX_SEARCH_TIMEOUT_MS: positiveEnvInt(CONFIG_DEFAULTS.reverseEngineering.jadx.searchTimeoutMs),
+  JADX_SINGLE_CLASS_TIMEOUT_MS: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.jadx.singleClassTimeoutMs,
-  ).pipe(z.number().min(1000)),
-  JADX_THREADS_COUNT: envInt(CONFIG_DEFAULTS.reverseEngineering.jadx.threadsCount).pipe(
-    z.number().min(1).max(64),
   ),
-  ANDROID_RUNTIME_MAPS_MAX_BYTES: envInt(
+  JADX_THREADS_COUNT: positiveEnvInt(CONFIG_DEFAULTS.reverseEngineering.jadx.threadsCount),
+  ANDROID_RUNTIME_MAPS_MAX_BYTES: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.androidRuntime.mapsMaxBytes,
-  ).pipe(z.number().min(1)),
-  ANDROID_RUNTIME_MAPS_MODULE_LIMIT: envInt(
+  ),
+  ANDROID_RUNTIME_MAPS_MODULE_LIMIT: positiveEnvInt(
     CONFIG_DEFAULTS.reverseEngineering.androidRuntime.mapsModuleLimit,
-  ).pipe(z.number().min(1)),
+  ),
+  COLLECTOR_DEFAULT_TIMEOUT_MS: positiveEnvInt(
+    CONFIG_DEFAULTS.reverseEngineering.collector.defaultTimeoutMs,
+  ),
+  COLLECTOR_DYNAMIC_SCRIPT_WAIT_MS: positiveEnvInt(
+    CONFIG_DEFAULTS.reverseEngineering.collector.dynamicScriptWaitMs,
+  ),
 });
 
-function parseJsonArrayEnv(key: string): unknown[] | undefined {
-  const raw = process.env[key];
+type ParsedConfigEnvironment = z.output<typeof ConfigSchema>;
+
+/**
+ * Parse every environment field independently. A malformed value is removed
+ * and reparsed so that field receives its declared default while all valid
+ * sibling overrides remain intact. This avoids the previous all-or-nothing
+ * fallback, which accidentally returned the original unvalidated strings.
+ */
+function parseConfigEnvironment(source: NodeJS.ProcessEnv): ParsedConfigEnvironment {
+  const candidate: Record<string, unknown> = { ...source };
+  const reportedIssues: string[] = [];
+  const maxPasses = Object.keys(ConfigSchema.shape).length + 1;
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const parsed = ConfigSchema.safeParse(candidate);
+    if (parsed.success) {
+      if (reportedIssues.length > 0) {
+        console.error(
+          `[Config] Invalid environment values; using defaults for those fields:\n` +
+            reportedIssues.map((issue) => `  ${issue}`).join('\n'),
+        );
+      }
+      return parsed.data;
+    }
+
+    const invalidKeys = new Set<string>();
+    for (const issue of parsed.error.issues) {
+      const key = issue.path[0];
+      if (typeof key !== 'string') continue;
+      invalidKeys.add(key);
+      reportedIssues.push(`${key}: ${issue.message}`);
+    }
+
+    if (invalidKeys.size === 0) {
+      break;
+    }
+    for (const key of invalidKeys) {
+      delete candidate[key];
+    }
+  }
+
+  // Schema defaults are literals and must always parse. Keep this explicit so
+  // a future invalid default fails loudly during development instead of
+  // re-introducing unvalidated environment data.
+  return ConfigSchema.parse({});
+}
+
+function parseJsonArrayEnv(raw: string | undefined): unknown[] | undefined {
   if (!raw) {
     return undefined;
   }
@@ -499,8 +610,10 @@ function parseJsonArrayEnv(key: string): unknown[] | undefined {
   }
 }
 
-function parseSearchQueryCategoryProfiles(): SearchQueryCategoryProfileConfig[] | undefined {
-  const parsed = parseJsonArrayEnv('SEARCH_QUERY_CATEGORY_PROFILES_JSON');
+function parseSearchQueryCategoryProfiles(
+  raw: string | undefined,
+): SearchQueryCategoryProfileConfig[] | undefined {
+  const parsed = parseJsonArrayEnv(raw);
   if (parsed === undefined) {
     return undefined;
   }
@@ -535,8 +648,8 @@ function parseSearchQueryCategoryProfiles(): SearchQueryCategoryProfileConfig[] 
   });
 }
 
-function parseCjkQueryAliases(): SearchCjkQueryAliasConfig[] | undefined {
-  const parsed = parseJsonArrayEnv('SEARCH_CJK_QUERY_ALIASES_JSON');
+function parseCjkQueryAliases(raw: string | undefined): SearchCjkQueryAliasConfig[] | undefined {
+  const parsed = parseJsonArrayEnv(raw);
   if (parsed === undefined) {
     return undefined;
   }
@@ -557,8 +670,10 @@ function parseCjkQueryAliases(): SearchCjkQueryAliasConfig[] | undefined {
   });
 }
 
-function parseIntentToolBoostRules(): SearchIntentToolBoostRuleConfig[] | undefined {
-  const parsed = parseJsonArrayEnv('SEARCH_INTENT_TOOL_BOOST_RULES_JSON');
+function parseIntentToolBoostRules(
+  raw: string | undefined,
+): SearchIntentToolBoostRuleConfig[] | undefined {
+  const parsed = parseJsonArrayEnv(raw);
   if (parsed === undefined) {
     return undefined;
   }
@@ -615,40 +730,24 @@ function cloneSearchConfig(search: SearchConfig): SearchConfig {
   };
 }
 
-function buildSearchConfig(): SearchConfig {
+function buildSearchConfig(env: ParsedConfigEnvironment): SearchConfig {
   const defaults = cloneSearchConfig(DEFAULT_SEARCH_CONFIG);
-  const httpTransport = MCP_TRANSPORT.trim().toLowerCase() === 'http';
+  const httpTransport = env.MCP_TRANSPORT === 'http';
 
   return {
-    queryCategoryProfiles: parseSearchQueryCategoryProfiles() ?? defaults.queryCategoryProfiles,
-    cjkQueryAliases: parseCjkQueryAliases() ?? defaults.cjkQueryAliases,
-    intentToolBoostRules: parseIntentToolBoostRules() ?? defaults.intentToolBoostRules,
-    vectorEnabled: coerceBooleanEnv(process.env.SEARCH_VECTOR_ENABLED, httpTransport),
-    vectorModelId: stringEnv(
-      process.env.SEARCH_VECTOR_MODEL_ID,
-      defaults.vectorModelId ?? DEFAULT_SEARCH_VECTOR_MODEL_ID,
-    ),
-    vectorCosineWeight: coerceFloatEnv(
-      process.env.SEARCH_VECTOR_COSINE_WEIGHT,
-      defaults.vectorCosineWeight ?? 0.53,
-    ),
-    vectorDynamicWeight: coerceBooleanEnv(
-      process.env.SEARCH_VECTOR_DYNAMIC_WEIGHT,
-      defaults.vectorDynamicWeight ?? true,
-    ),
+    queryCategoryProfiles:
+      parseSearchQueryCategoryProfiles(env.SEARCH_QUERY_CATEGORY_PROFILES_JSON) ??
+      defaults.queryCategoryProfiles,
+    cjkQueryAliases:
+      parseCjkQueryAliases(env.SEARCH_CJK_QUERY_ALIASES_JSON) ?? defaults.cjkQueryAliases,
+    intentToolBoostRules:
+      parseIntentToolBoostRules(env.SEARCH_INTENT_TOOL_BOOST_RULES_JSON) ??
+      defaults.intentToolBoostRules,
+    vectorEnabled: env.SEARCH_VECTOR_ENABLED ?? httpTransport,
+    vectorModelId: env.SEARCH_VECTOR_MODEL_ID ?? DEFAULT_SEARCH_VECTOR_MODEL_ID,
+    vectorCosineWeight: env.SEARCH_VECTOR_COSINE_WEIGHT,
+    vectorDynamicWeight: env.SEARCH_VECTOR_DYNAMIC_WEIGHT,
   };
-}
-
-function positiveIntegerEnv(value: unknown, fallback: number): number {
-  return Math.max(1, coerceIntegerEnv(value, fallback));
-}
-
-function ratioEnv(value: unknown, fallback: number): number {
-  return Math.max(0, Math.min(coerceFloatEnv(value, fallback), 1));
-}
-
-function stringEnv(value: unknown, fallback: string): string {
-  return typeof value === 'string' ? value : fallback;
 }
 
 function parseCsvList(value: unknown): string[] {
@@ -659,42 +758,6 @@ function parseCsvList(value: unknown): string[] {
     .split(',')
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
-}
-
-function coerceBooleanEnv(value: unknown, fallback: boolean): boolean {
-  if (typeof value === 'boolean') {
-    return value;
-  }
-  if (typeof value === 'string') {
-    return value === 'true';
-  }
-  return fallback;
-}
-
-function coerceIntegerEnv(value: unknown, fallback: number): number {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === 'string') {
-    const parsed = Number.parseInt(value, 10);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-  return fallback;
-}
-
-function coerceFloatEnv(value: unknown, fallback: number): number {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === 'string') {
-    const parsed = Number.parseFloat(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-  return fallback;
 }
 
 function parseBrowserFleetWorkers(
@@ -757,390 +820,260 @@ function parseBrowserFleetWorkers(
   }
 }
 
-function buildReverseEngineeringConfig(env: Record<string, unknown>): ReverseEngineeringConfig {
-  const defaults = CONFIG_DEFAULTS.reverseEngineering;
+function buildReverseEngineeringConfig(env: ParsedConfigEnvironment): ReverseEngineeringConfig {
   return {
     transformWorkbench: {
-      defaultPreviewBytes: positiveIntegerEnv(
-        env.TRANSFORM_WORKBENCH_DEFAULT_PREVIEW_BYTES,
-        defaults.transformWorkbench.defaultPreviewBytes,
-      ),
-      maxPreviewBytes: positiveIntegerEnv(
-        env.TRANSFORM_WORKBENCH_MAX_PREVIEW_BYTES,
-        defaults.transformWorkbench.maxPreviewBytes,
-      ),
-      textSampleBytes: positiveIntegerEnv(
-        env.TRANSFORM_WORKBENCH_TEXT_SAMPLE_BYTES,
-        defaults.transformWorkbench.textSampleBytes,
-      ),
-      maxInputBytes: positiveIntegerEnv(
-        env.TRANSFORM_WORKBENCH_MAX_INPUT_BYTES,
-        defaults.transformWorkbench.maxInputBytes,
-      ),
-      maxOutputBytes: positiveIntegerEnv(
-        env.TRANSFORM_WORKBENCH_MAX_OUTPUT_BYTES,
-        defaults.transformWorkbench.maxOutputBytes,
-      ),
-      maxSteps: positiveIntegerEnv(
-        env.TRANSFORM_WORKBENCH_MAX_STEPS,
-        defaults.transformWorkbench.maxSteps,
-      ),
+      defaultPreviewBytes: env.TRANSFORM_WORKBENCH_DEFAULT_PREVIEW_BYTES,
+      maxPreviewBytes: env.TRANSFORM_WORKBENCH_MAX_PREVIEW_BYTES,
+      textSampleBytes: env.TRANSFORM_WORKBENCH_TEXT_SAMPLE_BYTES,
+      maxInputBytes: env.TRANSFORM_WORKBENCH_MAX_INPUT_BYTES,
+      maxOutputBytes: env.TRANSFORM_WORKBENCH_MAX_OUTPUT_BYTES,
+      maxSteps: env.TRANSFORM_WORKBENCH_MAX_STEPS,
     },
     reverseSession: {
-      maxInlineTransformInputBytes: positiveIntegerEnv(
-        env.REVERSE_SESSION_MAX_INLINE_TRANSFORM_INPUT_BYTES,
-        defaults.reverseSession.maxInlineTransformInputBytes,
-      ),
-      promotedTransformPreviewBytes: positiveIntegerEnv(
-        env.REVERSE_SESSION_PROMOTED_TRANSFORM_PREVIEW_BYTES,
-        defaults.reverseSession.promotedTransformPreviewBytes,
-      ),
-      runMaxSteps: positiveIntegerEnv(
-        env.REVERSE_SESSION_RUN_MAX_STEPS,
-        defaults.reverseSession.runMaxSteps,
-      ),
-      evidenceRefSegmentMaxChars: positiveIntegerEnv(
-        env.REVERSE_SESSION_EVIDENCE_REF_SEGMENT_MAX_CHARS,
-        defaults.reverseSession.evidenceRefSegmentMaxChars,
-      ),
+      maxInlineTransformInputBytes: env.REVERSE_SESSION_MAX_INLINE_TRANSFORM_INPUT_BYTES,
+      promotedTransformPreviewBytes: env.REVERSE_SESSION_PROMOTED_TRANSFORM_PREVIEW_BYTES,
+      runMaxSteps: env.REVERSE_SESSION_RUN_MAX_STEPS,
+      evidenceRefSegmentMaxChars: env.REVERSE_SESSION_EVIDENCE_REF_SEGMENT_MAX_CHARS,
     },
     binaryMagic: {
-      hintPrefixMaxBytes: positiveIntegerEnv(
-        env.BINARY_MAGIC_HINT_PREFIX_MAX_BYTES,
-        defaults.binaryMagic.hintPrefixMaxBytes,
-      ),
-      dexMagicAscii: stringEnv(env.DEX_MAGIC_ASCII, defaults.binaryMagic.dexMagicAscii),
-      compactDexMagicAscii: stringEnv(
-        env.CDEX_MAGIC_ASCII,
-        defaults.binaryMagic.compactDexMagicAscii,
-      ),
+      hintPrefixMaxBytes: env.BINARY_MAGIC_HINT_PREFIX_MAX_BYTES,
+      dexMagicAscii: env.DEX_MAGIC_ASCII,
+      compactDexMagicAscii: env.CDEX_MAGIC_ASCII,
     },
     nativeEmulator: {
-      cstringDefaultLimitBytes: positiveIntegerEnv(
-        env.NEMU_CSTRING_DEFAULT_LIMIT_BYTES,
-        defaults.nativeEmulator.cstringDefaultLimitBytes,
-      ),
-      cstringReadChunkBytes: positiveIntegerEnv(
-        env.NEMU_CSTRING_READ_CHUNK_BYTES,
-        defaults.nativeEmulator.cstringReadChunkBytes,
-      ),
-      guestPageSizeBytes: positiveIntegerEnv(
-        env.NEMU_GUEST_PAGE_SIZE_BYTES,
-        defaults.nativeEmulator.guestPageSizeBytes,
-      ),
-      syscallCStringLimitBytes: positiveIntegerEnv(
-        env.NEMU_SYSCALL_CSTRING_LIMIT_BYTES,
-        defaults.nativeEmulator.syscallCStringLimitBytes,
-      ),
-      rawMemoryMaxBytes: positiveIntegerEnv(
-        env.NEMU_RAW_MEMORY_MAX_BYTES,
-        defaults.nativeEmulator.rawMemoryMaxBytes,
-      ),
-      rawMemoryPreviewBytes: positiveIntegerEnv(
-        env.NEMU_RAW_MEMORY_PREVIEW_BYTES,
-        defaults.nativeEmulator.rawMemoryPreviewBytes,
-      ),
+      cstringDefaultLimitBytes: env.NEMU_CSTRING_DEFAULT_LIMIT_BYTES,
+      cstringReadChunkBytes: env.NEMU_CSTRING_READ_CHUNK_BYTES,
+      guestPageSizeBytes: env.NEMU_GUEST_PAGE_SIZE_BYTES,
+      syscallCStringLimitBytes: env.NEMU_SYSCALL_CSTRING_LIMIT_BYTES,
+      rawMemoryMaxBytes: env.NEMU_RAW_MEMORY_MAX_BYTES,
+      rawMemoryPreviewBytes: env.NEMU_RAW_MEMORY_PREVIEW_BYTES,
     },
     apk: {
-      staticTriageMinEntries: positiveIntegerEnv(
-        env.APK_STATIC_TRIAGE_MIN_ENTRIES,
-        defaults.apk.staticTriageMinEntries,
-      ),
-      staticTriageDefaultEntries: positiveIntegerEnv(
-        env.APK_STATIC_TRIAGE_DEFAULT_ENTRIES,
-        defaults.apk.staticTriageDefaultEntries,
-      ),
-      staticTriageMaxEntries: positiveIntegerEnv(
-        env.APK_STATIC_TRIAGE_MAX_ENTRIES,
-        defaults.apk.staticTriageMaxEntries,
-      ),
-      staticTriageAssetHintLimit: positiveIntegerEnv(
-        env.APK_STATIC_TRIAGE_ASSET_HINT_LIMIT,
-        defaults.apk.staticTriageAssetHintLimit,
-      ),
-      staticTriageNativeLibLimit: positiveIntegerEnv(
-        env.APK_STATIC_TRIAGE_NATIVE_LIB_LIMIT,
-        defaults.apk.staticTriageNativeLibLimit,
-      ),
-      dexIntakeDefaultDexFiles: positiveIntegerEnv(
-        env.APK_DEX_INTAKE_DEFAULT_DEX_FILES,
-        defaults.apk.dexIntakeDefaultDexFiles,
-      ),
-      dexIntakeMaxDexFiles: positiveIntegerEnv(
-        env.APK_DEX_INTAKE_MAX_DEX_FILES,
-        defaults.apk.dexIntakeMaxDexFiles,
-      ),
-      dexIntakeManifestTextSampleBytes: positiveIntegerEnv(
-        env.APK_DEX_INTAKE_MANIFEST_TEXT_SAMPLE_BYTES,
-        defaults.apk.dexIntakeManifestTextSampleBytes,
-      ),
-      dexIntakeManifestControlByteRatio: ratioEnv(
-        env.APK_DEX_INTAKE_MANIFEST_CONTROL_BYTE_RATIO,
-        defaults.apk.dexIntakeManifestControlByteRatio,
-      ),
-      dexIntakeComponentLimit: positiveIntegerEnv(
-        env.APK_DEX_INTAKE_COMPONENT_LIMIT,
-        defaults.apk.dexIntakeComponentLimit,
-      ),
-      dexIntakeFeatureLimit: positiveIntegerEnv(
-        env.APK_DEX_INTAKE_FEATURE_LIMIT,
-        defaults.apk.dexIntakeFeatureLimit,
-      ),
-      dexIntakeUniqueLimitDefault: positiveIntegerEnv(
-        env.APK_DEX_INTAKE_UNIQUE_LIMIT_DEFAULT,
-        defaults.apk.dexIntakeUniqueLimitDefault,
-      ),
+      staticTriageMinEntries: env.APK_STATIC_TRIAGE_MIN_ENTRIES,
+      staticTriageDefaultEntries: env.APK_STATIC_TRIAGE_DEFAULT_ENTRIES,
+      staticTriageMaxEntries: env.APK_STATIC_TRIAGE_MAX_ENTRIES,
+      staticTriageAssetHintLimit: env.APK_STATIC_TRIAGE_ASSET_HINT_LIMIT,
+      staticTriageNativeLibLimit: env.APK_STATIC_TRIAGE_NATIVE_LIB_LIMIT,
+      dexIntakeDefaultDexFiles: env.APK_DEX_INTAKE_DEFAULT_DEX_FILES,
+      dexIntakeMaxDexFiles: env.APK_DEX_INTAKE_MAX_DEX_FILES,
+      dexIntakeManifestTextSampleBytes: env.APK_DEX_INTAKE_MANIFEST_TEXT_SAMPLE_BYTES,
+      dexIntakeManifestControlByteRatio: env.APK_DEX_INTAKE_MANIFEST_CONTROL_BYTE_RATIO,
+      dexIntakeComponentLimit: env.APK_DEX_INTAKE_COMPONENT_LIMIT,
+      dexIntakeFeatureLimit: env.APK_DEX_INTAKE_FEATURE_LIMIT,
+      dexIntakeUniqueLimitDefault: env.APK_DEX_INTAKE_UNIQUE_LIMIT_DEFAULT,
     },
     dex: {
-      scanDefaultMaxHits: positiveIntegerEnv(
-        env.DEX_SCAN_DEFAULT_MAX_HITS,
-        defaults.dex.scanDefaultMaxHits,
-      ),
-      scanMaxHits: positiveIntegerEnv(env.DEX_SCAN_MAX_HITS, defaults.dex.scanMaxHits),
-      scanMaxExtractBytes: positiveIntegerEnv(
-        env.DEX_SCAN_MAX_EXTRACT_BYTES,
-        defaults.dex.scanMaxExtractBytes,
-      ),
-      artifactDefaultLimit: positiveIntegerEnv(
-        env.DEX_ARTIFACT_DEFAULT_LIMIT,
-        defaults.dex.artifactDefaultLimit,
-      ),
-      artifactMaxLimit: positiveIntegerEnv(
-        env.DEX_ARTIFACT_MAX_LIMIT,
-        defaults.dex.artifactMaxLimit,
-      ),
-      artifactMinReadBytes: positiveIntegerEnv(
-        env.DEX_ARTIFACT_MIN_READ_BYTES,
-        defaults.dex.artifactMinReadBytes,
-      ),
-      artifactDefaultMaxFileBytes: positiveIntegerEnv(
-        env.DEX_ARTIFACT_DEFAULT_MAX_FILE_BYTES,
-        defaults.dex.artifactDefaultMaxFileBytes,
-      ),
-      artifactDefaultMaxTotalBytes: positiveIntegerEnv(
-        env.DEX_ARTIFACT_DEFAULT_MAX_TOTAL_BYTES,
-        defaults.dex.artifactDefaultMaxTotalBytes,
-      ),
-      artifactMaxReadBytes: positiveIntegerEnv(
-        env.DEX_ARTIFACT_MAX_READ_BYTES,
-        defaults.dex.artifactMaxReadBytes,
-      ),
-      stringScanMaxBytes: positiveIntegerEnv(
-        env.DEX_STRING_SCAN_MAX_BYTES,
-        defaults.dex.stringScanMaxBytes,
-      ),
+      scanDefaultMaxHits: env.DEX_SCAN_DEFAULT_MAX_HITS,
+      scanMaxHits: env.DEX_SCAN_MAX_HITS,
+      scanMaxExtractBytes: env.DEX_SCAN_MAX_EXTRACT_BYTES,
+      artifactDefaultLimit: env.DEX_ARTIFACT_DEFAULT_LIMIT,
+      artifactMaxLimit: env.DEX_ARTIFACT_MAX_LIMIT,
+      artifactMinReadBytes: env.DEX_ARTIFACT_MIN_READ_BYTES,
+      artifactDefaultMaxFileBytes: env.DEX_ARTIFACT_DEFAULT_MAX_FILE_BYTES,
+      artifactDefaultMaxTotalBytes: env.DEX_ARTIFACT_DEFAULT_MAX_TOTAL_BYTES,
+      artifactMaxReadBytes: env.DEX_ARTIFACT_MAX_READ_BYTES,
+      stringScanMaxBytes: env.DEX_STRING_SCAN_MAX_BYTES,
     },
     frida: {
-      dexDumpTimeoutMs: positiveIntegerEnv(
-        env.FRIDA_DEX_DUMP_TIMEOUT_MS,
-        defaults.frida.dexDumpTimeoutMs,
-      ),
-      dexDumpMaxBufferBytes: positiveIntegerEnv(
-        env.FRIDA_DEX_DUMP_MAX_BUFFER_BYTES,
-        defaults.frida.dexDumpMaxBufferBytes,
-      ),
-      dexDumpFileLimit: positiveIntegerEnv(
-        env.FRIDA_DEX_DUMP_FILE_LIMIT,
-        defaults.frida.dexDumpFileLimit,
-      ),
+      dexDumpTimeoutMs: env.FRIDA_DEX_DUMP_TIMEOUT_MS,
+      dexDumpMaxBufferBytes: env.FRIDA_DEX_DUMP_MAX_BUFFER_BYTES,
+      dexDumpFileLimit: env.FRIDA_DEX_DUMP_FILE_LIMIT,
     },
     jadx: {
-      decompileTimeoutMs: positiveIntegerEnv(
-        env.JADX_DECOMPILE_TIMEOUT_MS,
-        defaults.jadx.decompileTimeoutMs,
-      ),
-      searchTimeoutMs: positiveIntegerEnv(
-        env.JADX_SEARCH_TIMEOUT_MS,
-        defaults.jadx.searchTimeoutMs,
-      ),
-      singleClassTimeoutMs: positiveIntegerEnv(
-        env.JADX_SINGLE_CLASS_TIMEOUT_MS,
-        defaults.jadx.singleClassTimeoutMs,
-      ),
-      threadsCount: positiveIntegerEnv(env.JADX_THREADS_COUNT, defaults.jadx.threadsCount),
+      decompileTimeoutMs: env.JADX_DECOMPILE_TIMEOUT_MS,
+      searchTimeoutMs: env.JADX_SEARCH_TIMEOUT_MS,
+      singleClassTimeoutMs: env.JADX_SINGLE_CLASS_TIMEOUT_MS,
+      threadsCount: env.JADX_THREADS_COUNT,
     },
     androidRuntime: {
-      mapsMaxBytes: positiveIntegerEnv(
-        env.ANDROID_RUNTIME_MAPS_MAX_BYTES,
-        defaults.androidRuntime.mapsMaxBytes,
-      ),
-      mapsModuleLimit: positiveIntegerEnv(
-        env.ANDROID_RUNTIME_MAPS_MODULE_LIMIT,
-        defaults.androidRuntime.mapsModuleLimit,
-      ),
+      mapsMaxBytes: env.ANDROID_RUNTIME_MAPS_MAX_BYTES,
+      mapsModuleLimit: env.ANDROID_RUNTIME_MAPS_MODULE_LIMIT,
     },
     collector: {
-      defaultTimeoutMs: positiveIntegerEnv(
-        env.COLLECTOR_DEFAULT_TIMEOUT_MS,
-        defaults.collector.defaultTimeoutMs,
-      ),
-      dynamicScriptWaitMs: positiveIntegerEnv(
-        env.COLLECTOR_DYNAMIC_SCRIPT_WAIT_MS,
-        defaults.collector.dynamicScriptWaitMs,
-      ),
+      defaultTimeoutMs: env.COLLECTOR_DEFAULT_TIMEOUT_MS,
+      dynamicScriptWaitMs: env.COLLECTOR_DYNAMIC_SCRIPT_WAIT_MS,
     },
   };
 }
 
 export function getConfig(): Config {
-  loadEnvIfNeeded();
+  bootstrapRuntimeEnv();
 
-  const parsed = ConfigSchema.safeParse(process.env);
+  const env = parseConfigEnvironment(process.env);
 
-  if (!parsed.success) {
-    const issues = parsed.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`);
-    console.error(`[Config] Validation errors:\n${issues.join('\n')}`);
-    console.error('[Config] Falling back to safe defaults for invalid fields');
-  }
-
-  // Use parsed data if valid, otherwise fall back to process.env with defaults
-  const env = parsed.success ? parsed.data : process.env;
-
-  const cacheDir = (env.CACHE_DIR as string) || CONFIG_DEFAULTS.cache.dir;
+  const cacheDir = env.CACHE_DIR;
   const configuredExecutablePath =
-    (env.PUPPETEER_EXECUTABLE_PATH as string) ||
-    (env.CHROME_PATH as string) ||
-    (env.BROWSER_EXECUTABLE_PATH as string);
-  const absoluteCacheDir =
-    cacheDir.startsWith('/') || cacheDir.match(/^[A-Za-z]:/)
-      ? cacheDir
-      : join(projectRoot, cacheDir);
-  const search = buildSearchConfig();
+    env.PUPPETEER_EXECUTABLE_PATH ?? env.CHROME_PATH ?? env.BROWSER_EXECUTABLE_PATH;
   const writableBase = getWritableBaseDir();
+  // Cache is written at runtime, so a relative CACHE_DIR must resolve against the
+  // writable base (user cwd in npx/global installs), not the immutable install
+  // cache. Previously projectRoot was used, silently degrading cache to a no-op
+  // whenever the package root was not writable.
+  const absoluteCacheDir = resolveConfigPath(cacheDir, writableBase);
+  const search = buildSearchConfig(env);
   const paths = {
-    screenshotDir: resolveConfigPath(
-      (env.MCP_SCREENSHOT_DIR as string) || CONFIG_DEFAULTS.paths.screenshotDir,
-      writableBase,
-    ),
-    captchaScreenshotDir: resolveConfigPath(
-      (env.CAPTCHA_SCREENSHOT_DIR as string) || CONFIG_DEFAULTS.paths.captchaScreenshotDir,
-      writableBase,
-    ),
-    debuggerSessionsDir: resolveConfigPath(
-      (env.MCP_DEBUGGER_SESSIONS_DIR as string) || CONFIG_DEFAULTS.paths.debuggerSessionsDir,
-      process.cwd(),
-    ),
-    extensionRegistryDir: resolveConfigPath(
-      (env.MCP_EXTENSION_REGISTRY_DIR as string) || CONFIG_DEFAULTS.paths.extensionRegistryDir,
-      writableBase,
-    ),
-    tlsKeyLogDir: resolveConfigPath(
-      (env.MCP_TLS_KEYLOG_DIR as string) || CONFIG_DEFAULTS.paths.tlsKeyLogDir,
-      writableBase,
-    ),
-    registryCacheDir: resolveConfigPath(
-      (env.MCP_REGISTRY_CACHE_DIR as string) || CONFIG_DEFAULTS.paths.registryCacheDir,
-      homedir(),
-    ),
+    screenshotDir: resolveConfigPath(env.MCP_SCREENSHOT_DIR, writableBase),
+    captchaScreenshotDir: resolveConfigPath(env.CAPTCHA_SCREENSHOT_DIR, writableBase),
+    debuggerSessionsDir: resolveConfigPath(env.MCP_DEBUGGER_SESSIONS_DIR, process.cwd()),
+    extensionRegistryDir: resolveConfigPath(env.MCP_EXTENSION_REGISTRY_DIR, writableBase),
+    tlsKeyLogDir: resolveConfigPath(env.MCP_TLS_KEYLOG_DIR, writableBase),
+    registryCacheDir: resolveConfigPath(env.MCP_REGISTRY_CACHE_DIR, homedir()),
   };
-  const browserFleetWorkerId =
-    typeof env.MCP_BROWSER_FLEET_WORKER_ID === 'string' &&
-    env.MCP_BROWSER_FLEET_WORKER_ID.trim().length > 0
-      ? env.MCP_BROWSER_FLEET_WORKER_ID.trim()
-      : CONFIG_DEFAULTS.mcp.browserFleetWorkerId;
+  const browserFleetWorkerId = env.MCP_BROWSER_FLEET_WORKER_ID.trim();
   const browserFleetWorkers = parseBrowserFleetWorkers(
     env.MCP_BROWSER_FLEET_WORKERS_JSON,
     browserFleetWorkerId,
   );
+  const pluginSignatureRequired =
+    env.MCP_PLUGIN_SIGNATURE_REQUIRED ?? env.NODE_ENV === 'production';
+  const pluginStrictLoad =
+    (env.MCP_PLUGIN_STRICT_LOAD ?? pluginSignatureRequired) || pluginSignatureRequired;
 
   return {
     puppeteer: {
-      headless: coerceBooleanEnv(env.PUPPETEER_HEADLESS, CONFIG_DEFAULTS.puppeteer.headless),
-      timeout: coerceIntegerEnv(env.PUPPETEER_TIMEOUT, CONFIG_DEFAULTS.puppeteer.timeout),
-      executablePath: configuredExecutablePath?.trim() || undefined,
+      headless: env.PUPPETEER_HEADLESS,
+      timeout: env.PUPPETEER_TIMEOUT,
+      executablePath: configuredExecutablePath,
+    },
+    server: {
+      transport: env.MCP_TRANSPORT,
+      host: env.MCP_HOST,
+      port: env.MCP_PORT,
+      authToken: env.MCP_AUTH_TOKEN,
+      allowInsecure: env.MCP_ALLOW_INSECURE,
+      healthVerbose: env.MCP_HEALTH_VERBOSE,
+      logging: {
+        enabled: env.MCP_LOG_ENABLED,
+        level: env.MCP_LOG_LEVEL,
+        fileDir: env.MCP_LOG_FILE_DIR,
+      },
+      http: {
+        requestTimeoutMs: env.MCP_HTTP_REQUEST_TIMEOUT_MS,
+        headersTimeoutMs: env.MCP_HTTP_HEADERS_TIMEOUT_MS,
+        keepAliveTimeoutMs: env.MCP_HTTP_KEEPALIVE_TIMEOUT_MS,
+        forceCloseTimeoutMs: env.MCP_HTTP_FORCE_CLOSE_TIMEOUT_MS,
+        maxBodyBytes: env.MCP_MAX_BODY_BYTES,
+        rateLimitEnabled: env.MCP_RATE_LIMIT_ENABLED,
+        rateLimitWindowMs: env.MCP_RATE_LIMIT_WINDOW_MS,
+        rateLimitMax: env.MCP_RATE_LIMIT_MAX,
+        trustProxy: env.MCP_TRUST_PROXY,
+        maxInFlight: env.MCP_HTTP_MAX_INFLIGHT,
+        maxSseInFlight: env.MCP_HTTP_MAX_SSE_INFLIGHT,
+      },
     },
     mcp: {
-      name: (env.MCP_SERVER_NAME as string) || CONFIG_DEFAULTS.mcp.name,
-      version: (env.MCP_SERVER_VERSION as string) || CONFIG_DEFAULTS.mcp.version,
-      browserSessionQueueMaxPending: coerceIntegerEnv(
-        env.MCP_BROWSER_SESSION_QUEUE_MAX_PENDING,
-        CONFIG_DEFAULTS.mcp.browserSessionQueueMaxPending,
-      ),
-      browserSessionQueueMaxPendingPerSession: coerceIntegerEnv(
+      name: env.MCP_SERVER_NAME,
+      version: env.MCP_SERVER_VERSION,
+      toolProfile: env.MCP_TOOL_PROFILE,
+      toolDomains: parseCsvList(env.MCP_TOOL_DOMAINS).map((domain) => domain.toLowerCase()),
+      browserSessionQueueMaxPending: env.MCP_BROWSER_SESSION_QUEUE_MAX_PENDING,
+      browserSessionQueueMaxPendingPerSession:
         env.MCP_BROWSER_SESSION_QUEUE_MAX_PENDING_PER_SESSION,
-        CONFIG_DEFAULTS.mcp.browserSessionQueueMaxPendingPerSession,
-      ),
-      browserSessionQueueWaitTimeoutMs: coerceIntegerEnv(
-        env.MCP_BROWSER_SESSION_QUEUE_WAIT_TIMEOUT_MS,
-        CONFIG_DEFAULTS.mcp.browserSessionQueueWaitTimeoutMs,
-      ),
-      browserSessionSchedulerQuantumMs: coerceIntegerEnv(
-        env.MCP_BROWSER_SESSION_SCHEDULER_QUANTUM_MS,
-        CONFIG_DEFAULTS.mcp.browserSessionSchedulerQuantumMs,
-      ),
-      browserSessionSchedulerAgingMs: coerceIntegerEnv(
-        env.MCP_BROWSER_SESSION_SCHEDULER_AGING_MS,
-        CONFIG_DEFAULTS.mcp.browserSessionSchedulerAgingMs,
-      ),
-      browserSessionExpectedConcurrency: coerceIntegerEnv(
-        env.MCP_BROWSER_SESSION_EXPECTED_CONCURRENCY,
-        CONFIG_DEFAULTS.mcp.browserSessionExpectedConcurrency,
-      ),
-      browserSessionReservedPendingPerSession: coerceIntegerEnv(
-        env.MCP_BROWSER_SESSION_RESERVED_PENDING_PER_SESSION,
-        CONFIG_DEFAULTS.mcp.browserSessionReservedPendingPerSession,
-      ),
-      browserSessionCostEwmaAlpha: coerceFloatEnv(
-        env.MCP_BROWSER_SESSION_COST_EWMA_ALPHA,
-        CONFIG_DEFAULTS.mcp.browserSessionCostEwmaAlpha,
-      ),
+      browserSessionQueueWaitTimeoutMs: env.MCP_BROWSER_SESSION_QUEUE_WAIT_TIMEOUT_MS,
+      browserSessionSchedulerQuantumMs: env.MCP_BROWSER_SESSION_SCHEDULER_QUANTUM_MS,
+      browserSessionSchedulerAgingMs: env.MCP_BROWSER_SESSION_SCHEDULER_AGING_MS,
+      browserSessionExpectedConcurrency: env.MCP_BROWSER_SESSION_EXPECTED_CONCURRENCY,
+      browserSessionReservedPendingPerSession: env.MCP_BROWSER_SESSION_RESERVED_PENDING_PER_SESSION,
+      browserSessionCostEwmaAlpha: env.MCP_BROWSER_SESSION_COST_EWMA_ALPHA,
       browserFleetWorkerId,
       browserFleetWorkers,
-      browserFleetVirtualNodes: coerceIntegerEnv(
-        env.MCP_BROWSER_FLEET_VIRTUAL_NODES,
-        CONFIG_DEFAULTS.mcp.browserFleetVirtualNodes,
-      ),
-      browserFleetLeaseTtlMs: coerceIntegerEnv(
-        env.MCP_BROWSER_FLEET_LEASE_TTL_MS,
-        CONFIG_DEFAULTS.mcp.browserFleetLeaseTtlMs,
-      ),
-      browserFleetMaxLocalLeases: coerceIntegerEnv(
-        env.MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
-        CONFIG_DEFAULTS.mcp.browserFleetMaxLocalLeases,
-      ),
+      browserFleetVirtualNodes: env.MCP_BROWSER_FLEET_VIRTUAL_NODES,
+      browserFleetLeaseTtlMs: env.MCP_BROWSER_FLEET_LEASE_TTL_MS,
+      browserFleetMaxLocalLeases: env.MCP_BROWSER_FLEET_MAX_LOCAL_LEASES,
     },
     cache: {
-      enabled: coerceBooleanEnv(env.ENABLE_CACHE, CONFIG_DEFAULTS.cache.enabled),
+      enabled: env.ENABLE_CACHE,
       dir: absoluteCacheDir,
-      ttl: coerceIntegerEnv(env.CACHE_TTL, CONFIG_DEFAULTS.cache.ttl),
+      ttl: env.CACHE_TTL,
     },
     paths,
     performance: {
-      maxConcurrentAnalysis: coerceIntegerEnv(
-        env.MAX_CONCURRENT_ANALYSIS,
-        CONFIG_DEFAULTS.performance.maxConcurrentAnalysis,
-      ),
-      maxCodeSizeMB: coerceIntegerEnv(
-        env.MAX_CODE_SIZE_MB,
-        CONFIG_DEFAULTS.performance.maxCodeSizeMB,
-      ),
+      maxConcurrentAnalysis: env.MAX_CONCURRENT_ANALYSIS,
+      maxCodeSizeMB: env.MAX_CODE_SIZE_MB,
     },
     offloader: {
-      detailThreshold: coerceIntegerEnv(
-        env.OFFLOADER_DETAIL_THRESHOLD,
-        CONFIG_DEFAULTS.offloader.detailThreshold,
-      ),
-      fileThreshold: coerceIntegerEnv(
-        env.OFFLOADER_FILE_THRESHOLD,
-        CONFIG_DEFAULTS.offloader.fileThreshold,
-      ),
-      outputDir: stringEnv(env.OFFLOADER_OUTPUT_DIR, CONFIG_DEFAULTS.offloader.outputDir),
+      detailThreshold: env.OFFLOADER_DETAIL_THRESHOLD,
+      fileThreshold: env.OFFLOADER_FILE_THRESHOLD,
+      outputDir: env.OFFLOADER_OUTPUT_DIR,
       excludeTools: parseCsvList(env.OFFLOADER_EXCLUDE_TOOLS),
     },
     reverseEngineering: buildReverseEngineeringConfig(env),
     search,
+    extensions: {
+      registryBaseUrl: env.EXTENSION_REGISTRY_BASE_URL,
+      pluginRoots: parseCsvList(env.MCP_PLUGIN_ROOTS),
+      workflowRoots: parseCsvList(env.MCP_WORKFLOW_ROOTS),
+      allowedDigests: parseCsvList(env.MCP_PLUGIN_ALLOWED_DIGESTS).map((digest) =>
+        digest.toLowerCase().replace(/^0x/, ''),
+      ),
+      signatureRequired: pluginSignatureRequired,
+      strictLoad: pluginStrictLoad,
+    },
+    captcha: {
+      provider: env.CAPTCHA_PROVIDER.toLowerCase(),
+      apiKey: env.CAPTCHA_API_KEY,
+      solverBaseUrl: env.CAPTCHA_SOLVER_BASE_URL ?? env.CAPTCHA_2CAPTCHA_BASE_URL,
+      antiCaptchaBaseUrl: env.CAPTCHA_ANTICAPTCHA_BASE_URL,
+      capSolverBaseUrl: env.CAPTCHA_CAPSOLVER_BASE_URL,
+    },
   };
 }
 
 export function validateConfig(config: Config): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
 
+  if (config.server.port < 1 || config.server.port > 65_535) {
+    errors.push('server.port must be between 1 and 65535');
+  }
+  const safeLocalHosts = new Set(['127.0.0.1', 'localhost', '::1']);
+  if (
+    !safeLocalHosts.has(config.server.host) &&
+    !config.server.authToken &&
+    !config.server.allowInsecure
+  ) {
+    errors.push(
+      'server.authToken is required for non-localhost bindings unless allowInsecure is enabled',
+    );
+  }
+  if (config.server.http.requestTimeoutMs < 1) {
+    errors.push('server.http.requestTimeoutMs must be at least 1');
+  }
+  if (config.server.http.headersTimeoutMs < 1) {
+    errors.push('server.http.headersTimeoutMs must be at least 1');
+  }
+  if (config.server.http.keepAliveTimeoutMs < 1) {
+    errors.push('server.http.keepAliveTimeoutMs must be at least 1');
+  }
+  if (config.server.http.forceCloseTimeoutMs < 1) {
+    errors.push('server.http.forceCloseTimeoutMs must be at least 1');
+  }
+  if (config.server.http.maxBodyBytes < 1) {
+    errors.push('server.http.maxBodyBytes must be at least 1');
+  }
+  if (config.server.http.rateLimitWindowMs < 1) {
+    errors.push('server.http.rateLimitWindowMs must be at least 1');
+  }
+  if (config.server.http.rateLimitMax < 1) {
+    errors.push('server.http.rateLimitMax must be at least 1');
+  }
+  if (config.server.http.maxInFlight < 1) {
+    errors.push('server.http.maxInFlight must be at least 1');
+  }
+  if (config.server.http.maxSseInFlight < 1) {
+    errors.push('server.http.maxSseInFlight must be at least 1');
+  }
+
   if (config.mcp.browserSessionQueueMaxPending < 1) {
     errors.push('mcp.browserSessionQueueMaxPending must be at least 1');
+  } else if (config.mcp.browserSessionQueueMaxPending > 100_000) {
+    errors.push('mcp.browserSessionQueueMaxPending must be at most 100000');
   }
 
   if (config.mcp.browserSessionQueueMaxPendingPerSession < 1) {
     errors.push('mcp.browserSessionQueueMaxPendingPerSession must be at least 1');
+  } else if (config.mcp.browserSessionQueueMaxPendingPerSession > 100_000) {
+    errors.push('mcp.browserSessionQueueMaxPendingPerSession must be at most 100000');
   } else if (
     config.mcp.browserSessionQueueMaxPendingPerSession > config.mcp.browserSessionQueueMaxPending
   ) {
@@ -1152,14 +1085,20 @@ export function validateConfig(config: Config): { valid: boolean; errors: string
 
   if (config.mcp.browserSessionQueueWaitTimeoutMs < 1) {
     errors.push('mcp.browserSessionQueueWaitTimeoutMs must be at least 1');
+  } else if (config.mcp.browserSessionQueueWaitTimeoutMs > 3_600_000) {
+    errors.push('mcp.browserSessionQueueWaitTimeoutMs must be at most 3600000');
   }
 
   if (config.mcp.browserSessionSchedulerQuantumMs < 1) {
     errors.push('mcp.browserSessionSchedulerQuantumMs must be at least 1');
+  } else if (config.mcp.browserSessionSchedulerQuantumMs > 60_000) {
+    errors.push('mcp.browserSessionSchedulerQuantumMs must be at most 60000');
   }
 
   if (config.mcp.browserSessionSchedulerAgingMs < 1) {
     errors.push('mcp.browserSessionSchedulerAgingMs must be at least 1');
+  } else if (config.mcp.browserSessionSchedulerAgingMs > 3_600_000) {
+    errors.push('mcp.browserSessionSchedulerAgingMs must be at most 3600000');
   } else if (
     config.mcp.browserSessionSchedulerAgingMs >= config.mcp.browserSessionQueueWaitTimeoutMs
   ) {
@@ -1171,10 +1110,14 @@ export function validateConfig(config: Config): { valid: boolean; errors: string
 
   if (config.mcp.browserSessionExpectedConcurrency < 1) {
     errors.push('mcp.browserSessionExpectedConcurrency must be at least 1');
+  } else if (config.mcp.browserSessionExpectedConcurrency > 10_000) {
+    errors.push('mcp.browserSessionExpectedConcurrency must be at most 10000');
   }
 
   if (config.mcp.browserSessionReservedPendingPerSession < 0) {
     errors.push('mcp.browserSessionReservedPendingPerSession must not be negative');
+  } else if (config.mcp.browserSessionReservedPendingPerSession > 10_000) {
+    errors.push('mcp.browserSessionReservedPendingPerSession must be at most 10000');
   } else if (
     config.mcp.browserSessionExpectedConcurrency *
       config.mcp.browserSessionReservedPendingPerSession >
@@ -1202,28 +1145,77 @@ export function validateConfig(config: Config): { valid: boolean; errors: string
   }
   if (config.mcp.browserFleetVirtualNodes < 1) {
     errors.push('mcp.browserFleetVirtualNodes must be at least 1');
+  } else if (config.mcp.browserFleetVirtualNodes > 4096) {
+    errors.push('mcp.browserFleetVirtualNodes must be at most 4096');
   }
   if (config.mcp.browserFleetLeaseTtlMs <= config.mcp.browserSessionQueueWaitTimeoutMs) {
     errors.push('mcp.browserFleetLeaseTtlMs must exceed mcp.browserSessionQueueWaitTimeoutMs');
   }
   if (config.mcp.browserFleetMaxLocalLeases < 1) {
     errors.push('mcp.browserFleetMaxLocalLeases must be at least 1');
+  } else if (config.mcp.browserFleetMaxLocalLeases > 1_000_000) {
+    errors.push('mcp.browserFleetMaxLocalLeases must be at most 1000000');
   }
 
   if (config.performance.maxConcurrentAnalysis < 1) {
     errors.push('maxConcurrentAnalysis must be at least 1');
+  } else if (config.performance.maxConcurrentAnalysis > 32) {
+    errors.push('maxConcurrentAnalysis must be at most 32');
   }
 
   if (config.performance.maxCodeSizeMB < 1) {
     errors.push('maxCodeSizeMB must be at least 1');
+  } else if (config.performance.maxCodeSizeMB > 500) {
+    errors.push('maxCodeSizeMB must be at most 500');
   }
 
   if (config.puppeteer.timeout < 1000) {
     errors.push('puppeteer.timeout must be at least 1000ms');
+  } else if (config.puppeteer.timeout > 300_000) {
+    errors.push('puppeteer.timeout must be at most 300000ms');
   }
 
   if (config.cache.ttl < 0) {
     errors.push('cache.ttl must be non-negative');
+  }
+
+  if ((config.offloader?.detailThreshold ?? 1) < 1) {
+    errors.push('offloader.detailThreshold must be at least 1');
+  }
+  if ((config.offloader?.fileThreshold ?? 1) < 1) {
+    errors.push('offloader.fileThreshold must be at least 1');
+  } else if (
+    config.offloader?.detailThreshold !== undefined &&
+    config.offloader.fileThreshold !== undefined &&
+    config.offloader.fileThreshold < config.offloader.detailThreshold
+  ) {
+    errors.push('offloader.fileThreshold must not be less than offloader.detailThreshold');
+  }
+
+  const reverse = config.reverseEngineering;
+  if (reverse.transformWorkbench.defaultPreviewBytes > reverse.transformWorkbench.maxPreviewBytes) {
+    errors.push('reverseEngineering default preview must not exceed max preview');
+  }
+  if (reverse.apk.staticTriageMinEntries > reverse.apk.staticTriageDefaultEntries) {
+    errors.push('reverseEngineering APK minimum entries must not exceed the default');
+  }
+  if (reverse.apk.staticTriageDefaultEntries > reverse.apk.staticTriageMaxEntries) {
+    errors.push('reverseEngineering APK default entries must not exceed the maximum');
+  }
+  if (reverse.apk.dexIntakeDefaultDexFiles > reverse.apk.dexIntakeMaxDexFiles) {
+    errors.push('reverseEngineering APK default DEX files must not exceed the maximum');
+  }
+  if (reverse.dex.scanDefaultMaxHits > reverse.dex.scanMaxHits) {
+    errors.push('reverseEngineering DEX default hits must not exceed the maximum');
+  }
+  if (reverse.dex.artifactDefaultLimit > reverse.dex.artifactMaxLimit) {
+    errors.push('reverseEngineering DEX default artifact limit must not exceed the maximum');
+  }
+  if (
+    config.search.vectorCosineWeight !== undefined &&
+    (config.search.vectorCosineWeight < 0 || config.search.vectorCosineWeight > 10)
+  ) {
+    errors.push('search.vectorCosineWeight must be between 0 and 10');
   }
 
   for (const profile of config.search.queryCategoryProfiles) {

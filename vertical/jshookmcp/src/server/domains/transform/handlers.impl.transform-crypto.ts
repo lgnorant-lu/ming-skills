@@ -78,9 +78,13 @@ export class TransformToolHandlersCrypto extends TransformToolHandlersOps {
 
             if (topValue && typeof topValue === 'object') {
               const nestedObj = topValue as Record<string, unknown>;
-              const nestedKeys = Object.keys(nestedObj).slice(0, 40);
-              for (const nestedKey of nestedKeys) {
-                pushCandidate('window.' + key + '.' + nestedKey, nestedObj[nestedKey]);
+              try {
+                const nestedKeys = Object.keys(nestedObj).slice(0, 40);
+                for (const nestedKey of nestedKeys) {
+                  pushCandidate('window.' + key + '.' + nestedKey, nestedObj[nestedKey]);
+                }
+              } catch {
+                // Skip globals whose ownKeys enumeration throws (hostile proxies, exotic objects).
               }
             }
           }
@@ -161,7 +165,10 @@ export class TransformToolHandlersCrypto extends TransformToolHandlersOps {
               typeof depValue === 'number' ||
               typeof depValue === 'boolean'
             ) {
-              dependencySnippets.push('const ' + depName + ' = ' + JSON.stringify(depValue) + ';');
+              const serialized = JSON.stringify(depValue);
+              if (serialized && serialized.length < 4000) {
+                dependencySnippets.push('const ' + depName + ' = ' + serialized + ';');
+              }
               continue;
             }
 

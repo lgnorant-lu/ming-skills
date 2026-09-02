@@ -45,7 +45,7 @@ export class InstrumentBinaryHandlers extends ExternalToolHandlersBase {
 
     // 4. Reassemble to a wasm binary via wat2wasm.
     const outTarget = outputPath
-      ? { absolutePath: validateOutputPath(outputPath), displayPath: outputPath }
+      ? { absolutePath: await validateOutputPath(outputPath), displayPath: outputPath }
       : await resolveArtifactPath({
           category: 'wasm',
           toolName: 'wasm-instrument-binary',

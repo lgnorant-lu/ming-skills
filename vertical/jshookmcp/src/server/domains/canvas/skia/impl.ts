@@ -59,7 +59,7 @@ export class SkiaCaptureHandlers {
       | undefined;
     if (sceneTree) {
       void this.deps.eventBus?.emit('skia:scene_captured', {
-        canvasId: ((args as Record<string, unknown>).canvasId as string) ?? 'auto',
+        canvasId: (args.canvasId as string) ?? 'auto',
         nodeCount: (sceneTree.layers?.length ?? 0) + (sceneTree.drawCommands?.length ?? 0),
         timestamp: new Date().toISOString(),
       });

@@ -47,6 +47,7 @@ vi.mock('@server/registry/index', () => ({
       },
     },
   ]),
+  onRegistryInvalidate: vi.fn(),
 }));
 
 describe('buildPrerequisiteCheck', () => {
